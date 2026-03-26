@@ -1,0 +1,67 @@
+pipeline:
+  name: ecw_data_pipeline
+  description: "Example multi-tenant ETL pipeline for ECW"
+  schedule: "0 2 * * *"  # Run daily at 2 AM
+  retries: 1
+  timeout: 7200  # 2 hours max
+  variables:
+    environment: "production"
+    data_source: "ecw_api"
+
+  tenants:
+    - practice1
+    - practice2
+    - practice3
+
+  steps:
+    - name: extract_appointments
+      type: python
+      function: "pipelines.extract_appointments.main"
+      retries: 3
+      retry_delay: 60
+      timeout: 1800
+      depends_on: []
+
+    - name: extract_patients
+      type: python
+      function: "pipelines.extract_patients.main"
+      retries: 3
+      retry_delay: 60
+      timeout: 1800
+      depends_on: []
+
+    - name: transform_data
+      type: shell
+      command: "python pipelines/transform.py"
+      retries: 2
+      retry_delay: 120
+      depends_on:
+        - extract_appointments
+        - extract_patients
+
+    - name: validate_data
+      type: dbt
+      command: "test"
+      select: "tag:validation"
+      retries: 1
+      depends_on:
+        - transform_data
+
+    - name: load_to_warehouse
+      type: dbt
+      command: "run"
+      models:
+        - "staging"
+        - "intermediate"
+        - "marts"
+      retries: 2
+      retry_delay: 120
+      depends_on:
+        - validate_data
+
+    - name: send_report
+      type: python
+      function: "pipelines.report.send_completion_report"
+      retries: 1
+      depends_on:
+        - load_to_warehouse

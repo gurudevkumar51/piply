@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h1 class="mb-3">Runs</h1>
+        <p class="text-muted">View and manage pipeline executions</p>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Pipeline</th>
+                                <th>Tenant</th>
+                                <th>Status</th>
+                                <th>Started</th>
+                                <th>Duration</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="runs-table">
+                            <tr>
+                                <td colspan="7" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function loadRuns() {
+        try {
+            const response = await axios.get('/api/runs?limit=100');
+            const runs = response.data;
+
+            const table = document.getElementById('runs-table');
+            if (runs.length === 0) {
+                table.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No runs yet</td></tr>';
+                return;
+            }
+
+            table.innerHTML = runs.map(run => `
+                <tr>
+                    <td><a href="/runs/${run.id}" class="text-decoration-none">#${run.id}</a></td>
+                    <td><strong>${run.pipeline_name}</strong></td>
+                    <td><span class="tenant-badge">${run.tenant || 'N/A'}</span></td>
+                    <td><span class="status-badge status-${run.status}">${run.status}</span></td>
+                    <td>${new Date(run.started_at).toLocaleString()}</td>
+                    <td>${run.completed_at ? formatDuration(run.started_at, run.completed_at) : 'Running...'}</td>
+                    <td>
+                        <a href="/runs/${run.id}" class="btn btn-sm btn-outline-primary">View</a>
+                        {% if run.status == 'failed' %}
+                        <button class="btn btn-sm btn-outline-warning" onclick="retryRun(${run.id})">Retry</button>
+                        {% endif %}
+                    </td>
+                </tr>
+            `).join('');
+        } catch (error) {
+            console.error('Error loading runs:', error);
+        }
+    }
+
+    function formatDuration(start, end) {
+        const startDate = new Date(start);
+        const endDate = new Date(end);
+        const diffMs = endDate - startDate;
+        const diffSecs = Math.floor(diffMs / 1000);
+        if (diffSecs < 60) return diffSecs + 's';
+        const diffMins = Math.floor(diffSecs / 60);
+        if (diffMins < 60) return diffMins + 'm ' + (diffSecs % 60) + 's';
+        const diffHours = Math.floor(diffMins / 60);
+        return diffHours + 'h ' + (diffMins % 60) + 'm';
+    }
+
+    function retryRun(runId) {
+        if (confirm(`Retry run #${runId}?`)) {
+            window.location.href = `/runs/${runId}/retry`;
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', loadRuns);
+</script>
+{% endblock %}

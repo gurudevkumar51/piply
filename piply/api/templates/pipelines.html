@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h1 class="mb-3">Pipelines</h1>
+        <p class="text-muted">Manage and view your data pipelines</p>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Steps</th>
+                                <th>Tenants</th>
+                                <th>Schedule</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pipelines-table">
+                            <tr>
+                                <td colspan="5" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function loadPipelines() {
+        try {
+            const response = await axios.get('/api/pipelines');
+            const pipelines = response.data;
+
+            const table = document.getElementById('pipelines-table');
+            if (pipelines.length === 0) {
+                table.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No pipelines found. Create one to get started!</td></tr>';
+                return;
+            }
+
+            table.innerHTML = pipelines.map(p => `
+                <tr>
+                    <td>
+                        <strong>${p.name}</strong>
+                        <div class="text-muted small">${p.steps_count} steps</div>
+                    </td>
+                    <td>${p.steps_count}</td>
+                    <td>${p.tenants && p.tenants.length > 0 ? p.tenants.join(', ') : 'None'}</td>
+                    <td>${p.schedule || 'No schedule'}</td>
+                    <td>
+                        <a href="/pipelines/${encodeURIComponent(p.name)}" class="btn btn-sm btn-outline-primary">View DAG</a>
+                        <button class="btn btn-sm btn-outline-success" onclick="quickRun('${p.name}')">Run</button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch (error) {
+            console.error('Error loading pipelines:', error);
+        }
+    }
+
+    function quickRun(pipelineName) {
+        if (confirm(`Run pipeline "${pipelineName}"?`)) {
+            axios.post('/api/runs', {
+                pipeline_name: pipelineName,
+                trigger_type: 'manual'
+            }).then(response => {
+                alert(`Run started! Run ID: ${response.data.id}`);
+                setTimeout(() => window.location.href = `/runs/${response.data.id}`, 1000);
+            }).catch(error => {
+                alert('Error: ' + (error.response?.data?.detail || error.message));
+            });
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', loadPipelines);
+</script>
+{% endblock %}

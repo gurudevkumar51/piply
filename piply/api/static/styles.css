@@ -1,0 +1,268 @@
+/* Custom styles for Piply UI */
+
+:root {
+    --primary: #4f46e5;
+    --success: #10b981;
+    --danger: #ef4444;
+    --warning: #f59e0b;
+    --info: #3b82f6;
+}
+
+body {
+    background-color: #f8fafc;
+}
+
+.navbar-brand {
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+
+/* Card hover effects */
+.card {
+    transition: box-shadow 0.2s ease;
+}
+
+.card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Status badges */
+.status-badge {
+    padding: 0.35rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.status-running {
+    background-color: #dbeafe !important;
+    color: #1e40af !important;
+}
+
+.status-success {
+    background-color: #d1fae5 !important;
+    color: #065f46 !important;
+}
+
+.status-failed {
+    background-color: #fee2e2 !important;
+    color: #991b1b !important;
+}
+
+.status-pending {
+    background-color: #fef3c7 !important;
+    color: #92400e !important;
+}
+
+.status-skipped {
+    background-color: #e5e7eb !important;
+    color: #374151 !important;
+}
+
+/* DAG node styles */
+.dag-node {
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.dag-node:hover {
+    filter: brightness(0.95);
+}
+
+.dag-node.success {
+    border-color: var(--success) !important;
+    background-color: #f0fdf4 !important;
+}
+
+.dag-node.failed {
+    border-color: var(--danger) !important;
+    background-color: #fef2f2 !important;
+}
+
+.dag-node.running {
+    border-color: var(--info) !important;
+    background-color: #eff6ff !important;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4);
+    }
+
+    50% {
+        box-shadow: 0 0 0 8px rgba(59, 130, 246, 0);
+    }
+}
+
+/* Log container */
+.log-container {
+    background-color: #1e293b !important;
+    color: #e2e8f0 !important;
+    border-radius: 8px !important;
+    padding: 1rem !important;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace !important;
+    font-size: 0.875rem !important;
+    line-height: 1.5 !important;
+    max-height: 500px !important;
+    overflow-y: auto !important;
+}
+
+.log-entry {
+    margin-bottom: 0.125rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.log-timestamp {
+    color: #64748b;
+    margin-right: 0.5rem;
+}
+
+.log-level-INFO {
+    color: #60a5fa !important;
+}
+
+.log-level-WARNING {
+    color: #fbbf24 !important;
+}
+
+.log-level-ERROR {
+    color: #f87171 !important;
+}
+
+.log-level-DEBUG {
+    color: #94a3b8 !important;
+}
+
+/* Tenant badge */
+.tenant-badge {
+    background-color: #f1f5f9;
+    color: #475569;
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+/* Stat cards */
+.stat-card {
+    border: none;
+    border-radius: 12px;
+    padding: 1.5rem;
+    background: white;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--primary);
+    margin: 0.5rem 0;
+}
+
+.stat-label {
+    color: #64748b;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0;
+}
+
+/* Buttons */
+.btn-primary {
+    background: linear-gradient(135deg, var(--primary) 0%, #7c3aed 100%);
+    border: none;
+    padding: 0.5rem 1.5rem;
+    border-radius: 8px;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.btn-primary:hover {
+    background: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+}
+
+/* Table improvements */
+.table-hover tbody tr:hover {
+    background-color: #f8fafc;
+}
+
+.table thead th {
+    border-bottom: 2px solid #e2e8f0;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    color: #64748b;
+}
+
+/* Breadcrumb */
+.breadcrumb {
+    background: transparent;
+    padding: 0;
+    margin-bottom: 1rem;
+}
+
+.breadcrumb-item a {
+    text-decoration: none;
+    color: var(--primary);
+}
+
+.breadcrumb-item.active {
+    color: #64748b;
+}
+
+/* Loading spinner */
+.spinner-border {
+    width: 3rem;
+    height: 3rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .stat-value {
+        font-size: 1.5rem;
+    }
+
+    .dag-node {
+        min-width: 120px;
+        padding: 0.75rem;
+    }
+
+    .btn-group-sm .btn {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.875rem;
+    }
+}
+
+/* Scrollbar styling for log container */
+.log-container::-webkit-scrollbar {
+    width: 8px;
+}
+
+.log-container::-webkit-scrollbar-track {
+    background: #334155;
+    border-radius: 4px;
+}
+
+.log-container::-webkit-scrollbar-thumb {
+    background: #64748b;
+    border-radius: 4px;
+}
+
+.log-container::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}

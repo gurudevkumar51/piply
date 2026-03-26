@@ -1,0 +1,300 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h1 class="mb-3">Dashboard</h1>
+        <p class="text-muted">Overview of your pipelines and executions</p>
+    </div>
+</div>
+
+<!-- Stats Cards -->
+<div class="row mb-4" id="stats-container">
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="stat-card">
+            <div class="stat-label">Total Pipelines</div>
+            <div class="stat-value" id="total-pipelines">-</div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="stat-card">
+            <div class="stat-label">Total Runs</div>
+            <div class="stat-value" id="total-runs">-</div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="stat-card">
+            <div class="stat-label">Running</div>
+            <div class="stat-value text-primary" id="running-runs">-</div>
+        </div>
+    </div>
+    <div class="col-md-3 col-sm-6 mb-3">
+        <div class="stat-card">
+            <div class="stat-label">Success Rate</div>
+            <div class="stat-value text-success" id="success-rate">-</div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Runs -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Recent Runs</span>
+                <a href="/runs" class="btn btn-sm btn-outline-primary">View All</a>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Pipeline</th>
+                                <th>Tenant</th>
+                                <th>Status</th>
+                                <th>Started</th>
+                                <th>Duration</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recent-runs-table">
+                            <tr>
+                                <td colspan="7" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tenant Summary -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                Tenant Summary
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Tenant</th>
+                                <th>Total Runs</th>
+                                <th>Success</th>
+                                <th>Failed</th>
+                                <th>Success Rate</th>
+                                <th>Last Run</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tenant-summary-table">
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">Quick Actions</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <button class="btn btn-primary w-100" onclick="showRunModal()">
+                            <i class="bi bi-play-fill"></i> Run Pipeline
+                        </button>
+                    </div>
+                    <div class="col-md-3">
+                        <a href="/pipelines" class="btn btn-outline-primary w-100">
+                            <i class="bi bi-diagram-3"></i> View Pipelines
+                        </a>
+                    </div>
+                    <div class="col-md-3">
+                        <a href="/pipelines/new" class="btn btn-outline-success w-100">
+                            <i class="bi bi-plus-circle"></i> Create Pipeline
+                        </a>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-outline-secondary w-100" onclick="refreshDashboard()">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Run Modal -->
+<div class="modal fade" id="runModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Run Pipeline</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="run-form">
+                    <div class="mb-3">
+                        <label class="form-label">Pipeline</label>
+                        <select class="form-select" id="run-pipeline" required>
+                            <option value="">Select a pipeline...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Tenant (optional)</label>
+                        <input type="text" class="form-control" id="run-tenant" placeholder="e.g., client_a">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Trigger Type</label>
+                        <select class="form-select" id="run-trigger-type">
+                            <option value="manual">Manual</option>
+                            <option value="schedule">Schedule</option>
+                            <option value="api">API</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="submitRun()">Run Pipeline</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Load dashboard data
+    async function loadDashboard() {
+        try {
+            const [statsRes, runsRes, tenantsRes, pipelinesRes] = await Promise.all([
+                axios.get('/api/dashboard'),
+                axios.get('/api/runs?limit=10'),
+                axios.get('/api/tenants'),
+                axios.get('/api/pipelines')
+            ]);
+
+            // Update stats
+            const stats = statsRes.data;
+            document.getElementById('total-pipelines').textContent = stats.total_pipelines;
+            document.getElementById('total-runs').textContent = stats.total_runs;
+            document.getElementById('running-runs').textContent = stats.running;
+            const successRate = stats.total_runs > 0
+                ? ((stats.success / stats.total_runs) * 100).toFixed(1) + '%'
+                : '0%';
+            document.getElementById('success-rate').textContent = successRate;
+
+            // Populate pipeline select
+            const pipelineSelect = document.getElementById('run-pipeline');
+            pipelinesRes.data.forEach(p => {
+                const option = document.createElement('option');
+                option.value = p.name;
+                option.textContent = p.name;
+                pipelineSelect.appendChild(option);
+            });
+
+            // Recent runs table
+            const runsTable = document.getElementById('recent-runs-table');
+            if (runsRes.data.length === 0) {
+                runsTable.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No runs yet</td></tr>';
+            } else {
+                runsTable.innerHTML = runsRes.data.map(run => `
+                    <tr>
+                        <td>#${run.id}</td>
+                        <td>${run.pipeline_name}</td>
+                        <td><span class="tenant-badge">${run.tenant || 'N/A'}</span></td>
+                        <td><span class="status-badge status-${run.status}">${run.status}</span></td>
+                        <td>${new Date(run.started_at).toLocaleString()}</td>
+                        <td>${run.completed_at ? formatDuration(run.started_at, run.completed_at) : '-'}</td>
+                        <td>
+                            <a href="/runs/${run.id}" class="btn btn-sm btn-outline-primary">View</a>
+                        </td>
+                    </tr>
+                `).join('');
+            }
+
+            // Tenant summary table
+            const tenantTable = document.getElementById('tenant-summary-table');
+            if (tenantsRes.data.length === 0) {
+                tenantTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No tenant data</td></tr>';
+            } else {
+                tenantTable.innerHTML = tenantsRes.data.map(t => `
+                    <tr>
+                        <td>${t.name}</td>
+                        <td>${t.run_count}</td>
+                        <td>${t.successful || 0}</td>
+                        <td>${t.failed || 0}</td>
+                        <td>${t.success_rate ? (t.success_rate * 100).toFixed(1) + '%' : '0%'}</td>
+                        <td>${t.last_run ? new Date(t.last_run).toLocaleString() : 'Never'}</td>
+                    </tr>
+                `).join('');
+            }
+
+        } catch (error) {
+            console.error('Error loading dashboard:', error);
+        }
+    }
+
+    function formatDuration(start, end) {
+        const startDate = new Date(start);
+        const endDate = new Date(end);
+        const diffMs = endDate - startDate;
+        const diffSecs = Math.floor(diffMs / 1000);
+        if (diffSecs < 60) return diffSecs + 's';
+        const diffMins = Math.floor(diffSecs / 60);
+        if (diffMins < 60) return diffMins + 'm ' + (diffSecs % 60) + 's';
+        const diffHours = Math.floor(diffMins / 60);
+        return diffHours + 'h ' + (diffMins % 60) + 'm';
+    }
+
+    function showRunModal() {
+        const modal = new bootstrap.Modal(document.getElementById('runModal'));
+        modal.show();
+    }
+
+    async function submitRun() {
+        const pipeline = document.getElementById('run-pipeline').value;
+        const tenant = document.getElementById('run-tenant').value || null;
+        const triggerType = document.getElementById('run-trigger-type').value;
+
+        if (!pipeline) {
+            alert('Please select a pipeline');
+            return;
+        }
+
+        try {
+            const response = await axios.post('/api/runs', {
+                pipeline_name: pipeline,
+                tenant: tenant,
+                trigger_type: triggerType
+            });
+
+            alert(`Run started! Run ID: ${response.data.id}`);
+            bootstrap.Modal.getInstance(document.getElementById('runModal')).hide();
+            setTimeout(loadDashboard, 2000); // Refresh after 2 seconds
+        } catch (error) {
+            alert('Error starting run: ' + (error.response?.data?.detail || error.message));
+        }
+    }
+
+    function refreshDashboard() {
+        loadDashboard();
+    }
+
+    // Load on page load
+    document.addEventListener('DOMContentLoaded', loadDashboard);
+</script>
+{% endblock %}

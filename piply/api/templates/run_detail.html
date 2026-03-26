@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="/">Dashboard</a></li>
+                <li class="breadcrumb-item"><a href="/runs">Runs</a></li>
+                <li class="breadcrumb-item active">Run #{{ run.id }}</li>
+            </ol>
+        </nav>
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h1 class="mb-1">Run #{{ run.id }}</h1>
+                <p class="text-muted mb-0">
+                    Pipeline: <strong>{{ run.pipeline_name }}</strong>
+                    {% if run.tenant %}| Tenant: <strong>{{ run.tenant }}</strong>{% endif %}
+                </p>
+            </div>
+            <div>
+                {% if run.status == 'failed' %}
+                <button class="btn btn-warning" onclick="showRetryModal()">
+                    <i class="bi bi-arrow-repeat"></i> Retry
+                </button>
+                {% endif %}
+                <button class="btn btn-outline-secondary" onclick="refreshPage()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Run Overview -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">Status</div>
+            <div>
+                <span class="status-badge status-{{ run.status }}">{{ run.status }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">Started</div>
+            <div class="stat-value" style="font-size: 1.25rem;">{{ run.started_at|date:'M d, Y H:i' }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">Duration</div>
+            <div class="stat-value" style="font-size: 1.25rem;">
+                {% if run.completed_at %}
+                {{ (run.completed_at - run.started_at)|date:'mm:ss' }}
+                {% else %}
+                Running...
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">Trigger</div>
+            <div class="stat-value" style="font-size: 1.25rem;">{{ run.trigger_type }}</div>
+        </div>
+    </div>
+</div>
+
+<!-- Task Status -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Task Execution Status</span>
+                <span class="badge bg-secondary">{{ tasks|length }} tasks</span>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Task</th>
+                                <th>Status</th>
+                                <th>Started</th>
+                                <th>Completed</th>
+                                <th>Attempt</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for task in tasks %}
+                            <tr
+                                class="table-{{ 'success' if task.status == 'success' else 'danger' if task.status == 'failed' else '' }}">
+                                <td><strong>{{ task.task_name }}</strong></td>
+                                <td>
+                                    <span class="status-badge status-{{ task.status.value }}">
+                                        {{ task.status.value }}
+                                    </span>
+                                </td>
+                                <td>{{ task.started_at|date:'H:i:s' }}</td>
+                                <td>
+                                    {% if task.completed_at %}
+                                    {{ task.completed_at|date:'H:i:s' }}
+                                    {% else %}
+                                    <span class="text-muted">-</span>
+                                    {% endif %}
+                                </td>
+                                <td>{{ task.attempt }}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary"
+                                        onclick="showLogs('{{ task.task_name }}')">
+                                        <i class="bi bi-file-text"></i> Logs
+                                    </button>
+                                    {% if task.status == 'failed' %}
+                                    <button class="btn btn-sm btn-outline-warning"
+                                        onclick="retryTask('{{ task.task_name }}')">
+                                        <i class="bi bi-arrow-repeat"></i> Retry
+                                    </button>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Logs Modal -->
+<div class="modal fade" id="logsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Task Logs: <span id="log-task-name"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="log-container" id="log-content">
+                    Loading logs...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Retry Modal -->
+<div class="modal fade" id="retryModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Retry Pipeline Run</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>How would you like to retry this pipeline?</p>
+                <div class="mb-3">
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="retryMode" id="retryResume" value="resume"
+                            checked>
+                        <label class="form-check-label" for="retryResume">
+                            <strong>Resume</strong> - Continue from failed tasks only
+                        </label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="retryMode" id="retryStartover"
+                            value="startover">
+                        <label class="form-check-label" for="retryStartover">
+                            <strong>Start Over</strong> - Run all tasks from the beginning
+                        </label>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Tenant (optional)</label>
+                    <input type="text" class="form-control" id="retry-tenant"
+                        placeholder="Leave empty to use original tenant">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-warning" onclick="submitRetry()">Retry Pipeline</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const runId = {{ run.id }};
+    const pipelineName = '{{ run.pipeline_name }}';
+
+    async function showLogs(taskName) {
+        const modal = new bootstrap.Modal(document.getElementById('logsModal'));
+        document.getElementById('log-task-name').textContent = taskName;
+        document.getElementById('log-content').innerHTML = '<div class="text-center"><div class="spinner-border text-primary"></div></div>';
+        modal.show();
+
+        try {
+            const response = await axios.get(`/api/runs/${runId}/tasks/${taskName}/logs`);
+            const logs = response.data.logs || 'No logs available';
+            const container = document.getElementById('log-content');
+            container.innerHTML = `<pre>${escapeHtml(logs)}</pre>`;
+        } catch (error) {
+            document.getElementById('log-content').innerHTML = '<div class="alert alert-danger">Failed to load logs</div>';
+        }
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function showRetryModal() {
+        const modal = new bootstrap.Modal(document.getElementById('retryModal'));
+        modal.show();
+    }
+
+    async function submitRetry() {
+        const mode = document.querySelector('input[name="retryMode"]:checked').value;
+        const tenant = document.getElementById('retry-tenant').value || null;
+
+        try {
+            const response = await axios.post('/api/runs/${run.id}/retry', {
+                run_id: {{ run.id }},
+        mode: mode,
+            tenant: tenant
+    });
+
+    alert(`Retry started! New run ID: ${response.data.run_id}`);
+    bootstrap.Modal.getInstance(document.getElementById('retryModal')).hide();
+    setTimeout(() => window.location.href = `/runs/${response.data.run_id}`, 1000);
+        } catch (error) {
+        alert('Error: ' + (error.response?.data?.detail || error.message));
+    }
+    }
+
+    async function retryTask(taskName) {
+        if (!confirm(`Retry task "${taskName}"? This will create a new pipeline run.`)) return;
+        // For now, retry task triggers full pipeline retry
+        showRetryModal();
+    }
+
+    function refreshPage() {
+        window.location.reload();
+    }
+
+    // Auto-refresh every 30 seconds if run is still active
+    let refreshInterval;
+    document.addEventListener('DOMContentLoaded', () => {
+        if ('{{ run.status }}' === 'running') {
+            refreshInterval = setInterval(() => {
+                window.location.reload();
+            }, 30000);
+        }
+    });
+
+    document.addEventListener('beforeunload', () => {
+        if (refreshInterval) clearInterval(refreshInterval);
+    });
+</script>
+{% endblock %}
