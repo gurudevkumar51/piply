@@ -27,9 +27,27 @@ class PipelineResponse(BaseModel):
     tenants: Optional[List[str]]
     schedule: Optional[str]
     created_at: datetime
+    run_count: int = 0
+    last_run: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class StepInfo(BaseModel):
+    """Step information with dependencies."""
+    name: str
+    type: Optional[str]
+    depends_on: List[str] = []
+
+
+class PipelineDetail(BaseModel):
+    """Detailed pipeline information."""
+    name: str
+    config: Dict[str, Any]
+    steps: List[StepInfo]
+    tenants: List[str]
+    recent_runs: List[Any]  # Could be more specific if needed
 
 
 # Run schemas

@@ -32,7 +32,7 @@ pipeline:
   steps:
     - name: extract_data
       type: python
-      function: "extract.main"
+      function: "pipelines.extract.main"
       retries: 2
       retry_delay: 30
 
@@ -86,7 +86,7 @@ def run(
     file: str = typer.Option("piply.yaml", "--file",
                              "-f", help="Path to pipeline YAML"),
     engine: str = typer.Option(
-        "prefect", "--engine", "-e", help="Execution engine (prefect or local)"),
+        "local", "--engine", "-e", help="Execution engine (prefect, local, auto; default: local)"),
     tenant: Optional[str] = typer.Option(
         None, "--tenant", "-t", help="Run for specific tenant only"),
     retry_failed: bool = typer.Option(
@@ -105,17 +105,45 @@ def run(
         pipeline = load_pipeline(file)
 
         # Select engine
-        if engine.lower() == "prefect":
-            eng = PrefectEngine()
-        elif engine.lower() == "local":
+        engine_lower = engine.lower()
+        if engine_lower == "auto":
+            typer.echo("Auto-selecting engine...")
+            try:
+                eng = PrefectEngine()
+                typer.echo("Using Prefect engine")
+            except Exception as e:
+                typer.echo(f"Prefect not available ({e}), using local engine")
+                eng = LocalEngine()
+        elif engine_lower == "prefect":
+            try:
+                eng = PrefectEngine()
+            except Exception as e:
+                typer.echo(f"Warning: Prefect initialization failed: {e}")
+                typer.echo("Falling back to local engine...")
+                eng = LocalEngine()
+        elif engine_lower == "local":
             eng = LocalEngine()
         else:
             typer.echo(
-                f"Error: Unknown engine '{engine}'. Use 'prefect' or 'local'")
+                f"Error: Unknown engine '{engine}'. Use 'prefect', 'local', or 'auto'")
             raise typer.Exit(1)
 
         # Run pipeline
-        pipeline.run(eng, tenant=tenant, retry_failed=retry_failed)
+        try:
+            pipeline.run(eng, tenant=tenant, retry_failed=retry_failed)
+        except FileNotFoundError as e:
+            # Prefect SSL/certificate errors
+            typer.echo(
+                f"\nError: Prefect encountered a configuration issue: {e}")
+            typer.echo(
+                "This usually means Prefect is trying to connect to a server.")
+            typer.echo("Please use the local engine instead:")
+            typer.echo("  piply run --engine local")
+            raise typer.Exit(1)
+        except Exception as e:
+            typer.echo(f"Error: {e}")
+            logger.exception("Pipeline execution failed")
+            raise typer.Exit(1)
 
     except Exception as e:
         typer.echo(f"Error: {e}")
@@ -277,7 +305,7 @@ def ui(
 ):
     """Start the Piply web UI server."""
     import uvicorn
-    from piply.api.main import app as fastapi_app
+    from piply.api.app import app as fastapi_app
 
     typer.echo(f"Starting Piply UI server on http://{host}:{port}")
     typer.echo("Press Ctrl+C to stop")

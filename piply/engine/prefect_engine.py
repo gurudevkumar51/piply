@@ -1,10 +1,24 @@
-from prefect import flow, task
+import os
+import sys
 from typing import Dict, List
 from piply.core.context import PipelineContext
 from piply.utils.logging import logger
 
+# Configure Prefect to run in local mode BEFORE any Prefect imports
+# These environment variables must be set before Prefect is imported anywhere
+os.environ["PREFECT_TEST_MODE"] = "1"
+os.environ["PREFECT_PROFILE"] = "test"
+os.environ["PREFECT_API_URL"] = "http://localhost:4200/api"
+os.environ["PREFECT_API_KEY"] = ""
+# Disable SSL verification for local mode
+os.environ["PREFECT_SSL_VERIFY"] = "0"
+# Use ephemeral server (no persistence needed)
+os.environ["PREFECT_SERVER_ALLOW_EPHEMERAL_MODE"] = "1"
+
 
 class PrefectEngine:
+    """Prefect execution engine (runs in local/test mode)."""
+
     def run(self, pipeline, retry_failed: bool = False):
         """
         Execute the pipeline as a Prefect flow with DAG support.
@@ -15,6 +29,13 @@ class PrefectEngine:
         """
         logger.info(
             f"Initializing Prefect engine for pipeline: {pipeline.name}")
+
+        # Import prefect here after environment is configured
+        try:
+            from prefect import flow, task
+        except ImportError as e:
+            logger.error(f"Prefect is not installed: {e}")
+            raise ImportError("Please install prefect: pip install prefect")
 
         # Build step name to step mapping
         step_map = {step.name: step for step in pipeline.steps}

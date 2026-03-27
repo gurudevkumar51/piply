@@ -1,0 +1,372 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="/pipelines">Pipelines</a></li>
+                <li class="breadcrumb-item active">{{ pipeline_name }}</li>
+            </ol>
+        </nav>
+        <h1 class="mb-3">{{ pipeline_name }}</h1>
+        <div class="d-flex gap-2 mb-3">
+            <button class="btn btn-primary" onclick="showRunModal()">
+                <i class="bi bi-play-fill"></i> Run Pipeline
+            </button>
+            <button class="btn btn-outline-secondary" onclick="refreshPage()">
+                <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>DAG Visualization</span>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary" onclick="changeLayout('dagre')">Dagre</button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="changeLayout('tree')">Tree</button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="dag-container" class="pipeline-dag" style="min-height: 400px; overflow: auto;">
+                    <div class="text-center text-muted py-5">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading pipeline data...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">Pipeline Configuration</div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <strong>Name:</strong> {{ pipeline_name }}
+                </div>
+                <div class="mb-3">
+                    <strong>Steps:</strong>
+                    <ul class="mb-0" id="pipeline-steps-list">
+                        <li class="text-muted">Loading...</li>
+                    </ul>
+                </div>
+                <div class="mb-3">
+                    <strong>Tenants:</strong>
+                    <span id="pipeline-tenants" class="text-muted">Loading...</span>
+                </div>
+                <div class="mb-0">
+                    <strong>Schedule:</strong>
+                    <span id="pipeline-schedule" class="text-muted">Loading...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">Recent Runs</div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Status</th>
+                                <th>Started</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="recent-runs-table">
+                            <tr>
+                                <td colspan="4" class="text-center text-muted">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="runModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Run Pipeline: {{ pipeline_name }}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="run-form">
+                    <div class="mb-3">
+                        <label class="form-label">Tenant (optional)</label>
+                        <select class="form-select" id="run-tenant">
+                            <option value="">All tenants</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Trigger Type</label>
+                        <select class="form-select" id="run-trigger-type">
+                            <option value="manual">Manual</option>
+                            <option value="schedule">Schedule</option>
+                            <option value="api">API</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="submitRun()">Run Pipeline</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/@dagrejs/graphlib@2.1.13/dist/graphlib.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.2/dist/dagre.min.js" defer></script>
+<script defer>
+    const pipelineName = {{ pipeline_name|tojson }};
+    let pipelineData = null;
+    let currentLayout = "dagre";
+
+    function renderDAG(data) {
+        if (!window.graphlib || !window.dagre) {
+            document.getElementById("dag-container").innerHTML =
+                '<div class="alert alert-danger">DAG libraries failed to load.</div>';
+            return;
+        }
+
+        const container = document.getElementById("dag-container");
+        const steps = data.steps || [];
+
+        if (steps.length === 0) {
+            container.innerHTML = '<div class="text-muted">No steps defined</div>';
+            return;
+        }
+
+        const g = new window.graphlib.Graph().setGraph({});
+
+        steps.forEach((step) => {
+            g.setNode(step.name, {
+                label: step.name,
+                type: step.type,
+                width: 160,
+                height: 60
+            });
+        });
+
+        steps.forEach((step) => {
+            (step.depends_on || []).forEach((dep) => {
+                g.setEdge(dep, step.name, {});
+            });
+        });
+
+        const layout = currentLayout === "dagre" ? dagreDagre : dagreTree;
+        layout(g, { rankdir: "LR", nodesep: 30, ranksep: 50 });
+
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.style.width = "100%";
+        svg.style.height = "100%";
+        svg.style.minHeight = "400px";
+
+        const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+        const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+        marker.setAttribute("id", "arrowhead");
+        marker.setAttribute("markerWidth", "10");
+        marker.setAttribute("markerHeight", "7");
+        marker.setAttribute("refX", "9");
+        marker.setAttribute("refY", "3.5");
+        marker.setAttribute("orient", "auto");
+
+        const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        polygon.setAttribute("points", "0 0, 10 3.5, 0 7");
+        polygon.setAttribute("fill", "#94a3b8");
+        marker.appendChild(polygon);
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+
+        g.edges().forEach((edgeRef) => {
+            const edge = g.edge(edgeRef);
+            const points = edge.points || [];
+            if (points.length < 2) {
+                return;
+            }
+
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            let pathData = `M ${points[0].x} ${points[0].y}`;
+            for (let index = 1; index < points.length; index += 1) {
+                pathData += ` L ${points[index].x} ${points[index].y}`;
+            }
+            line.setAttribute("d", pathData);
+            line.setAttribute("class", "dag-edge");
+            line.setAttribute("marker-end", "url(#arrowhead)");
+            svg.appendChild(line);
+        });
+
+        g.nodes().forEach((nodeKey) => {
+            const node = g.node(nodeKey);
+            const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+            group.setAttribute(
+                "transform",
+                `translate(${node.x - node.width / 2}, ${node.y - node.height / 2})`
+            );
+
+            const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+            rect.setAttribute("width", node.width);
+            rect.setAttribute("height", node.height);
+            rect.setAttribute("rx", "8");
+            rect.setAttribute("fill", "white");
+            rect.setAttribute("stroke", "#e2e8f0");
+            rect.setAttribute("stroke-width", "2");
+            rect.setAttribute("class", "dag-node");
+
+            const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            text.setAttribute("x", node.width / 2);
+            text.setAttribute("y", node.height / 2);
+            text.setAttribute("text-anchor", "middle");
+            text.setAttribute("dominant-baseline", "middle");
+            text.setAttribute("font-size", "14");
+            text.setAttribute("font-weight", "500");
+            text.textContent = node.label;
+
+            group.appendChild(rect);
+            group.appendChild(text);
+            svg.appendChild(group);
+        });
+
+        container.innerHTML = "";
+        container.appendChild(svg);
+    }
+
+    function dagreDagre(g, opts) {
+        window.dagre.layout(g, opts);
+    }
+
+    function dagreTree(g, opts) {
+        dagreDagre(g, { ...opts, rankdir: "TB" });
+    }
+
+    function changeLayout(layout) {
+        currentLayout = layout;
+        if (pipelineData) {
+            renderDAG(pipelineData);
+        }
+    }
+
+    function populatePipelineDetails(data) {
+        const stepsList = document.getElementById("pipeline-steps-list");
+        const tenantsEl = document.getElementById("pipeline-tenants");
+        const scheduleEl = document.getElementById("pipeline-schedule");
+        const tenantSelect = document.getElementById("run-tenant");
+
+        stepsList.innerHTML = "";
+        (data.steps || []).forEach((step) => {
+            const item = document.createElement("li");
+            item.textContent = `${step.name} `;
+
+            const badge = document.createElement("span");
+            badge.className = "badge bg-secondary";
+            badge.textContent = step.type || "unknown";
+
+            item.appendChild(badge);
+            stepsList.appendChild(item);
+        });
+
+        if (!stepsList.children.length) {
+            stepsList.innerHTML = '<li class="text-muted">No steps defined</li>';
+        }
+
+        const tenants = data.tenants || [];
+        tenantsEl.textContent = tenants.length ? tenants.join(", ") : "None";
+        tenantsEl.classList.toggle("text-muted", !tenants.length);
+
+        const schedule = data.config?.schedule || "No schedule";
+        scheduleEl.textContent = schedule;
+        scheduleEl.classList.toggle("text-muted", !data.config?.schedule);
+
+        tenantSelect.innerHTML = '<option value="">All tenants</option>';
+        tenants.forEach((tenant) => {
+            const option = document.createElement("option");
+            option.value = tenant;
+            option.textContent = tenant;
+            tenantSelect.appendChild(option);
+        });
+    }
+
+    function loadRecentRuns(runs) {
+        const table = document.getElementById("recent-runs-table");
+        if (!runs || runs.length === 0) {
+            table.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No runs yet</td></tr>';
+            return;
+        }
+
+        table.innerHTML = runs.map((run) => `
+            <tr>
+                <td>#${run.id}</td>
+                <td><span class="status-badge status-${run.status}">${run.status}</span></td>
+                <td>${new Date(run.started_at).toLocaleString()}</td>
+                <td><a href="/runs/${run.id}" class="btn btn-sm btn-outline-primary">Details</a></td>
+            </tr>
+        `).join("");
+    }
+
+    async function loadPipelineData() {
+        try {
+            const response = await axios.get(`/api/pipelines/${encodeURIComponent(pipelineName)}`);
+            pipelineData = response.data;
+            populatePipelineDetails(pipelineData);
+            renderDAG(pipelineData);
+            loadRecentRuns(pipelineData.recent_runs);
+        } catch (error) {
+            document.getElementById("dag-container").innerHTML =
+                `<div class="alert alert-danger">Failed to load pipeline data: ${error.response?.status || error.message}</div>`;
+            document.getElementById("pipeline-steps-list").innerHTML =
+                '<li class="text-danger">Failed to load pipeline steps</li>';
+            document.getElementById("pipeline-tenants").textContent = "Unavailable";
+            document.getElementById("pipeline-schedule").textContent = "Unavailable";
+            document.getElementById("recent-runs-table").innerHTML =
+                '<tr><td colspan="4" class="text-center text-danger">Failed to load recent runs</td></tr>';
+        }
+    }
+
+    function showRunModal() {
+        const modal = new bootstrap.Modal(document.getElementById("runModal"));
+        modal.show();
+    }
+
+    async function submitRun() {
+        const tenant = document.getElementById("run-tenant").value || null;
+        const triggerType = document.getElementById("run-trigger-type").value;
+
+        try {
+            const response = await axios.post("/api/runs", {
+                pipeline_name: pipelineName,
+                tenant: tenant,
+                trigger_type: triggerType
+            });
+
+            alert(`Run started! Run ID: ${response.data.id}`);
+            bootstrap.Modal.getInstance(document.getElementById("runModal")).hide();
+            setTimeout(() => window.location.reload(), 2000);
+        } catch (error) {
+            alert(`Error starting run: ${error.response?.data?.detail || error.message}`);
+        }
+    }
+
+    function refreshPage() {
+        window.location.reload();
+    }
+
+    document.addEventListener("DOMContentLoaded", loadPipelineData);
+</script>
+{% endblock %}

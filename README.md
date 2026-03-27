@@ -72,11 +72,12 @@ pipeline:
 ### 3. Run the pipeline
 
 ```bash
-# Run with Prefect (default)
+# Run with auto engine selection (tries Prefect, falls back to local)
 piply run
 
-# Run with local engine (for testing)
-piply run --engine local
+# Run with specific engine
+piply run --engine prefect   # Use Prefect (requires proper Prefect setup)
+piply run --engine local     # Use local engine (no dependencies)
 
 # Run for a specific tenant
 piply run --tenant tenant1
@@ -229,26 +230,48 @@ piply run --retry-failed
 
 ## Execution Engines
 
-### Prefect (default)
+### Local (default)
 
-Uses Prefect for orchestration. Provides:
+Simple sequential execution. No external dependencies. Perfect for:
+- Quick testing
+- Development
+- Environments without Prefect
+- Most basic pipeline needs
+
+```bash
+piply run --engine local
+```
+
+### Prefect (optional)
+
+Uses Prefect for advanced orchestration. Provides:
 - Flow visualization
 - Scheduling and deployments
 - Error handling and retries
 - Monitoring dashboard
 
-Requires: `prefect` installed (included in dependencies)
+**Note**: Prefect requires proper configuration. If you encounter SSL errors, use `--engine local` instead.
 
-### Local
-
-Simple sequential execution. Useful for:
-- Testing
-- Development
-- Environments without Prefect
-
+To use Prefect:
 ```bash
-piply run --engine local
+piply run --engine prefect
 ```
+
+Or try auto-selection (will fall back to local if Prefect fails):
+```bash
+piply run --engine auto
+```
+
+### Engine Comparison
+
+| Feature | Local | Prefect |
+|---------|-------|---------|
+| Dependencies | None | Prefect installed |
+| Setup | Zero config | May need `PREFECT_TEST_MODE=1` |
+| Parallel execution | No | Yes (with dependencies) |
+| Scheduling | No | Yes (via Prefect) |
+| Monitoring | Basic logs | Full dashboard |
+| Production ready | Limited | Yes (with Prefect server) |
 
 ## Scheduling
 

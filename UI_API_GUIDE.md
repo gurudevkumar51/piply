@@ -209,8 +209,8 @@ When you trigger a run via the UI:
    ```
 
 ### Styling
-- Custom CSS: `piply/api/static/styles.css`
-- Templates: `piply/api/templates/`
+- Custom CSS: `piply/ui/static/styles.css`
+- Templates: `piply/ui/templates/`
 - Uses Bootstrap 5.3 + custom theme
 
 ### Extending the API

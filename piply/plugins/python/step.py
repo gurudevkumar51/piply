@@ -1,5 +1,6 @@
 import importlib
 import sys
+import os
 from typing import Any
 from piply.core.step import Step
 
@@ -17,6 +18,12 @@ class PythonStep(Step):
         if not func_spec:
             raise ValueError(
                 f"PythonStep '{self.name}' missing 'function' configuration")
+
+        # Ensure current working directory is in Python path
+        # This allows imports of local modules like "pipelines.extract"
+        cwd = os.getcwd()
+        if cwd not in sys.path:
+            sys.path.insert(0, cwd)
 
         # Parse function specification
         if ":" in func_spec:
