@@ -1,0 +1,7 @@
+[
+  {
+    "install": "pip install -e .",
+    "start": "python run_api.py",
+    "resourceSize": "medium"
+  }
+]
