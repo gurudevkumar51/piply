@@ -47,7 +47,7 @@ class PipelineDetail(BaseModel):
     config: Dict[str, Any]
     steps: List[StepInfo]
     tenants: List[str]
-    recent_runs: List[Any]  # Could be more specific if needed
+    recent_runs: List["RunResponse"]
 
 
 # Run schemas
@@ -127,3 +127,6 @@ class DashboardStats(BaseModel):
     failed: int
     recent_runs: List[Dict[str, Any]]
     tenant_summary: List[Dict[str, Any]]
+
+
+PipelineDetail.model_rebuild()

@@ -19,6 +19,7 @@ class PipelineContext:
     pipeline_name: Optional[str] = None
     step_outputs: Dict[str, StepOutput] = field(default_factory=dict)
     variables: Dict[str, Any] = field(default_factory=dict)
+    tracker: Optional[Any] = None
 
     def set_output(self, step_name: str, output: StepOutput):
         """Store step output in context."""

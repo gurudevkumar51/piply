@@ -1,16 +1,19 @@
 """
 Run service layer.
 """
+import os
+from datetime import datetime
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from fastapi import BackgroundTasks
 
 from ..database import PipelineRun, TaskRun, RunStatus, LogEntry
-from ..schemas import RunCreate, RunResponse
+from ..schemas import RunCreate, RunResponse, RunRetryRequest
 from ..tracker import tracked_execution
 from piply.parser.yaml_parser import load_pipeline
 from piply.engine.local_engine import LocalEngine
 from piply.engine.prefect_engine import PrefectEngine
+from piply.utils.logging import logger
 
 
 class RunService:
@@ -67,7 +70,7 @@ class RunService:
             tasks_completed=0
         )
 
-    def retry_run(self, run_id: int, retry_request: RunCreate) -> Dict[str, Any]:
+    def retry_run(self, run_id: int, retry_request: RunRetryRequest) -> Dict[str, Any]:
         """
         Retry a failed pipeline run.
         Supports 'resume' (only failed tasks) and 'startover' modes.
@@ -155,6 +158,8 @@ class RunService:
             autocommit=False, autoflush=False, bind=engine)
         db = SessionLocal()
 
+        pipeline_run = None
+
         try:
             # Update run status to running
             pipeline_run = db.query(PipelineRun).filter(
@@ -166,11 +171,9 @@ class RunService:
             # Load pipeline
             pipeline = load_pipeline(pipeline_path)
 
-            # Create tracker
-            tracker = tracked_execution(db, run_id)
-            tracker_gen = tracker.__enter__()
+            with tracked_execution(db, run_id) as tracker:
+                pipeline.context.tracker = tracker
 
-            try:
                 # Choose engine
                 engine_choice = pipeline.config.get("engine", "local")
                 if engine_choice == "prefect":
@@ -202,24 +205,29 @@ class RunService:
                     print(
                         f"[Resume Mode] Skipping {len(previous_tasks)} successful tasks from previous run")
 
-                # Run pipeline
-                result = eng.run(pipeline, tenant=tenant)
+                # Run pipeline through the Pipeline interface so tenant/retry
+                # handling stays consistent across engine implementations.
+                pipeline.run(eng, tenant=tenant, retry_failed=retry_failed)
 
                 # Update run status to success
                 if pipeline_run:
                     pipeline_run.status = RunStatus.SUCCESS
                     pipeline_run.completed_at = datetime.utcnow()
                     db.commit()
-
-            except Exception as e:
-                # Update run status to failed
-                if pipeline_run:
-                    pipeline_run.status = RunStatus.FAILED
-                    pipeline_run.completed_at = datetime.utcnow()
-                    db.commit()
-                raise
-            finally:
-                tracker_gen.__exit__(None, None, None)
+            
+        except Exception as exc:
+            if pipeline_run:
+                pipeline_run.status = RunStatus.FAILED
+                pipeline_run.completed_at = datetime.utcnow()
+                db.add(LogEntry(
+                    level="ERROR",
+                    logger="piply.api.run_service",
+                    message=str(exc),
+                    pipeline_run_id=run_id,
+                    extra={"pipeline_path": pipeline_path}
+                ))
+                db.commit()
+            logger.exception("Background pipeline execution failed for run %s", run_id)
 
         finally:
             db.close()

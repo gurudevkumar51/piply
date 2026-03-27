@@ -25,6 +25,16 @@ class Step:
         """
         attempt = 0
         last_error = None
+        tracker = getattr(context, "tracker", None)
+
+        if tracker:
+            tracker.start_task(self.name)
+            tracker.log(
+                "INFO",
+                f"Started step '{self.name}'",
+                logger_name="piply.step",
+                task_name=self.name
+            )
 
         while attempt <= self.retries:
             try:
@@ -38,6 +48,19 @@ class Step:
                     metadata={"attempts": attempt + 1}
                 )
                 context.set_output(self.name, output)
+                if tracker:
+                    tracker.complete_task(
+                        self.name,
+                        True,
+                        result=result,
+                        attempt=attempt + 1
+                    )
+                    tracker.log(
+                        "INFO",
+                        f"Step '{self.name}' completed successfully",
+                        logger_name="piply.step",
+                        task_name=self.name
+                    )
                 logger.info(f"Step '{self.name}' completed successfully")
                 return output
 
@@ -45,10 +68,24 @@ class Step:
                 last_error = e
                 attempt += 1
                 if attempt <= self.retries:
+                    if tracker:
+                        tracker.log(
+                            "WARNING",
+                            f"Step '{self.name}' failed on attempt {attempt}: {e}. Retrying in {self.retry_delay}s.",
+                            logger_name="piply.step",
+                            task_name=self.name
+                        )
                     logger.warning(
                         f"Step '{self.name}' failed: {e}. Retrying in {self.retry_delay}s...")
                     time.sleep(self.retry_delay)
                 else:
+                    if tracker:
+                        tracker.log(
+                            "ERROR",
+                            f"Step '{self.name}' failed after {self.retries} retries: {e}",
+                            logger_name="piply.step",
+                            task_name=self.name
+                        )
                     logger.error(
                         f"Step '{self.name}' failed after {self.retries} retries: {e}")
 
@@ -60,6 +97,14 @@ class Step:
             metadata={"attempts": attempt}
         )
         context.set_output(self.name, output)
+        if tracker:
+            tracker.fail_task(self.name, str(last_error), attempt=attempt)
+            tracker.log(
+                "ERROR",
+                f"Step '{self.name}' failed permanently",
+                logger_name="piply.step",
+                task_name=self.name
+            )
         logger.error(f"Step '{self.name}' failed permanently")
         return output
 

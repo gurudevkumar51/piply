@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from ..database import PipelineRun, TaskRun, RunStatus
-from ..schemas import PipelineResponse, PipelineDetail, StepInfo
+from ..schemas import PipelineResponse, PipelineDetail, StepInfo, RunResponse
 from ..utils.pipeline_finder import PipelineDiscovery
 
 
@@ -25,13 +25,7 @@ class PipelineService:
         result = []
 
         # Get pipelines from database (that have been run)
-        db_pipelines = self.db.query(
-            PipelineRun.pipeline_name,
-            PipelineRun.tenant,
-            PipelineRun.status,
-            PipelineRun.started_at,
-            PipelineRun.completed_at
-        ).group_by(PipelineRun.pipeline_name).all()
+        db_pipelines = self.db.query(PipelineRun).all()
 
         # Build a map of pipeline stats from database
         pipeline_stats = {}
@@ -43,7 +37,10 @@ class PipelineService:
                     "tenants": set()
                 }
             pipeline_stats[p.pipeline_name]["run_count"] += 1
-            if p.last_run is None or (pipeline_stats[p.pipeline_name]["last_run"] and p.started_at > pipeline_stats[p.pipeline_name]["last_run"]):
+            if (
+                pipeline_stats[p.pipeline_name]["last_run"] is None
+                or p.started_at > pipeline_stats[p.pipeline_name]["last_run"]
+            ):
                 pipeline_stats[p.pipeline_name]["last_run"] = p.started_at
             if p.tenant:
                 pipeline_stats[p.pipeline_name]["tenants"].add(p.tenant)
@@ -96,6 +93,10 @@ class PipelineService:
             PipelineRun.pipeline_name == pipeline_name
         ).order_by(PipelineRun.started_at.desc()).limit(10).all()
 
+        recent_run_responses = [
+            self._build_run_response(run) for run in recent_runs
+        ]
+
         # Convert steps to StepInfo objects
         steps = [StepInfo(**s) for s in pipeline_data["steps"]]
 
@@ -104,5 +105,27 @@ class PipelineService:
             config=pipeline_data["config"],
             steps=steps,
             tenants=pipeline_data["tenants"],
-            recent_runs=recent_runs
+            recent_runs=recent_run_responses
+        )
+
+    def _build_run_response(self, run: PipelineRun) -> RunResponse:
+        """Serialize a pipeline run with task counters for API responses."""
+        task_count = self.db.query(TaskRun).filter(
+            TaskRun.pipeline_run_id == run.id
+        ).count()
+        tasks_completed = self.db.query(TaskRun).filter(
+            TaskRun.pipeline_run_id == run.id,
+            TaskRun.status == RunStatus.SUCCESS
+        ).count()
+
+        return RunResponse(
+            id=run.id,
+            pipeline_name=run.pipeline_name,
+            tenant=run.tenant,
+            status=run.status.value,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            trigger_type=run.trigger_type,
+            task_count=task_count,
+            tasks_completed=tasks_completed
         )

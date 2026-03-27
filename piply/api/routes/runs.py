@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..database import PipelineRun, TaskRun, RunStatus, LogEntry
-from ..schemas import RunCreate, RunResponse, RunRetryRequest
+from ..schemas import RunCreate, RunResponse, RunRetryRequest, TaskResponse
 from ..services.run_service import RunService
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -81,10 +81,32 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
     tasks = db.query(TaskRun).filter(TaskRun.pipeline_run_id ==
                                      run_id).order_by(TaskRun.started_at).all()
 
-    return {
-        "run": run,
-        "tasks": tasks
-    }
+    task_items = [
+        TaskResponse(
+            id=task.id,
+            task_name=task.task_name,
+            status=task.status.value,
+            started_at=task.started_at,
+            completed_at=task.completed_at,
+            attempt=task.attempt,
+            error_message=task.error_message
+        )
+        for task in tasks
+    ]
+
+    run_item = RunResponse(
+        id=run.id,
+        pipeline_name=run.pipeline_name,
+        tenant=run.tenant,
+        status=run.status.value,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        trigger_type=run.trigger_type,
+        task_count=len(task_items),
+        tasks_completed=sum(1 for task in task_items if task.status == "success")
+    )
+
+    return {"run": run_item, "tasks": task_items}
 
 
 @router.post("/{run_id}/retry")

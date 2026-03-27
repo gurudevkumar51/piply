@@ -24,6 +24,12 @@ def pipelines_page(request: Request, templates=Depends(get_templates)):
     return templates.TemplateResponse("pipelines.html", {"request": request})
 
 
+@router.get("/runs", response_class=HTMLResponse)
+def runs_page(request: Request, templates=Depends(get_templates)):
+    """Pipeline runs listing page."""
+    return templates.TemplateResponse("runs.html", {"request": request})
+
+
 @router.get("/pipelines/{pipeline_name}", response_class=HTMLResponse)
 def pipeline_detail_page(request: Request, pipeline_name: str, templates=Depends(get_templates)):
     """Pipeline detail page with DAG visualization."""

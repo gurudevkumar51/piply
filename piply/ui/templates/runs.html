@@ -62,9 +62,9 @@
                     <td>${run.completed_at ? formatDuration(run.started_at, run.completed_at) : 'Running...'}</td>
                     <td>
                         <a href="/runs/${run.id}" class="btn btn-sm btn-outline-primary">View</a>
-                        {% if run.status == 'failed' %}
-                        <button class="btn btn-sm btn-outline-warning" onclick="retryRun(${run.id})">Retry</button>
-                        {% endif %}
+                        ${run.status === 'failed'
+                            ? `<a href="/runs/${run.id}" class="btn btn-sm btn-outline-warning">Retry</a>`
+                            : ''}
                     </td>
                 </tr>
             `).join('');
@@ -87,7 +87,7 @@
 
     function retryRun(runId) {
         if (confirm(`Retry run #${runId}?`)) {
-            window.location.href = `/runs/${runId}/retry`;
+            window.location.href = `/runs/${runId}`;
         }
     }
 
