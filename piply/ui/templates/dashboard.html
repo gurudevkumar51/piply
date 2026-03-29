@@ -1,300 +1,178 @@
 {% extends "base.html" %}
 
+{% block title %}Piply Dashboard{% endblock %}
+
 {% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <h1 class="mb-3">Dashboard</h1>
-        <p class="text-muted">Overview of your pipelines and executions</p>
-    </div>
-</div>
+<div class="page-grid">
+    <section class="hero">
+        <div class="eyebrow">Lightweight DAG orchestration</div>
+        <h1 class="hero-headline">Run task-based pipelines with a <span>clean control plane</span>.</h1>
+        <p class="hero-copy">
+            Piply now models each pipeline as a lightweight flow of tasks, keeps the UI focused on execution clarity,
+            and stays small enough to evolve without dragging in a heavy orchestration stack.
+        </p>
+        <div class="hero-actions">
+            <a class="button primary" href="/pipelines">Browse pipelines</a>
+            <a class="button secondary" href="/runs">Inspect run history</a>
+        </div>
+        <div class="hero-meta" style="margin-top:18px;">
+            <span class="meta-pill">config {{ project.config_path }}</span>
+            <span class="meta-pill">workspace {{ project.workspace }}</span>
+            <span class="meta-pill">heartbeat {{ scheduler.heartbeat or 'waiting for first tick' }}</span>
+        </div>
+    </section>
 
-<!-- Stats Cards -->
-<div class="row mb-4" id="stats-container">
-    <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-card">
-            <div class="stat-label">Total Pipelines</div>
-            <div class="stat-value" id="total-pipelines">-</div>
-        </div>
-    </div>
-    <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-card">
-            <div class="stat-label">Total Runs</div>
-            <div class="stat-value" id="total-runs">-</div>
-        </div>
-    </div>
-    <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-card">
-            <div class="stat-label">Running</div>
-            <div class="stat-value text-primary" id="running-runs">-</div>
-        </div>
-    </div>
-    <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-card">
-            <div class="stat-label">Success Rate</div>
-            <div class="stat-value text-success" id="success-rate">-</div>
-        </div>
-    </div>
-</div>
+    <section class="metrics">
+        <article class="metric-card">
+            <div class="metric-label">Total pipelines</div>
+            <div class="metric-value">{{ stats.total_pipelines }}</div>
+            <div class="metric-footnote">{{ stats.scheduled_pipelines }} with active schedules</div>
+        </article>
+        <article class="metric-card">
+            <div class="metric-label">Total runs</div>
+            <div class="metric-value">{{ stats.total_runs }}</div>
+            <div class="metric-footnote">Every run and log line stored in SQLite</div>
+        </article>
+        <article class="metric-card">
+            <div class="metric-label">Running now</div>
+            <div class="metric-value">{{ stats.running_runs }}</div>
+            <div class="metric-footnote">Across manual, scheduled, and pipeline-triggered runs</div>
+        </article>
+        <article class="metric-card">
+            <div class="metric-label">Success rate</div>
+            <div class="metric-value">{{ stats.success_rate }}%</div>
+            <div class="metric-footnote">{{ stats.successful_runs }} success and {{ stats.failed_runs }} failed</div>
+        </article>
+    </section>
 
-<!-- Recent Runs -->
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span>Recent Runs</span>
-                <a href="/runs" class="btn btn-sm btn-outline-primary">View All</a>
+    <section class="layout-two">
+        <article class="panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Priority pipelines</h2>
+                    <p class="panel-copy">A fast read on schedules, task counts, and what each flow will launch next.</p>
+                </div>
+                <a class="button ghost" href="/pipelines">See all</a>
             </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover mb-0">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Pipeline</th>
-                                <th>Tenant</th>
-                                <th>Status</th>
-                                <th>Started</th>
-                                <th>Duration</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="recent-runs-table">
-                            <tr>
-                                <td colspan="7" class="text-center text-muted">Loading...</td>
-                            </tr>
-                        </tbody>
-                    </table>
+
+            {% if pipelines %}
+            <div class="pipeline-grid">
+                {% for pipeline in pipelines[:4] %}
+                <article class="pipeline-card">
+                    <div class="card-topline">
+                        <span class="badge">{{ pipeline.schedule_text }}</span>
+                        {% if pipeline.last_run %}
+                        <span class="status-badge {{ pipeline.last_run.status }}">{{ pipeline.last_run.status }}</span>
+                        {% else %}
+                        <span class="badge">no runs yet</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="title-row" style="margin-top:14px;">
+                        <div>
+                            <h3 class="card-title">{{ pipeline.title }}</h3>
+                            <div class="muted mono" style="margin-top:4px;">{{ pipeline.pipeline_id }}</div>
+                        </div>
+                        <span class="meta-pill">{% if pipeline.paused %}paused{% else %}active{% endif %}</span>
+                    </div>
+
+                    <p class="card-copy">{{ pipeline.description or "No operator-facing description added yet." }}</p>
+
+                    <div class="meta-list">
+                        <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+                        <span class="meta-pill">next {{ pipeline.next_run_label }}</span>
+                        <span class="meta-pill">running {{ pipeline.active_runs }}</span>
+                        <span class="meta-pill">{{ pipeline.execution_summary }}</span>
+                    </div>
+
+                    {% if pipeline.trigger_targets %}
+                    <div class="tag-row" style="margin-top:14px;">
+                        {% for target in pipeline.trigger_targets %}
+                        <span class="tag">triggers {{ target }}</span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    <div class="card-actions" style="margin-top:18px;">
+                        <button class="button primary" data-run-button="{{ pipeline.pipeline_id }}" onclick="triggerPipeline('{{ pipeline.pipeline_id }}')">Run now</button>
+                        <a class="button secondary" href="/pipelines/{{ pipeline.pipeline_id }}">View DAG</a>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state">No pipelines found. Add one to <span class="mono">{{ project.config_path }}</span> and refresh the page.</div>
+            {% endif %}
+        </article>
+
+        <article class="panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Runtime posture</h2>
+                    <p class="panel-copy">Small on dependencies, but rich enough to orchestrate task graphs and downstream triggers.</p>
                 </div>
             </div>
-        </div>
-    </div>
-</div>
 
-<!-- Tenant Summary -->
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">
-                Tenant Summary
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover mb-0">
-                        <thead>
-                            <tr>
-                                <th>Tenant</th>
-                                <th>Total Runs</th>
-                                <th>Success</th>
-                                <th>Failed</th>
-                                <th>Success Rate</th>
-                                <th>Last Run</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tenant-summary-table">
-                            <tr>
-                                <td colspan="6" class="text-center text-muted">Loading...</td>
-                            </tr>
-                        </tbody>
-                    </table>
+            <div class="stack">
+                <div class="detail-card">
+                    <div class="detail-label">Config file</div>
+                    <div class="detail-value mono path-value">{{ project.config_path }}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Workspace</div>
+                    <div class="detail-value mono path-value">{{ project.workspace }}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Scheduler heartbeat</div>
+                    <div class="detail-value">{{ scheduler.heartbeat or "Waiting for first scheduler loop" }}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Persistence</div>
+                    <div class="detail-value mono path-value">{{ scheduler.database_path }}</div>
                 </div>
             </div>
+        </article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Recent activity</h2>
+                <p class="panel-copy">Recent pipeline runs with task-level completion counts at a glance.</p>
+            </div>
+            <a class="button ghost" href="/runs">View all runs</a>
         </div>
-    </div>
-</div>
 
-<!-- Quick Actions -->
-<div class="row">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">Quick Actions</div>
-            <div class="card-body">
-                <div class="row g-3">
-                    <div class="col-md-3">
-                        <button class="btn btn-primary w-100" onclick="showRunModal()">
-                            <i class="bi bi-play-fill"></i> Run Pipeline
-                        </button>
-                    </div>
-                    <div class="col-md-3">
-                        <a href="/pipelines" class="btn btn-outline-primary w-100">
-                            <i class="bi bi-diagram-3"></i> View Pipelines
-                        </a>
-                    </div>
-                    <div class="col-md-3">
-                        <a href="/pipelines/new" class="btn btn-outline-success w-100">
-                            <i class="bi bi-plus-circle"></i> Create Pipeline
-                        </a>
-                    </div>
-                    <div class="col-md-3">
-                        <button class="btn btn-outline-secondary w-100" onclick="refreshDashboard()">
-                            <i class="bi bi-arrow-clockwise"></i> Refresh
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Run Modal -->
-<div class="modal fade" id="runModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Run Pipeline</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="run-form">
-                    <div class="mb-3">
-                        <label class="form-label">Pipeline</label>
-                        <select class="form-select" id="run-pipeline" required>
-                            <option value="">Select a pipeline...</option>
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Tenant (optional)</label>
-                        <input type="text" class="form-control" id="run-tenant" placeholder="e.g., client_a">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Trigger Type</label>
-                        <select class="form-select" id="run-trigger-type">
-                            <option value="manual">Manual</option>
-                            <option value="schedule">Schedule</option>
-                            <option value="api">API</option>
-                        </select>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-primary" onclick="submitRun()">Run Pipeline</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-{% endblock %}
-
-{% block scripts %}
-<script>
-    // Load dashboard data
-    async function loadDashboard() {
-        try {
-            const [statsRes, runsRes, tenantsRes, pipelinesRes] = await Promise.all([
-                axios.get('/api/dashboard'),
-                axios.get('/api/runs?limit=10'),
-                axios.get('/api/tenants'),
-                axios.get('/api/pipelines')
-            ]);
-
-            // Update stats
-            const stats = statsRes.data;
-            document.getElementById('total-pipelines').textContent = stats.total_pipelines;
-            document.getElementById('total-runs').textContent = stats.total_runs;
-            document.getElementById('running-runs').textContent = stats.running;
-            const successRate = stats.total_runs > 0
-                ? ((stats.success / stats.total_runs) * 100).toFixed(1) + '%'
-                : '0%';
-            document.getElementById('success-rate').textContent = successRate;
-
-            // Populate pipeline select
-            const pipelineSelect = document.getElementById('run-pipeline');
-            pipelinesRes.data.forEach(p => {
-                const option = document.createElement('option');
-                option.value = p.name;
-                option.textContent = p.name;
-                pipelineSelect.appendChild(option);
-            });
-
-            // Recent runs table
-            const runsTable = document.getElementById('recent-runs-table');
-            if (runsRes.data.length === 0) {
-                runsTable.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No runs yet</td></tr>';
-            } else {
-                runsTable.innerHTML = runsRes.data.map(run => `
+        {% if recent_runs %}
+        <div class="table-wrap">
+            <table class="data-table">
+                <thead>
                     <tr>
-                        <td>#${run.id}</td>
-                        <td>${run.pipeline_name}</td>
-                        <td><span class="tenant-badge">${run.tenant || 'N/A'}</span></td>
-                        <td><span class="status-badge status-${run.status}">${run.status}</span></td>
-                        <td>${new Date(run.started_at).toLocaleString()}</td>
-                        <td>${run.completed_at ? formatDuration(run.started_at, run.completed_at) : '-'}</td>
-                        <td>
-                            <a href="/runs/${run.id}" class="btn btn-sm btn-outline-primary">View</a>
-                        </td>
+                        <th>Run</th>
+                        <th>Pipeline</th>
+                        <th>Status</th>
+                        <th>Trigger</th>
+                        <th>Tasks</th>
+                        <th>Started</th>
                     </tr>
-                `).join('');
-            }
-
-            // Tenant summary table
-            const tenantTable = document.getElementById('tenant-summary-table');
-            if (tenantsRes.data.length === 0) {
-                tenantTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No tenant data</td></tr>';
-            } else {
-                tenantTable.innerHTML = tenantsRes.data.map(t => `
+                </thead>
+                <tbody>
+                    {% for run in recent_runs %}
                     <tr>
-                        <td>${t.name}</td>
-                        <td>${t.run_count}</td>
-                        <td>${t.successful || 0}</td>
-                        <td>${t.failed || 0}</td>
-                        <td>${t.success_rate ? (t.success_rate * 100).toFixed(1) + '%' : '0%'}</td>
-                        <td>${t.last_run ? new Date(t.last_run).toLocaleString() : 'Never'}</td>
+                        <td><a class="mono" href="/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
+                        <td><a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_title }}</a></td>
+                        <td><span class="status-badge {{ run.status }}">{{ run.status }}</span></td>
+                        <td class="mono">{{ run.trigger }}</td>
+                        <td>{{ run.successful_tasks }}/{{ run.task_count }}</td>
+                        <td>{{ run.started_at or run.created_at }}</td>
                     </tr>
-                `).join('');
-            }
-
-        } catch (error) {
-            console.error('Error loading dashboard:', error);
-        }
-    }
-
-    function formatDuration(start, end) {
-        const startDate = new Date(start);
-        const endDate = new Date(end);
-        const diffMs = endDate - startDate;
-        const diffSecs = Math.floor(diffMs / 1000);
-        if (diffSecs < 60) return diffSecs + 's';
-        const diffMins = Math.floor(diffSecs / 60);
-        if (diffMins < 60) return diffMins + 'm ' + (diffSecs % 60) + 's';
-        const diffHours = Math.floor(diffMins / 60);
-        return diffHours + 'h ' + (diffMins % 60) + 'm';
-    }
-
-    function showRunModal() {
-        const modal = new bootstrap.Modal(document.getElementById('runModal'));
-        modal.show();
-    }
-
-    async function submitRun() {
-        const pipeline = document.getElementById('run-pipeline').value;
-        const tenant = document.getElementById('run-tenant').value || null;
-        const triggerType = document.getElementById('run-trigger-type').value;
-
-        if (!pipeline) {
-            alert('Please select a pipeline');
-            return;
-        }
-
-        try {
-            const response = await axios.post('/api/runs', {
-                pipeline_name: pipeline,
-                tenant: tenant,
-                trigger_type: triggerType
-            });
-
-            alert(`Run started! Run ID: ${response.data.id}`);
-            bootstrap.Modal.getInstance(document.getElementById('runModal')).hide();
-            setTimeout(loadDashboard, 2000); // Refresh after 2 seconds
-        } catch (error) {
-            alert('Error starting run: ' + (error.response?.data?.detail || error.message));
-        }
-    }
-
-    function refreshDashboard() {
-        loadDashboard();
-    }
-
-    // Load on page load
-    document.addEventListener('DOMContentLoaded', loadDashboard);
-</script>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">No runs have been recorded yet. Launch a pipeline to populate the timeline.</div>
+        {% endif %}
+    </section>
+</div>
 {% endblock %}

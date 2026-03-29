@@ -1,96 +1,61 @@
 {% extends "base.html" %}
 
-{% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <h1 class="mb-3">Runs</h1>
-        <p class="text-muted">View and manage pipeline executions</p>
-    </div>
-</div>
+{% block title %}Runs - Piply{% endblock %}
 
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover mb-0">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Pipeline</th>
-                                <th>Tenant</th>
-                                <th>Status</th>
-                                <th>Started</th>
-                                <th>Duration</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="runs-table">
-                            <tr>
-                                <td colspan="7" class="text-center text-muted">Loading...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
+{% block content %}
+<div class="page-grid">
+    <section class="hero">
+        <div class="eyebrow">Run history</div>
+        <h1 class="hero-headline">Every execution keeps its <span>task results and raw logs</span>.</h1>
+        <p class="hero-copy">
+            Runs are persisted with task counts, downstream triggers, and operator output so you can debug the flow instead of guessing what happened.
+        </p>
+        <div class="hero-meta">
+            <span class="meta-pill">database {{ scheduler.database_path }}</span>
+            <span class="meta-pill">heartbeat {{ scheduler.heartbeat or "waiting" }}</span>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Execution timeline</h2>
+                <p class="panel-copy">Manual launches, scheduled runs, and downstream pipeline triggers all land in the same history stream.</p>
             </div>
         </div>
-    </div>
+
+        {% if runs %}
+        <div class="table-wrap">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Run ID</th>
+                        <th>Pipeline</th>
+                        <th>Status</th>
+                        <th>Trigger</th>
+                        <th>Tasks</th>
+                        <th>Started</th>
+                        <th>Finished</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for run in runs %}
+                    <tr>
+                        <td><a class="mono" href="/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
+                        <td><a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_title }}</a></td>
+                        <td><span class="status-badge {{ run.status }}">{{ run.status }}</span></td>
+                        <td class="mono">{{ run.trigger }}</td>
+                        <td>{{ run.successful_tasks }}/{{ run.task_count }}</td>
+                        <td>{{ run.started_at or run.created_at }}</td>
+                        <td>{{ run.finished_at or "-" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">No runs recorded yet. Start one from the pipelines page to begin building history.</div>
+        {% endif %}
+    </section>
 </div>
-
-{% endblock %}
-
-{% block scripts %}
-<script>
-    async function loadRuns() {
-        try {
-            const response = await axios.get('/api/runs?limit=100');
-            const runs = response.data;
-
-            const table = document.getElementById('runs-table');
-            if (runs.length === 0) {
-                table.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No runs yet</td></tr>';
-                return;
-            }
-
-            table.innerHTML = runs.map(run => `
-                <tr>
-                    <td><a href="/runs/${run.id}" class="text-decoration-none">#${run.id}</a></td>
-                    <td><strong>${run.pipeline_name}</strong></td>
-                    <td><span class="tenant-badge">${run.tenant || 'N/A'}</span></td>
-                    <td><span class="status-badge status-${run.status}">${run.status}</span></td>
-                    <td>${new Date(run.started_at).toLocaleString()}</td>
-                    <td>${run.completed_at ? formatDuration(run.started_at, run.completed_at) : 'Running...'}</td>
-                    <td>
-                        <a href="/runs/${run.id}" class="btn btn-sm btn-outline-primary">View</a>
-                        ${run.status === 'failed'
-                            ? `<a href="/runs/${run.id}" class="btn btn-sm btn-outline-warning">Retry</a>`
-                            : ''}
-                    </td>
-                </tr>
-            `).join('');
-        } catch (error) {
-            console.error('Error loading runs:', error);
-        }
-    }
-
-    function formatDuration(start, end) {
-        const startDate = new Date(start);
-        const endDate = new Date(end);
-        const diffMs = endDate - startDate;
-        const diffSecs = Math.floor(diffMs / 1000);
-        if (diffSecs < 60) return diffSecs + 's';
-        const diffMins = Math.floor(diffSecs / 60);
-        if (diffMins < 60) return diffMins + 'm ' + (diffSecs % 60) + 's';
-        const diffHours = Math.floor(diffMins / 60);
-        return diffHours + 'h ' + (diffMins % 60) + 'm';
-    }
-
-    function retryRun(runId) {
-        if (confirm(`Retry run #${runId}?`)) {
-            window.location.href = `/runs/${runId}`;
-        }
-    }
-
-    document.addEventListener('DOMContentLoaded', loadRuns);
-</script>
 {% endblock %}

@@ -1,89 +1,83 @@
 {% extends "base.html" %}
 
-{% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <h1 class="mb-3">Pipelines</h1>
-        <p class="text-muted">Manage and view your data pipelines</p>
-    </div>
-</div>
+{% block title %}Pipelines - Piply{% endblock %}
 
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover mb-0">
-                        <thead>
-                            <tr>
-                                <th>Name</th>
-                                <th>Steps</th>
-                                <th>Tenants</th>
-                                <th>Schedule</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="pipelines-table">
-                            <tr>
-                                <td colspan="5" class="text-center text-muted">Loading...</td>
-                            </tr>
-                        </tbody>
-                    </table>
+{% block content %}
+<div class="page-grid">
+    <section class="hero">
+        <div class="eyebrow">Pipelines</div>
+        <h1 class="hero-headline">Task-based flows with a <span>clear operational view</span>.</h1>
+        <p class="hero-copy">
+            Each pipeline can contain multiple tasks, run on a schedule, and trigger downstream pipelines on success.
+            The UI stays intentionally simple: what runs, when it runs, and what each task actually does.
+        </p>
+        <div class="hero-meta">
+            <span class="meta-pill">config {{ project.config_path }}</span>
+            <span class="meta-pill">scheduler {% if scheduler.running %}live{% else %}offline{% endif %}</span>
+            <span class="meta-pill">database {{ scheduler.database_path }}</span>
+        </div>
+    </section>
+
+    {% if pipelines %}
+    <section class="pipeline-grid">
+        {% for pipeline in pipelines %}
+        <article class="pipeline-card">
+            <div class="card-topline">
+                <span class="badge">{{ pipeline.schedule_text }}</span>
+                {% if pipeline.last_run %}
+                <span class="status-badge {{ pipeline.last_run.status }}">{{ pipeline.last_run.status }}</span>
+                {% else %}
+                <span class="badge">not run yet</span>
+                {% endif %}
+            </div>
+
+            <div class="title-row" style="margin-top:14px;">
+                <div>
+                    <h2 class="card-title">{{ pipeline.title }}</h2>
+                    <div class="muted mono" style="margin-top:4px;">{{ pipeline.pipeline_id }}</div>
+                </div>
+                <span class="meta-pill">{% if pipeline.paused %}paused{% elif pipeline.enabled %}enabled{% else %}disabled{% endif %}</span>
+            </div>
+
+            <p class="card-copy">{{ pipeline.description or "No operator-facing description added yet." }}</p>
+
+            <div class="stack" style="margin-bottom:18px;">
+                <div class="detail-card">
+                    <div class="detail-label">Flow summary</div>
+                    <div class="detail-value mono path-value">{{ pipeline.command_preview }}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Primary entry</div>
+                    <div class="detail-value mono path-value">{{ pipeline.primary_entry }}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Next run</div>
+                    <div class="detail-value">{{ pipeline.next_run_label }}</div>
                 </div>
             </div>
-        </div>
-    </div>
+
+            <div class="tag-row" style="margin-bottom:18px;">
+                <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+                <span class="meta-pill">running {{ pipeline.active_runs }}</span>
+                <span class="meta-pill">max concurrent {{ pipeline.max_concurrent_runs }}</span>
+                <span class="meta-pill">{{ pipeline.execution_summary }}</span>
+                {% for target in pipeline.trigger_targets %}
+                <span class="tag">triggers {{ target }}</span>
+                {% endfor %}
+            </div>
+
+            <div class="card-actions">
+                <button class="button primary" data-run-button="{{ pipeline.pipeline_id }}" onclick="triggerPipeline('{{ pipeline.pipeline_id }}')">Run now</button>
+                <button class="button {% if pipeline.paused %}secondary{% else %}warn{% endif %}" onclick="togglePipelinePause('{{ pipeline.pipeline_id }}', {{ 'false' if pipeline.paused else 'true' }})">
+                    {% if pipeline.paused %}Resume schedule{% else %}Pause schedule{% endif %}
+                </button>
+                <a class="button ghost" href="/pipelines/{{ pipeline.pipeline_id }}">Open details</a>
+            </div>
+        </article>
+        {% endfor %}
+    </section>
+    {% else %}
+    <div class="empty-state">No pipelines were discovered in <span class="mono">{{ project.config_path }}</span>.</div>
+    {% endif %}
 </div>
-
-{% endblock %}
-
-{% block scripts %}
-<script>
-    async function loadPipelines() {
-        try {
-            const response = await axios.get('/api/pipelines');
-            const pipelines = response.data;
-
-            const table = document.getElementById('pipelines-table');
-            if (pipelines.length === 0) {
-                table.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No pipelines found. Create one to get started!</td></tr>';
-                return;
-            }
-
-            table.innerHTML = pipelines.map(p => `
-                <tr>
-                    <td>
-                        <strong>${p.name}</strong>
-                        <div class="text-muted small">${p.steps_count} steps</div>
-                    </td>
-                    <td>${p.steps_count}</td>
-                    <td>${p.tenants && p.tenants.length > 0 ? p.tenants.join(', ') : 'None'}</td>
-                    <td>${p.schedule || 'No schedule'}</td>
-                    <td>
-                        <a href="/pipelines/${encodeURIComponent(p.name)}" class="btn btn-sm btn-outline-primary">View DAG</a>
-                        <button class="btn btn-sm btn-outline-success" onclick="quickRun('${p.name}')">Run</button>
-                    </td>
-                </tr>
-            `).join('');
-        } catch (error) {
-            console.error('Error loading pipelines:', error);
-        }
-    }
-
-    function quickRun(pipelineName) {
-        if (confirm(`Run pipeline "${pipelineName}"?`)) {
-            axios.post('/api/runs', {
-                pipeline_name: pipelineName,
-                trigger_type: 'manual'
-            }).then(response => {
-                alert(`Run started! Run ID: ${response.data.id}`);
-                setTimeout(() => window.location.href = `/runs/${response.data.id}`, 1000);
-            }).catch(error => {
-                alert('Error: ' + (error.response?.data?.detail || error.message));
-            });
-        }
-    }
-
-    document.addEventListener('DOMContentLoaded', loadPipelines);
-</script>
 {% endblock %}

@@ -1,285 +1,293 @@
 {% extends "base.html" %}
 
+{% block title %}Run {{ run.run_id }} - Piply{% endblock %}
+
 {% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <nav aria-label="breadcrumb">
-            <ol class="breadcrumb">
-                <li class="breadcrumb-item"><a href="/">Dashboard</a></li>
-                <li class="breadcrumb-item"><a href="/runs">Runs</a></li>
-                <li class="breadcrumb-item active">Run #{{ run_id }}</li>
-            </ol>
-        </nav>
-        <div class="d-flex justify-content-between align-items-center">
+<div class="page-grid">
+    <section class="hero">
+        <div class="eyebrow">Run detail</div>
+        <h1 class="hero-headline"><span>{{ run.pipeline_title }}</span> execution snapshot.</h1>
+        <p class="hero-copy">
+            Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>.
+            Logs are shown newest first and refresh automatically while the run is still active.
+        </p>
+        <div class="hero-meta">
+            <span class="status-badge {{ run.status }}" id="run-status">{{ run.status }}</span>
+            <span class="meta-pill">pipeline <a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_id }}</a></span>
+            <span class="meta-pill">started {{ run.started_at or run.created_at }}</span>
+            <span class="meta-pill">finished {{ run.finished_at or "in progress" }}</span>
+            {% if run.retry_of %}
+            <span class="meta-pill">retry of {{ run.retry_of }}</span>
+            <span class="meta-pill">{{ run.retry_mode }}</span>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="detail-grid">
+        <article class="detail-card">
+            <div class="detail-label">Trigger</div>
+            <div class="detail-value mono">{{ run.trigger }}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Duration</div>
+            <div class="detail-value" id="run-duration">{% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Exit code</div>
+            <div class="detail-value" id="run-exit-code">{{ run.exit_code if run.exit_code is not none else "pending" }}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Task completion</div>
+            <div class="detail-value" id="run-task-count">{{ run.successful_tasks }}/{{ run.task_count }}</div>
+        </article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
             <div>
-                <h1 class="mb-1">Run #{{ run_id }}</h1>
-                <p class="text-muted mb-0" id="run-subtitle">Loading run details...</p>
+                <h2 class="panel-title">Run graph</h2>
+                <p class="panel-copy">The DAG reflects the live or last-known status of every task. Click failed tasks to choose a retry path.</p>
             </div>
-            <div class="d-flex gap-2">
-                <button class="btn btn-warning d-none" id="retry-button" onclick="showRetryModal()">
-                    <i class="bi bi-arrow-repeat"></i> Retry
-                </button>
-                <button class="btn btn-outline-secondary" onclick="refreshPage()">
-                    <i class="bi bi-arrow-clockwise"></i> Refresh
-                </button>
+            <div class="legend-row">
+                <span class="status-badge success">success</span>
+                <span class="status-badge running">running</span>
+                <span class="status-badge failed">failed</span>
+                <span class="status-badge queued">queued</span>
+                <span class="status-badge skipped">skipped</span>
             </div>
         </div>
-    </div>
-</div>
+        <div class="dag-shell">
+            <div class="dag-stage" id="run-dag-stage"></div>
+        </div>
+        <div class="retry-panel" id="retry-panel" {% if run.status != 'failed' %}hidden{% endif %}>
+            <div class="retry-copy">
+                <div class="detail-label">Retry options</div>
+                <div id="retry-selection-label">Select a failed task card or node to focus the retry, or retry the whole failed flow.</div>
+            </div>
+            <div class="card-actions">
+                <button class="button secondary" onclick="retryRun(runId, 'resume', selectedRetryTaskId)">Resume failed work</button>
+                <button class="button ghost" onclick="retryRun(runId, 'startover')">Start over</button>
+            </div>
+        </div>
+    </section>
 
-<div class="row mb-4">
-    <div class="col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Status</div>
-            <div id="run-status"><span class="text-muted">Loading...</span></div>
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Flow summary</h2>
+                <p class="panel-copy">Stored exactly as Piply launched it so commands and scripts stay visible for debugging.</p>
+            </div>
+            <button class="button ghost" onclick='copyText({{ run.command|tojson }})'>Copy</button>
         </div>
-    </div>
-    <div class="col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Started</div>
-            <div class="stat-value" style="font-size: 1.25rem;" id="run-started">-</div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Duration</div>
-            <div class="stat-value" style="font-size: 1.25rem;" id="run-duration">-</div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Trigger</div>
-            <div class="stat-value" style="font-size: 1.25rem;" id="run-trigger">-</div>
-        </div>
-    </div>
-</div>
+        <pre class="code-block">{{ run.command }}</pre>
+    </section>
 
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span>Task Execution Status</span>
-                <span class="badge bg-secondary" id="task-count-badge">0 tasks</span>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-hover mb-0">
-                        <thead>
-                            <tr>
-                                <th>Task</th>
-                                <th>Status</th>
-                                <th>Started</th>
-                                <th>Completed</th>
-                                <th>Attempt</th>
-                                <th>Error</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tasks-table">
-                            <tr>
-                                <td colspan="7" class="text-center text-muted">Loading...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Task run states</h2>
+                <p class="panel-copy">Each task keeps its own status, duration, and command preview. Failed cards are clickable for retry selection.</p>
             </div>
         </div>
-    </div>
-</div>
-
-<div class="modal fade" id="logsModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Task Logs: <span id="log-task-name"></span></h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div class="log-container" id="log-content">Loading logs...</div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="modal fade" id="retryModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Retry Pipeline Run</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p>How would you like to retry this pipeline?</p>
-                <div class="mb-3">
-                    <div class="form-check">
-                        <input class="form-check-input" type="radio" name="retryMode" id="retryResume" value="resume" checked>
-                        <label class="form-check-label" for="retryResume">
-                            <strong>Resume</strong> - Continue from failed tasks only
-                        </label>
+        <div class="task-grid" id="task-run-grid">
+            {% for task in task_runs %}
+            <article class="task-card {% if task.status in ['failed', 'skipped'] %}retryable{% endif %} {% if task.status == 'failed' %}task-card-failed{% elif task.status == 'success' %}task-card-success{% endif %}" {% if task.status in ['failed', 'skipped'] %}onclick="selectRetryTask('{{ task.task_id }}')" data-retry-task="{{ task.task_id }}"{% endif %}>
+                <div class="task-card-header">
+                    <div>
+                        <h3 class="card-title">{{ task.title }}</h3>
+                        <div class="muted mono" style="margin-top:4px;">{{ task.task_id }}</div>
                     </div>
-                    <div class="form-check">
-                        <input class="form-check-input" type="radio" name="retryMode" id="retryStartover" value="startover">
-                        <label class="form-check-label" for="retryStartover">
-                            <strong>Start Over</strong> - Run all tasks from the beginning
-                        </label>
-                    </div>
+                    <span class="status-badge {{ task.status }}">{{ task.status }}</span>
                 </div>
-                <div class="mb-3">
-                    <label class="form-label">Tenant (optional)</label>
-                    <input type="text" class="form-control" id="retry-tenant" placeholder="Leave empty to use original tenant">
+                <div class="task-stats">
+                    <span class="task-type-badge">{{ task.task_type }}</span>
+                    <span class="meta-pill">logs {{ task.log_count }}</span>
+                    <span class="meta-pill">duration {% if task.duration_seconds is not none %}{{ "%.1fs"|format(task.duration_seconds) }}{% else %}-{% endif %}</span>
                 </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-warning" onclick="submitRetry()">Retry Pipeline</button>
+                <pre class="code-block" style="margin-top:14px;">{{ task.command_preview }}</pre>
+                {% if task.error %}
+                <p class="footer-note">{{ task.error }}</p>
+                {% endif %}
+                {% if task.status in ['failed', 'skipped'] %}
+                <p class="footer-note">Click this task to focus the retry controls above.</p>
+                {% endif %}
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+
+    {% if run.error %}
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Failure signal</h2>
+                <p class="panel-copy">The pipeline-level failure summary captured when the run ended.</p>
             </div>
         </div>
-    </div>
+        <div class="detail-card">
+            <div class="detail-value">{{ run.error }}</div>
+        </div>
+    </section>
+    {% endif %}
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Raw logs</h2>
+                <p class="panel-copy">Newest lines on top. Timestamps are formatted as HH:MM:SS.SSS.</p>
+            </div>
+        </div>
+        <div class="log-viewer" id="log-viewer">
+            {% if logs %}
+                {% for line in logs %}
+                <div class="log-line">
+                    <time>{{ line.created_at.strftime('%H:%M:%S.%f')[:-3] }}</time>
+                    <div class="log-task">{{ line.task_id or "pipeline" }}</div>
+                    <div>{{ line.message }}</div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state">No output has been captured yet for this run.</div>
+            {% endif %}
+        </div>
+    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/@dagrejs/graphlib@2.1.13/dist/graphlib.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.2/dist/dagre.min.js" defer></script>
 <script>
-    const runId = {{ run_id }};
-    let currentRun = null;
-    let refreshInterval = null;
+const runId = "{{ run.run_id }}";
+const initialTaskRuns = {{ task_run_payloads|tojson }};
+let active = {{ 'true' if run.status in ['queued', 'running'] else 'false' }};
+let selectedRetryTaskId = null;
 
-    function formatDate(value) {
-        return value ? new Date(value).toLocaleString() : "-";
+function updateRetryPanel(taskRuns) {
+    const panel = document.getElementById("retry-panel");
+    if (!panel) {
+        return;
     }
-
-    function formatDuration(start, end) {
-        if (!start) return "-";
-        const startDate = new Date(start);
-        const endDate = end ? new Date(end) : new Date();
-        const diffSecs = Math.max(0, Math.floor((endDate - startDate) / 1000));
-        if (diffSecs < 60) return `${diffSecs}s`;
-        const mins = Math.floor(diffSecs / 60);
-        if (mins < 60) return `${mins}m ${diffSecs % 60}s`;
-        const hours = Math.floor(mins / 60);
-        return `${hours}h ${mins % 60}m`;
+    const hasFailed = taskRuns.some((task) => task.status === "failed" || task.status === "skipped");
+    panel.hidden = !hasFailed;
+    if (!hasFailed) {
+        selectedRetryTaskId = null;
+        document.getElementById("retry-selection-label").textContent = "This run has no failed tasks to retry.";
+        return;
     }
-
-    function escapeHtml(text) {
-        const div = document.createElement("div");
-        div.textContent = text || "";
-        return div.innerHTML;
-    }
-
-    function renderRun(run) {
-        currentRun = run;
-        document.querySelector("h1").textContent = `Run #${run.id}`;
-        document.getElementById("run-subtitle").innerHTML =
-            `Pipeline: <strong>${escapeHtml(run.pipeline_name)}</strong>` +
-            (run.tenant ? ` | Tenant: <strong>${escapeHtml(run.tenant)}</strong>` : "");
-        document.getElementById("run-status").innerHTML =
-            `<span class="status-badge status-${run.status}">${run.status}</span>`;
-        document.getElementById("run-started").textContent = formatDate(run.started_at);
-        document.getElementById("run-duration").textContent = run.completed_at
-            ? formatDuration(run.started_at, run.completed_at)
-            : run.status === "running" ? "Running..." : formatDuration(run.started_at, null);
-        document.getElementById("run-trigger").textContent = run.trigger_type || "-";
-        document.getElementById("retry-button").classList.toggle("d-none", run.status !== "failed");
-
-        if (run.status === "running" || run.status === "pending") {
-            if (!refreshInterval) {
-                refreshInterval = setInterval(loadRun, 10000);
-            }
-        } else if (refreshInterval) {
-            clearInterval(refreshInterval);
-            refreshInterval = null;
+    if (!selectedRetryTaskId) {
+        const firstFailed = taskRuns.find((task) => task.status === "failed") || taskRuns.find((task) => task.status === "skipped");
+        if (firstFailed) {
+            selectedRetryTaskId = firstFailed.task_id;
         }
     }
+    syncRetrySelection(taskRuns);
+}
 
-    function renderTasks(tasks) {
-        const table = document.getElementById("tasks-table");
-        document.getElementById("task-count-badge").textContent = `${tasks.length} tasks`;
-
-        if (!tasks.length) {
-            table.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No task records yet</td></tr>';
-            return;
-        }
-
-        table.innerHTML = tasks.map((task) => `
-            <tr class="table-${task.status === "success" ? "success" : task.status === "failed" ? "danger" : ""}">
-                <td><strong>${escapeHtml(task.task_name)}</strong></td>
-                <td><span class="status-badge status-${task.status}">${task.status}</span></td>
-                <td>${formatDate(task.started_at)}</td>
-                <td>${formatDate(task.completed_at)}</td>
-                <td>${task.attempt}</td>
-                <td>${task.error_message ? `<span class="text-danger">${escapeHtml(task.error_message)}</span>` : '<span class="text-muted">-</span>'}</td>
-                <td>
-                    <button class="btn btn-sm btn-outline-primary" onclick="showLogs('${escapeHtml(task.task_name)}')">
-                        <i class="bi bi-file-text"></i> Logs
-                    </button>
-                </td>
-            </tr>
-        `).join("");
+function syncRetrySelection(taskRuns) {
+    const label = document.getElementById("retry-selection-label");
+    if (!label) {
+        return;
     }
-
-    async function loadRun() {
-        try {
-            const response = await axios.get(`/api/runs/${runId}`);
-            renderRun(response.data.run);
-            renderTasks(response.data.tasks || []);
-        } catch (error) {
-            document.getElementById("tasks-table").innerHTML =
-                '<tr><td colspan="7" class="text-center text-danger">Failed to load run details</td></tr>';
-        }
-    }
-
-    async function showLogs(taskName) {
-        const modal = new bootstrap.Modal(document.getElementById("logsModal"));
-        document.getElementById("log-task-name").textContent = taskName;
-        document.getElementById("log-content").innerHTML =
-            '<div class="text-center"><div class="spinner-border text-primary"></div></div>';
-        modal.show();
-
-        try {
-            const response = await axios.get(`/api/runs/${runId}/tasks/${encodeURIComponent(taskName)}/logs`);
-            const logs = response.data.logs || "No logs available";
-            document.getElementById("log-content").innerHTML = `<pre>${escapeHtml(logs)}</pre>`;
-        } catch (error) {
-            document.getElementById("log-content").innerHTML =
-                '<div class="alert alert-danger">Failed to load logs</div>';
-        }
-    }
-
-    function showRetryModal() {
-        const modal = new bootstrap.Modal(document.getElementById("retryModal"));
-        modal.show();
-    }
-
-    async function submitRetry() {
-        const mode = document.querySelector('input[name="retryMode"]:checked').value;
-        const tenant = document.getElementById("retry-tenant").value || null;
-
-        try {
-            const response = await axios.post(`/api/runs/${runId}/retry`, {
-                run_id: runId,
-                mode: mode,
-                tenant: tenant
-            });
-
-            alert(`Retry started! New run ID: ${response.data.run_id}`);
-            bootstrap.Modal.getInstance(document.getElementById("retryModal")).hide();
-            setTimeout(() => {
-                window.location.href = `/runs/${response.data.run_id}`;
-            }, 1000);
-        } catch (error) {
-            alert(`Error: ${error.response?.data?.detail || error.message}`);
-        }
-    }
-
-    function refreshPage() {
-        loadRun();
-    }
-
-    document.addEventListener("DOMContentLoaded", loadRun);
-    document.addEventListener("beforeunload", () => {
-        if (refreshInterval) {
-            clearInterval(refreshInterval);
-        }
+    const selectedTask = taskRuns.find((task) => task.task_id === selectedRetryTaskId);
+    document.querySelectorAll("[data-retry-task]").forEach((card) => {
+        card.classList.toggle("retry-selected", card.dataset.retryTask === selectedRetryTaskId);
     });
+    if (selectedTask) {
+        label.textContent = `Selected task ${selectedTask.task_id}. Resume will reuse successful upstream work and rerun failed or skipped tasks.`;
+    } else {
+        label.textContent = "Retry the failed flow using resume or restart the whole pipeline from the beginning.";
+    }
+}
+
+function selectRetryTask(taskId) {
+    selectedRetryTaskId = taskId;
+    const currentTasks = window.currentTaskRuns || [];
+    syncRetrySelection(currentTasks);
+}
+
+function renderLogs(logs) {
+    const viewer = document.getElementById("log-viewer");
+    if (!logs.length) {
+        viewer.innerHTML = '<div class="empty-state">No output has been captured yet for this run.</div>';
+        return;
+    }
+
+    viewer.innerHTML = logs.map((line) => `
+        <div class="log-line">
+            <time>${escapeHtml(line.time_label)}</time>
+            <div class="log-task">${escapeHtml(line.task_id || "pipeline")}</div>
+            <div>${escapeHtml(line.message)}</div>
+        </div>
+    `).join("");
+}
+
+function renderTaskRuns(taskRuns) {
+    window.currentTaskRuns = taskRuns;
+    const grid = document.getElementById("task-run-grid");
+    grid.innerHTML = taskRuns.map((task) => `
+        <article class="task-card ${task.status === "failed" ? "task-card-failed retryable" : ""} ${task.status === "success" ? "task-card-success" : ""} ${task.status === "skipped" ? "retryable" : ""} ${task.task_id === selectedRetryTaskId ? "retry-selected" : ""}" ${task.status === "failed" || task.status === "skipped" ? `onclick="selectRetryTask('${escapeHtml(task.task_id)}')" data-retry-task="${escapeHtml(task.task_id)}"` : ""}>
+            <div class="task-card-header">
+                <div>
+                    <h3 class="card-title">${escapeHtml(task.title)}</h3>
+                    <div class="muted mono" style="margin-top:4px;">${escapeHtml(task.task_id)}</div>
+                </div>
+                <span class="status-badge ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span>
+            </div>
+            <div class="task-stats">
+                <span class="task-type-badge">${escapeHtml(task.task_type)}</span>
+                <span class="meta-pill">logs ${task.log_count}</span>
+                <span class="meta-pill">duration ${task.duration_seconds ? `${task.duration_seconds.toFixed(1)}s` : "-"}</span>
+            </div>
+            <pre class="code-block" style="margin-top:14px;">${escapeHtml(task.command_preview)}</pre>
+            ${task.error ? `<p class="footer-note">${escapeHtml(task.error)}</p>` : ""}
+            ${task.status === "failed" || task.status === "skipped" ? '<p class="footer-note">Click this task to focus the retry controls above.</p>' : ""}
+        </article>
+    `).join("");
+    updateRetryPanel(taskRuns);
+    renderDagInto(
+        "run-dag-stage",
+        taskRuns.map((task) => ({
+            task_id: task.task_id,
+            title: task.title,
+            task_type: task.task_type,
+            depends_on: task.depends_on,
+            command_preview: task.command_preview,
+            status: task.status,
+        })),
+        Object.fromEntries(taskRuns.map((task) => [task.task_id, task.status])),
+        {
+            clickableStatuses: ["failed", "skipped"],
+            onNodeClick: (node) => selectRetryTask(node.task_id),
+        },
+    );
+}
+
+async function refreshRun() {
+    if (!active) {
+        return;
+    }
+
+    try {
+        const payload = await piplyRequest(`/api/runs/${runId}`);
+        document.getElementById("run-status").textContent = payload.run.status;
+        document.getElementById("run-status").className = `status-badge ${payload.run.status}`;
+        document.getElementById("run-duration").textContent = payload.run.duration_seconds ? `${payload.run.duration_seconds.toFixed(1)}s` : "-";
+        document.getElementById("run-exit-code").textContent = payload.run.exit_code ?? "pending";
+        document.getElementById("run-task-count").textContent = `${payload.run.successful_tasks}/${payload.run.task_count}`;
+        renderTaskRuns(payload.task_runs);
+        renderLogs(payload.logs);
+        active = payload.run.status === "queued" || payload.run.status === "running";
+    } catch (error) {
+        active = false;
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    renderTaskRuns(initialTaskRuns);
+    if (active) {
+        setInterval(refreshRun, 3000);
+    }
+});
 </script>
 {% endblock %}

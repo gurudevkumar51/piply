@@ -1,372 +1,165 @@
 {% extends "base.html" %}
 
+{% block title %}{{ pipeline.title }} - Piply{% endblock %}
+
 {% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <nav aria-label="breadcrumb">
-            <ol class="breadcrumb">
-                <li class="breadcrumb-item"><a href="/pipelines">Pipelines</a></li>
-                <li class="breadcrumb-item active">{{ pipeline_name }}</li>
-            </ol>
-        </nav>
-        <h1 class="mb-3">{{ pipeline_name }}</h1>
-        <div class="d-flex gap-2 mb-3">
-            <button class="btn btn-primary" onclick="showRunModal()">
-                <i class="bi bi-play-fill"></i> Run Pipeline
+<div class="page-grid">
+    <section class="hero">
+        <div class="eyebrow">Pipeline detail</div>
+        <h1 class="hero-headline">{{ pipeline.title }} <span>DAG view</span>.</h1>
+        <p class="hero-copy">{{ pipeline.description or "This pipeline is ready for execution, but it still needs a stronger operator-facing description in the config." }}</p>
+        <div class="hero-actions">
+            <button class="button primary" data-run-button="{{ pipeline.pipeline_id }}" onclick="triggerPipeline('{{ pipeline.pipeline_id }}')">Run now</button>
+            <button class="button {% if pipeline.paused %}secondary{% else %}warn{% endif %}" onclick="togglePipelinePause('{{ pipeline.pipeline_id }}', {{ 'false' if pipeline.paused else 'true' }})">
+                {% if pipeline.paused %}Resume schedule{% else %}Pause schedule{% endif %}
             </button>
-            <button class="btn btn-outline-secondary" onclick="refreshPage()">
-                <i class="bi bi-arrow-clockwise"></i> Refresh
-            </button>
+            <a class="button ghost" href="/pipelines">Back to pipelines</a>
         </div>
-    </div>
-</div>
+        <div class="hero-meta" style="margin-top:18px;">
+            <span class="status-badge {% if pipeline.last_run %}{{ pipeline.last_run.status }}{% else %}queued{% endif %}">
+                {% if pipeline.last_run %}{{ pipeline.last_run.status }}{% else %}no runs yet{% endif %}
+            </span>
+            <span class="meta-pill">next {{ pipeline.next_run_label }}</span>
+            <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+            <span class="meta-pill">{{ pipeline.execution_summary }}</span>
+            {% for target in pipeline.trigger_targets %}
+            <span class="tag">triggers {{ target }}</span>
+            {% endfor %}
+        </div>
+    </section>
 
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span>DAG Visualization</span>
-                <div class="btn-group btn-group-sm" role="group">
-                    <button type="button" class="btn btn-outline-secondary" onclick="changeLayout('dagre')">Dagre</button>
-                    <button type="button" class="btn btn-outline-secondary" onclick="changeLayout('tree')">Tree</button>
-                </div>
+    <section class="detail-grid">
+        <article class="detail-card">
+            <div class="detail-label">Schedule</div>
+            <div class="detail-value">{{ pipeline.schedule_text }}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Primary entry</div>
+            <div class="detail-value mono path-value">{{ pipeline.primary_entry }}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Flow summary</div>
+            <div class="detail-value mono path-value">{{ pipeline.command_preview }}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Execution</div>
+            <div class="detail-value">{{ pipeline.execution_summary }}</div>
+        </article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Task graph</h2>
+                <p class="panel-copy">The graph keeps the last known task status visible in color while still leaving command details in the cards below.</p>
             </div>
-            <div class="card-body">
-                <div id="dag-container" class="pipeline-dag" style="min-height: 400px; overflow: auto;">
-                    <div class="text-center text-muted py-5">
-                        <div class="spinner-border text-primary" role="status">
-                            <span class="visually-hidden">Loading...</span>
-                        </div>
-                        <p class="mt-2">Loading pipeline data...</p>
+            <div class="legend-row">
+                <span class="status-badge success">success</span>
+                <span class="status-badge running">running</span>
+                <span class="status-badge failed">failed</span>
+                <span class="status-badge queued">queued</span>
+                <span class="status-badge skipped">skipped</span>
+            </div>
+        </div>
+        <div class="dag-shell">
+            <div class="dag-stage" id="dag-stage"></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Tasks</h2>
+                <p class="panel-copy">Commands and scripts stay visible so operators can see exactly what will execute.</p>
+            </div>
+        </div>
+
+        <div class="task-grid">
+            {% for task in tasks %}
+            {% set latest = task_run_map.get(task.task_id) %}
+            <article class="task-card {% if latest %}task-card-{{ latest.status }}{% endif %}">
+                <div class="task-card-header">
+                    <div>
+                        <h3 class="card-title">{{ task.title }}</h3>
+                        <div class="muted mono" style="margin-top:4px;">{{ task.task_id }}</div>
+                    </div>
+                    <div class="inline-actions">
+                        <span class="task-type-badge">{{ task.task_type }}</span>
+                        {% if latest %}
+                        <span class="status-badge {{ latest.status }}">{{ latest.status }}</span>
+                        {% endif %}
                     </div>
                 </div>
+
+                <p class="task-description">{{ task.description or "No task-specific description provided." }}</p>
+
+                <div class="task-stats">
+                    <span class="meta-pill">depends_on {{ task.depends_on|join(', ') if task.depends_on else 'none' }}</span>
+                    {% if latest %}
+                    <span class="meta-pill">logs {{ latest.log_count }}</span>
+                    <span class="meta-pill">duration {% if latest.duration_seconds is not none %}{{ "%.1fs"|format(latest.duration_seconds) }}{% else %}-{% endif %}</span>
+                    {% endif %}
+                </div>
+
+                <div style="margin-top:16px;">
+                    <div class="small-kicker">Command or target</div>
+                    <pre class="code-block" style="margin-top:10px;">{{ task.command_preview }}</pre>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Recent runs</h2>
+                <p class="panel-copy">Each run keeps task-level status counts and raw log history.</p>
             </div>
         </div>
-    </div>
-</div>
 
-<div class="row mb-4">
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header">Pipeline Configuration</div>
-            <div class="card-body">
-                <div class="mb-3">
-                    <strong>Name:</strong> {{ pipeline_name }}
-                </div>
-                <div class="mb-3">
-                    <strong>Steps:</strong>
-                    <ul class="mb-0" id="pipeline-steps-list">
-                        <li class="text-muted">Loading...</li>
-                    </ul>
-                </div>
-                <div class="mb-3">
-                    <strong>Tenants:</strong>
-                    <span id="pipeline-tenants" class="text-muted">Loading...</span>
-                </div>
-                <div class="mb-0">
-                    <strong>Schedule:</strong>
-                    <span id="pipeline-schedule" class="text-muted">Loading...</span>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-header">Recent Runs</div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table class="table table-sm table-hover mb-0">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Status</th>
-                                <th>Started</th>
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody id="recent-runs-table">
-                            <tr>
-                                <td colspan="4" class="text-center text-muted">Loading...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="modal fade" id="runModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Run Pipeline: {{ pipeline_name }}</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="run-form">
-                    <div class="mb-3">
-                        <label class="form-label">Tenant (optional)</label>
-                        <select class="form-select" id="run-tenant">
-                            <option value="">All tenants</option>
-                        </select>
+        {% if runs %}
+        <div class="run-list">
+            {% for run in runs %}
+            <article class="run-card">
+                <div class="run-card-header">
+                    <div>
+                        <a class="card-title" href="/runs/{{ run.run_id }}">{{ run.run_id }}</a>
+                        <p>{{ run.started_at or run.created_at }}</p>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Trigger Type</label>
-                        <select class="form-select" id="run-trigger-type">
-                            <option value="manual">Manual</option>
-                            <option value="schedule">Schedule</option>
-                            <option value="api">API</option>
-                        </select>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-primary" onclick="submitRun()">Run Pipeline</button>
-            </div>
+                    <span class="status-badge {{ run.status }}">{{ run.status }}</span>
+                </div>
+                <div class="meta-list">
+                    <span class="meta-pill">trigger {{ run.trigger }}</span>
+                    <span class="meta-pill">tasks {{ run.successful_tasks }}/{{ run.task_count }}</span>
+                    <span class="meta-pill">logs {{ run.log_count }}</span>
+                    <span class="meta-pill">duration {% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</span>
+                </div>
+                {% if run.retry_of %}
+                <p class="footer-note">retry of {{ run.retry_of }} using {{ run.retry_mode }}</p>
+                {% endif %}
+                {% if run.error %}
+                <p class="footer-note">{{ run.error }}</p>
+                {% endif %}
+            </article>
+            {% endfor %}
         </div>
-    </div>
+        {% else %}
+        <div class="empty-state">This pipeline has not been executed yet. Use the run button above to create its first run record.</div>
+        {% endif %}
+    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/@dagrejs/graphlib@2.1.13/dist/graphlib.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.2/dist/dagre.min.js" defer></script>
-<script defer>
-    const pipelineName = {{ pipeline_name|tojson }};
-    let pipelineData = null;
-    let currentLayout = "dagre";
+<script>
+const dagTasks = {{ dag_tasks|tojson }};
+const taskStateMap = {{ task_state_map|tojson }};
 
-    function renderDAG(data) {
-        if (!window.graphlib || !window.dagre) {
-            document.getElementById("dag-container").innerHTML =
-                '<div class="alert alert-danger">DAG libraries failed to load.</div>';
-            return;
-        }
-
-        const container = document.getElementById("dag-container");
-        const steps = data.steps || [];
-
-        if (steps.length === 0) {
-            container.innerHTML = '<div class="text-muted">No steps defined</div>';
-            return;
-        }
-
-        const g = new window.graphlib.Graph().setGraph({});
-
-        steps.forEach((step) => {
-            g.setNode(step.name, {
-                label: step.name,
-                type: step.type,
-                width: 160,
-                height: 60
-            });
-        });
-
-        steps.forEach((step) => {
-            (step.depends_on || []).forEach((dep) => {
-                g.setEdge(dep, step.name, {});
-            });
-        });
-
-        const layout = currentLayout === "dagre" ? dagreDagre : dagreTree;
-        layout(g, { rankdir: "LR", nodesep: 30, ranksep: 50 });
-
-        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        svg.style.width = "100%";
-        svg.style.height = "100%";
-        svg.style.minHeight = "400px";
-
-        const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-        const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-        marker.setAttribute("id", "arrowhead");
-        marker.setAttribute("markerWidth", "10");
-        marker.setAttribute("markerHeight", "7");
-        marker.setAttribute("refX", "9");
-        marker.setAttribute("refY", "3.5");
-        marker.setAttribute("orient", "auto");
-
-        const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-        polygon.setAttribute("points", "0 0, 10 3.5, 0 7");
-        polygon.setAttribute("fill", "#94a3b8");
-        marker.appendChild(polygon);
-        defs.appendChild(marker);
-        svg.appendChild(defs);
-
-        g.edges().forEach((edgeRef) => {
-            const edge = g.edge(edgeRef);
-            const points = edge.points || [];
-            if (points.length < 2) {
-                return;
-            }
-
-            const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
-            let pathData = `M ${points[0].x} ${points[0].y}`;
-            for (let index = 1; index < points.length; index += 1) {
-                pathData += ` L ${points[index].x} ${points[index].y}`;
-            }
-            line.setAttribute("d", pathData);
-            line.setAttribute("class", "dag-edge");
-            line.setAttribute("marker-end", "url(#arrowhead)");
-            svg.appendChild(line);
-        });
-
-        g.nodes().forEach((nodeKey) => {
-            const node = g.node(nodeKey);
-            const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-            group.setAttribute(
-                "transform",
-                `translate(${node.x - node.width / 2}, ${node.y - node.height / 2})`
-            );
-
-            const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-            rect.setAttribute("width", node.width);
-            rect.setAttribute("height", node.height);
-            rect.setAttribute("rx", "8");
-            rect.setAttribute("fill", "white");
-            rect.setAttribute("stroke", "#e2e8f0");
-            rect.setAttribute("stroke-width", "2");
-            rect.setAttribute("class", "dag-node");
-
-            const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            text.setAttribute("x", node.width / 2);
-            text.setAttribute("y", node.height / 2);
-            text.setAttribute("text-anchor", "middle");
-            text.setAttribute("dominant-baseline", "middle");
-            text.setAttribute("font-size", "14");
-            text.setAttribute("font-weight", "500");
-            text.textContent = node.label;
-
-            group.appendChild(rect);
-            group.appendChild(text);
-            svg.appendChild(group);
-        });
-
-        container.innerHTML = "";
-        container.appendChild(svg);
-    }
-
-    function dagreDagre(g, opts) {
-        window.dagre.layout(g, opts);
-    }
-
-    function dagreTree(g, opts) {
-        dagreDagre(g, { ...opts, rankdir: "TB" });
-    }
-
-    function changeLayout(layout) {
-        currentLayout = layout;
-        if (pipelineData) {
-            renderDAG(pipelineData);
-        }
-    }
-
-    function populatePipelineDetails(data) {
-        const stepsList = document.getElementById("pipeline-steps-list");
-        const tenantsEl = document.getElementById("pipeline-tenants");
-        const scheduleEl = document.getElementById("pipeline-schedule");
-        const tenantSelect = document.getElementById("run-tenant");
-
-        stepsList.innerHTML = "";
-        (data.steps || []).forEach((step) => {
-            const item = document.createElement("li");
-            item.textContent = `${step.name} `;
-
-            const badge = document.createElement("span");
-            badge.className = "badge bg-secondary";
-            badge.textContent = step.type || "unknown";
-
-            item.appendChild(badge);
-            stepsList.appendChild(item);
-        });
-
-        if (!stepsList.children.length) {
-            stepsList.innerHTML = '<li class="text-muted">No steps defined</li>';
-        }
-
-        const tenants = data.tenants || [];
-        tenantsEl.textContent = tenants.length ? tenants.join(", ") : "None";
-        tenantsEl.classList.toggle("text-muted", !tenants.length);
-
-        const schedule = data.config?.schedule || "No schedule";
-        scheduleEl.textContent = schedule;
-        scheduleEl.classList.toggle("text-muted", !data.config?.schedule);
-
-        tenantSelect.innerHTML = '<option value="">All tenants</option>';
-        tenants.forEach((tenant) => {
-            const option = document.createElement("option");
-            option.value = tenant;
-            option.textContent = tenant;
-            tenantSelect.appendChild(option);
-        });
-    }
-
-    function loadRecentRuns(runs) {
-        const table = document.getElementById("recent-runs-table");
-        if (!runs || runs.length === 0) {
-            table.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No runs yet</td></tr>';
-            return;
-        }
-
-        table.innerHTML = runs.map((run) => `
-            <tr>
-                <td>#${run.id}</td>
-                <td><span class="status-badge status-${run.status}">${run.status}</span></td>
-                <td>${new Date(run.started_at).toLocaleString()}</td>
-                <td><a href="/runs/${run.id}" class="btn btn-sm btn-outline-primary">Details</a></td>
-            </tr>
-        `).join("");
-    }
-
-    async function loadPipelineData() {
-        try {
-            const response = await axios.get(`/api/pipelines/${encodeURIComponent(pipelineName)}`);
-            pipelineData = response.data;
-            populatePipelineDetails(pipelineData);
-            renderDAG(pipelineData);
-            loadRecentRuns(pipelineData.recent_runs);
-        } catch (error) {
-            document.getElementById("dag-container").innerHTML =
-                `<div class="alert alert-danger">Failed to load pipeline data: ${error.response?.status || error.message}</div>`;
-            document.getElementById("pipeline-steps-list").innerHTML =
-                '<li class="text-danger">Failed to load pipeline steps</li>';
-            document.getElementById("pipeline-tenants").textContent = "Unavailable";
-            document.getElementById("pipeline-schedule").textContent = "Unavailable";
-            document.getElementById("recent-runs-table").innerHTML =
-                '<tr><td colspan="4" class="text-center text-danger">Failed to load recent runs</td></tr>';
-        }
-    }
-
-    function showRunModal() {
-        const modal = new bootstrap.Modal(document.getElementById("runModal"));
-        modal.show();
-    }
-
-    async function submitRun() {
-        const tenant = document.getElementById("run-tenant").value || null;
-        const triggerType = document.getElementById("run-trigger-type").value;
-
-        try {
-            const response = await axios.post("/api/runs", {
-                pipeline_name: pipelineName,
-                tenant: tenant,
-                trigger_type: triggerType
-            });
-
-            alert(`Run started! Run ID: ${response.data.id}`);
-            bootstrap.Modal.getInstance(document.getElementById("runModal")).hide();
-            setTimeout(() => window.location.reload(), 2000);
-        } catch (error) {
-            alert(`Error starting run: ${error.response?.data?.detail || error.message}`);
-        }
-    }
-
-    function refreshPage() {
-        window.location.reload();
-    }
-
-    document.addEventListener("DOMContentLoaded", loadPipelineData);
+document.addEventListener("DOMContentLoaded", () => {
+    renderDagInto("dag-stage", dagTasks, taskStateMap);
+});
 </script>
 {% endblock %}

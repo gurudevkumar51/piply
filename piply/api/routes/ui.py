@@ -1,42 +1,161 @@
-"""
-UI page routes (HTML pages).
-"""
-from fastapi import APIRouter, Request, Depends
+"""Server-rendered UI routes for the Piply dashboard."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 router = APIRouter(tags=["ui"])
 
 
-def get_templates(request: Request):
-    """Dependency to get templates from app state."""
+def _templates(request: Request):
+    """Resolve the shared Jinja template environment."""
     return request.app.state.templates
 
 
+def _service(request: Request):
+    """Resolve the shared PipelineService from the app state."""
+    return request.app.state.service
+
+
 @router.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, templates=Depends(get_templates)):
-    """Main dashboard page."""
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+def dashboard_page(request: Request) -> HTMLResponse:
+    """Render the dashboard page."""
+    service = _service(request)
+    payload = service.dashboard()
+    return _templates(request).TemplateResponse(
+        request,
+        "dashboard.html",
+        {
+            "project": payload["project"],
+            "stats": payload["stats"],
+            "pipelines": payload["pipelines"],
+            "recent_runs": payload["recent_runs"],
+            "scheduler": payload["scheduler"],
+            "page": "dashboard",
+        },
+    )
 
 
 @router.get("/pipelines", response_class=HTMLResponse)
-def pipelines_page(request: Request, templates=Depends(get_templates)):
-    """Pipelines listing page."""
-    return templates.TemplateResponse("pipelines.html", {"request": request})
+def pipelines_page(request: Request) -> HTMLResponse:
+    """Render the pipeline list page."""
+    service = _service(request)
+    return _templates(request).TemplateResponse(
+        request,
+        "pipelines.html",
+        {
+            "project": service.project,
+            "pipelines": service.list_pipelines(),
+            "scheduler": service.scheduler_snapshot(),
+            "page": "pipelines",
+        },
+    )
+
+
+@router.get("/pipelines/{pipeline_id}", response_class=HTMLResponse)
+def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
+    """Render the pipeline detail page."""
+    service = _service(request)
+    try:
+        detail = service.get_pipeline_detail(pipeline_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    dag_tasks = [
+        {
+            "task_id": task.task_id,
+            "title": task.title,
+            "task_type": task.task_type,
+            "depends_on": list(task.depends_on),
+            "command_preview": task.command_preview,
+        }
+        for task in detail["pipeline"].tasks.values()
+    ]
+    task_state_map = dict(detail["summary"].latest_task_states)
+    task_run_map = {task.task_id: task for task in detail["latest_task_runs"]}
+    return _templates(request).TemplateResponse(
+        request,
+        "pipeline_detail.html",
+        {
+            "project": service.project,
+            "pipeline_definition": detail["pipeline"],
+            "pipeline": detail["summary"],
+            "tasks": list(detail["pipeline"].tasks.values()),
+            "latest_task_runs": detail["latest_task_runs"],
+            "dag_tasks": dag_tasks,
+            "task_state_map": task_state_map,
+            "task_run_map": task_run_map,
+            "runs": detail["recent_runs"],
+            "scheduler": service.scheduler_snapshot(),
+            "page": "pipelines",
+        },
+    )
 
 
 @router.get("/runs", response_class=HTMLResponse)
-def runs_page(request: Request, templates=Depends(get_templates)):
-    """Pipeline runs listing page."""
-    return templates.TemplateResponse("runs.html", {"request": request})
-
-
-@router.get("/pipelines/{pipeline_name}", response_class=HTMLResponse)
-def pipeline_detail_page(request: Request, pipeline_name: str, templates=Depends(get_templates)):
-    """Pipeline detail page with DAG visualization."""
-    return templates.TemplateResponse("pipeline_detail.html", {"request": request, "pipeline_name": pipeline_name})
+def runs_page(request: Request) -> HTMLResponse:
+    """Render the run history page."""
+    service = _service(request)
+    return _templates(request).TemplateResponse(
+        request,
+        "runs.html",
+        {
+            "project": service.project,
+            "runs": service.list_runs(limit=80),
+            "scheduler": service.scheduler_snapshot(),
+            "page": "runs",
+        },
+    )
 
 
 @router.get("/runs/{run_id}", response_class=HTMLResponse)
-def run_detail_page(request: Request, run_id: int, templates=Depends(get_templates)):
-    """Run detail page with task status and logs."""
-    return templates.TemplateResponse("run_detail.html", {"request": request, "run_id": run_id})
+def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
+    """Render the run detail page."""
+    service = _service(request)
+    try:
+        run, task_runs, logs = service.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    dag_tasks = [
+        {
+            "task_id": task.task_id,
+            "title": task.title,
+            "task_type": task.task_type,
+            "depends_on": list(task.depends_on),
+            "command_preview": task.command_preview,
+            "status": task.status,
+        }
+        for task in task_runs
+    ]
+    task_run_payloads = [
+        {
+            "run_id": task.run_id,
+            "task_id": task.task_id,
+            "title": task.title,
+            "task_type": task.task_type,
+            "status": task.status,
+            "position": task.position,
+            "command_preview": task.command_preview,
+            "depends_on": list(task.depends_on),
+            "log_count": task.log_count,
+            "duration_seconds": task.duration_seconds,
+            "error": task.error,
+        }
+        for task in task_runs
+    ]
+
+    return _templates(request).TemplateResponse(
+        request,
+        "run_detail.html",
+        {
+            "project": service.project,
+            "run": run,
+            "task_runs": task_runs,
+            "dag_tasks": dag_tasks,
+            "task_run_payloads": task_run_payloads,
+            "logs": logs,
+            "scheduler": service.scheduler_snapshot(),
+            "page": "runs",
+        },
+    )
