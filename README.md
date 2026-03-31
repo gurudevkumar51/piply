@@ -2,36 +2,45 @@
 
 Piply is a lightweight orchestration layer for running and scheduling Python-first workflows with a professional built-in UI.
 
-This version is intentionally small:
+This version stays intentionally small:
 
-- YAML-defined pipelines and task graphs
-- Local execution with Python's standard library
-- SQLite-backed run history and raw logs
-- Built-in scheduler for `cron`, `every`, and `interval_seconds`
-- FastAPI + Jinja UI with a light operator-friendly theme
-- Modular task operators for `python`, `cli`, `api`, and `ssh`
+- YAML-defined pipelines and task DAGs
+- local execution with Python's standard library plus a small FastAPI UI/API
+- SQLite-backed run history, task history, and raw logs
+- built-in scheduler for `cron`, `every`, and `interval_seconds`
+- packaged auth through env vars or a `.env` file
+- modular operators for `python`, `cli`, `api`, `webhook`, `email`, and `ssh`
 
 ## What It Does
 
 Piply can:
 
 - run one pipeline with multiple tasks
-- respect task dependencies inside a pipeline
+- infer sequential or parallel execution automatically from task dependencies
+- cap maximum parallel execution globally or per pipeline
 - trigger one pipeline after another completes successfully
-- execute tasks sequentially or in dependency-aware parallel mode
 - schedule pipelines on a clock
 - store task-level statuses and raw logs
-- show a DAG-style flow view inspired by tools like Airflow while still keeping commands and scripts visible
+- retry failed runs with `resume` or `startover`
+- detect stale "running" runs using heartbeats and mark them failed
+- show an Airflow-style DAG view while still keeping commands and scripts visible
 
 ## Quick Start
 
 ```bash
 pip install -e .
+copy .env.example .env
 piply validate --config piply-demo/piply.yaml
 piply start --config piply-demo/piply.yaml
 ```
 
 Open `http://127.0.0.1:8000`.
+
+Background mode:
+
+```bash
+piply start --config piply-demo/piply.yaml -d
+```
 
 ## Example Config
 
@@ -48,9 +57,7 @@ pipelines:
     description: Multi-task extract pipeline with a downstream trigger.
     schedule:
       every: 10m
-    execution:
-      mode: parallel
-      max_parallel_tasks: 2
+    max_parallel_tasks: 2
     triggers_on_success:
       - report_demo
     tasks:
@@ -73,7 +80,12 @@ pipelines:
       build_report:
         type: python
         path: pipelines/report.py
+        function: build_report
+        kwargs:
+          report_name: downstream-demo
 ```
+
+`mode: parallel` is no longer required. Piply derives concurrency from the DAG and uses `max_parallel_tasks` only as the cap.
 
 ## Task Operators
 
@@ -86,6 +98,23 @@ tasks:
     path: pipelines/extract.py
     args: ["--records", "100"]
 ```
+
+```yaml
+tasks:
+  build_report:
+    type: python
+    path: pipelines/report.py
+    function: build_report
+    kwargs:
+      report_name: nightly
+```
+
+Supported inline execution patterns:
+
+- `path` + `function`
+- `module` + `function`
+- `call: package.module:function`
+- `call: relative/or/absolute_file.py::function`
 
 ### CLI
 
@@ -114,6 +143,23 @@ tasks:
 
 The `token` field becomes `Authorization: Bearer <token>`.
 
+### Webhook & Email
+
+```yaml
+tasks:
+  notify_slack:
+    type: webhook
+    url: https://hooks.slack.com/services/...
+    body: '{"text": "Flow finished"}'
+
+  notify_team:
+    type: email
+    smtp_host: smtp.internal.local
+    email_to: ["team@example.com"]
+    email_subject: "Pipeline Success"
+    email_body: "The nightly extract has finished."
+```
+
 ### SSH
 
 ```yaml
@@ -127,6 +173,28 @@ tasks:
 
 If `command` is omitted, Piply runs a simple SSH probe using `echo piply-ssh-ok`.
 
+## Authentication And Runtime Settings
+
+Piply reads settings from real environment variables and from an optional `.env` file in the current directory or next to `piply.yaml`.
+
+Common settings:
+
+```env
+PIPLY_DEFAULT_MAX_PARALLEL_TASKS=4
+PIPLY_STALE_RUN_TIMEOUT_SECONDS=3600
+PIPLY_HEARTBEAT_INTERVAL_SECONDS=10
+PIPLY_AUTH_ENABLED=true
+PIPLY_AUTH_USERNAME=admin
+PIPLY_AUTH_PASSWORD=change-me
+PIPLY_API_TOKEN=replace-with-long-token
+```
+
+Behavior:
+
+- UI pages use HTTP Basic auth
+- API routes accept HTTP Basic auth and optional Bearer token auth
+- stale active runs are auto-failed after the configured timeout
+
 ## Working Commands
 
 These commands work in the current codebase:
@@ -139,7 +207,10 @@ piply tasks list extract_demo --config piply-demo/piply.yaml
 piply run extract_demo --config piply-demo/piply.yaml
 piply run extract_demo --config piply-demo/piply.yaml --detach
 piply runs --config piply-demo/piply.yaml
+piply start --config piply-demo/piply.yaml
 piply start --config piply-demo/piply.yaml --reload
+piply start --config piply-demo/piply.yaml -d
+piply stop --config piply-demo/piply.yaml
 piply ui --config piply-demo/piply.yaml
 python run_api.py
 ```
@@ -148,41 +219,19 @@ Notes:
 
 - `piply start` is the primary server command.
 - `piply ui` is a compatibility alias for `piply start`.
-- `piply init` creates two starter pipelines with three tasks in the main flow and a downstream report flow.
+- `piply init` creates two starter pipelines with three tasks in the main flow and a downstream `python_call` report flow.
 
 ## UI Notes
 
 The UI focuses on operator clarity:
 
 - light color theme
-- dashboard overview for pipelines and recent runs
-- pipeline detail page with DAG view and visible command previews
-- run detail page with task-level status cards and retry controls
+- richer DAG controls with zoom, pan, tree view, and edge labels
+- live task status colors on running DAGs
+- run detail page with live duration, retry controls, and graph/log split layout
 - raw logs shown newest first
 - timestamps formatted as `HH:MM:SS.SSS`
-
-## Retry Modes
-
-Failed runs can be retried from the UI or API in two ways:
-
-- `resume` reuses successful upstream work and reruns failed or skipped tasks
-- `startover` reruns the full pipeline from the beginning
-
-## Project Layout
-
-The active runtime lives in:
-
-- `piply/core/loader.py`
-- `piply/core/models.py`
-- `piply/core/scheduling.py`
-- `piply/core/scheduler.py`
-- `piply/core/service.py`
-- `piply/core/store.py`
-- `piply/engine/local_engine.py`
-- `piply/api/app.py`
-- `piply/api/routes/`
-- `piply/ui/templates/`
-- `piply/ui/static/`
+- small vanilla JS modules instead of a heavier frontend stack
 
 ## Verification
 
@@ -190,7 +239,7 @@ Typical local checks:
 
 ```bash
 python -m pytest -q
-python -m compileall piply
+python -m compileall piply tests
 piply validate --config piply-demo/piply.yaml
 piply run extract_demo --config piply-demo/piply.yaml --wait
 ```
@@ -201,11 +250,8 @@ Planned next steps:
 
 - `piply logs` for direct CLI log streaming without opening the UI
 - `piply tasks run` for targeted task execution
-- `piply pause` and `piply resume` CLI commands
-- secrets and credential helpers
-- richer DAG interactions such as zoom, pan, and edge labels
-- optional notifications and webhooks for run outcomes
-- packaged authentication for the web UI and API
+- CLI pause and resume commands
+
 
 ## More Docs
 

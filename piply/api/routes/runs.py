@@ -66,3 +66,28 @@ def retry_run(request: Request, run_id: str, payload: RetryRequest) -> RunRespon
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(retry_run_record)
+
+
+@router.get("/{run_id}/logs")
+def get_run_logs(
+    request: Request,
+    run_id: str,
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, object]:
+    """Return paginated raw logs for a specific run."""
+    service = _get_service(request)
+    try:
+        run = service.store.get_run(run_id)
+        if not run:
+            raise KeyError(run_id)
+        logs = service.store.list_logs(run_id, limit=limit, offset=offset)
+        return {
+            "run_id": run_id,
+            "total": run.log_count,
+            "limit": limit,
+            "offset": offset,
+            "logs": [LogResponse.from_record(item).model_dump() for item in logs],
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

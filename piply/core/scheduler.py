@@ -48,6 +48,7 @@ class PipelineScheduler:
         """Evaluate due schedules and launch eligible pipeline runs."""
         now = datetime.now(timezone.utc)
         self.service.store.set_meta("scheduler_heartbeat", now.isoformat())
+        self.service.reconcile_runtime_health()
         self.service.reload_project()
 
         for summary in self.service.list_pipelines():

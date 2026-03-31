@@ -10,7 +10,9 @@ from typing import Any
 
 import yaml
 
-from .models import ExecutionMode, PipelineDefinition, ProjectDefinition, TaskDefinition
+from piply.settings import load_settings
+
+from .models import PipelineDefinition, ProjectDefinition, TaskDefinition
 from .scheduling import CronSchedule, IntervalSchedule, ScheduleError, parse_interval
 
 
@@ -104,25 +106,41 @@ def _parse_schedule(raw_value: Any, timezone_name: str):
 def _parse_execution(
     raw_value: Any,
     pipeline_id: str,
-) -> tuple[ExecutionMode, int]:
-    """Parse sequential or parallel execution settings for one pipeline."""
+    *,
+    default_max_parallel_tasks: int,
+    explicit_max_parallel_tasks: Any = None,
+) -> int:
+    """Parse concurrency settings while keeping legacy execution.mode support."""
+    raw_value = explicit_max_parallel_tasks if explicit_max_parallel_tasks is not None else raw_value
     if raw_value in (None, "", False):
-        return "sequential", 1
+        return default_max_parallel_tasks
 
-    if isinstance(raw_value, str):
-        mode = raw_value.strip().lower()
-        max_parallel_tasks = 4
+    if isinstance(raw_value, int):
+        max_parallel_tasks = raw_value
+        mode = None
+    elif isinstance(raw_value, str):
+        stripped = raw_value.strip().lower()
+        if stripped.isdigit():
+            max_parallel_tasks = int(stripped)
+            mode = None
+        elif stripped in {"sequential", "parallel"}:
+            mode = stripped
+            max_parallel_tasks = default_max_parallel_tasks
+        else:
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' execution must be a worker count, 'sequential', 'parallel', or a mapping"
+            )
     elif isinstance(raw_value, dict):
-        mode = str(raw_value.get("mode") or "sequential").strip().lower()
+        mode = None if raw_value.get("mode") is None else str(raw_value.get("mode")).strip().lower()
         max_parallel_tasks = int(
-            raw_value.get("max_parallel_tasks", raw_value.get("workers", 4))
+            raw_value.get("max_parallel_tasks", raw_value.get("workers", default_max_parallel_tasks))
         )
     else:
         raise ConfigError(
-            f"Pipeline '{pipeline_id}' execution must be a string or mapping"
+            f"Pipeline '{pipeline_id}' execution must be an int, string, or mapping"
         )
 
-    if mode not in {"sequential", "parallel"}:
+    if mode not in {None, "sequential", "parallel"}:
         raise ConfigError(
             f"Pipeline '{pipeline_id}' execution mode must be 'sequential' or 'parallel'"
         )
@@ -131,8 +149,8 @@ def _parse_execution(
             f"Pipeline '{pipeline_id}' max_parallel_tasks must be greater than zero"
         )
     if mode == "sequential":
-        max_parallel_tasks = 1
-    return mode, max_parallel_tasks
+        return 1
+    return max_parallel_tasks
 
 
 def _normalize_expected_status(raw_value: Any, label: str) -> tuple[int, ...]:
@@ -180,6 +198,30 @@ def _validate_task_graph(pipeline_id: str, tasks: dict[str, TaskDefinition]) -> 
 
     for task_id in tasks:
         visit(task_id)
+
+
+def _detect_parallelism(tasks: dict[str, TaskDefinition]) -> bool:
+    """Return whether the DAG can execute more than one task at the same time."""
+    remaining_dependencies = {
+        task_id: set(task.depends_on) for task_id, task in tasks.items()
+    }
+    ready = sorted(task_id for task_id, dependencies in remaining_dependencies.items() if not dependencies)
+    processed: set[str] = set()
+
+    while ready:
+        if len(ready) > 1:
+            return True
+        current_batch = list(ready)
+        ready = []
+        for task_id in current_batch:
+            processed.add(task_id)
+            for candidate_id, dependencies in remaining_dependencies.items():
+                if task_id in dependencies:
+                    dependencies.remove(task_id)
+                    if not dependencies and candidate_id not in processed and candidate_id not in ready:
+                        ready.append(candidate_id)
+        ready.sort()
+    return False
 
 
 def _validate_pipeline_trigger_graph(pipelines: dict[str, PipelineDefinition]) -> None:
@@ -242,7 +284,7 @@ def _parse_task(
         )
 
     task_type = str(raw_task.get("type") or "python").lower()
-    if task_type not in {"python", "cli", "api", "ssh"}:
+    if task_type not in {"python", "python_call", "cli", "api", "ssh", "email", "webhook"}:
         raise ConfigError(
             f"Pipeline '{pipeline_id}' task '{task_id}' uses unsupported type '{task_type}'"
         )
@@ -266,35 +308,82 @@ def _parse_task(
         }
     )
 
-    if task_type == "python":
-        path_value = raw_task.get("path") or raw_task.get("script")
-        if not path_value:
-            raise ConfigError(
-                f"Pipeline '{pipeline_id}' task '{task_id}' requires path/script for python tasks"
+    if task_type == "python" or task_type == "python_call":
+        function_name = raw_task.get("function") or raw_task.get("method")
+        callable_ref = raw_task.get("call") or raw_task.get("callable")
+        
+        if function_name or callable_ref:
+            if callable_ref is None and function_name is not None:
+                if raw_task.get("module") is not None:
+                    callable_ref = f"{raw_task['module']}:{function_name}"
+                elif raw_task.get("path") is not None or raw_task.get("script") is not None:
+                    callable_path = _resolve_path(str(raw_task.get("path") or raw_task.get("script")), workspace)
+                    if callable_path is not None:
+                        callable_ref = f"{callable_path}::{function_name}"
+            if callable_ref is None:
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' task '{task_id}' requires call/module+function/path+function for python callable tasks"
+                )
+            callable_text = _expand_string(str(callable_ref))
+            if "::" in callable_text:
+                raw_path, callable_name = callable_text.split("::", 1)
+                resolved_callable_path = _resolve_path(raw_path, workspace)
+                if resolved_callable_path is None:
+                    raise ConfigError(
+                        f"Pipeline '{pipeline_id}' task '{task_id}' callable path could not be resolved"
+                    )
+                callable_text = f"{resolved_callable_path}::{callable_name}"
+            raw_args = raw_task.get("args", [])
+            raw_kwargs = _ensure_mapping(
+                raw_task.get("kwargs"),
+                f"Pipeline '{pipeline_id}' task '{task_id}' kwargs",
             )
-        path = _resolve_path(str(path_value), workspace)
-        if path is None or not path.exists():
-            raise ConfigError(
-                f"Pipeline '{pipeline_id}' task '{task_id}' points to a missing script: {path_value}"
+            if not isinstance(raw_args, list):
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list"
+                )
+            return TaskDefinition(
+                task_id=task_id,
+                title=title,
+                task_type="python",
+                description=description,
+                depends_on=depends_on,
+                enabled=enabled,
+                call=callable_text,
+                args=tuple(raw_args),
+                kwargs={str(key): value for key, value in raw_kwargs.items()},
+                cwd=_resolve_path(raw_task.get("cwd"), workspace) or workspace,
+                env=task_env,
             )
-        raw_args = raw_task.get("args", [])
-        if not isinstance(raw_args, list):
-            raise ConfigError(
-                f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list"
+        else:
+            path_value = raw_task.get("path") or raw_task.get("script")
+            if not path_value:
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' task '{task_id}' requires path/script for python tasks"
+                )
+            path = _resolve_path(str(path_value), workspace)
+            if path is None or not path.exists():
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' task '{task_id}' points to a missing script: {path_value}"
+                )
+            raw_args = raw_task.get("args", [])
+            if not isinstance(raw_args, list):
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list"
+                )
+            return TaskDefinition(
+                task_id=task_id,
+                title=title,
+                task_type="python",
+                description=description,
+                depends_on=depends_on,
+                enabled=enabled,
+                path=path,
+                python=str(raw_task.get("python") or default_python),
+                args=tuple(str(item) for item in raw_args),
+                cwd=_resolve_path(raw_task.get("cwd"), workspace),
+                env=task_env,
             )
-        return TaskDefinition(
-            task_id=task_id,
-            title=title,
-            task_type="python",
-            description=description,
-            depends_on=depends_on,
-            enabled=enabled,
-            path=path,
-            python=str(raw_task.get("python") or default_python),
-            args=tuple(str(item) for item in raw_args),
-            cwd=_resolve_path(raw_task.get("cwd"), workspace),
-            env=task_env,
-        )
 
     if task_type == "cli":
         command = raw_task.get("command")
@@ -314,11 +403,11 @@ def _parse_task(
             env=task_env,
         )
 
-    if task_type == "api":
+    if task_type == "api" or task_type == "webhook":
         url = raw_task.get("url")
         if not url:
             raise ConfigError(
-                f"Pipeline '{pipeline_id}' task '{task_id}' requires url for api tasks"
+                f"Pipeline '{pipeline_id}' task '{task_id}' requires url for {task_type} tasks"
             )
         headers = {
             str(key): _expand_string(str(value))
@@ -328,15 +417,19 @@ def _parse_task(
             ).items()
         }
         token = raw_task.get("token")
+        
+        # Determine default method
+        method = str(raw_task.get("method", "POST" if task_type == "webhook" else "GET")).upper()
+        
         return TaskDefinition(
             task_id=task_id,
             title=title,
-            task_type="api",
+            task_type=task_type,
             description=description,
             depends_on=depends_on,
             enabled=enabled,
             url=_expand_string(str(url)),
-            method=str(raw_task.get("method", "GET")).upper(),
+            method=method,
             headers=headers,
             body=None if raw_task.get("body") is None else str(raw_task.get("body")),
             token=_expand_string(str(token)) if token is not None else None,
@@ -345,6 +438,23 @@ def _parse_task(
                 f"Pipeline '{pipeline_id}' task '{task_id}' expected_status",
             ),
             env=task_env,
+        )
+
+    if task_type == "email":
+        return TaskDefinition(
+            task_id=task_id,
+            title=title,
+            task_type="email",
+            description=description,
+            depends_on=depends_on,
+            enabled=enabled,
+            smtp_host=str(raw_task.get("smtp_host") or "localhost"),
+            smtp_port=int(raw_task.get("smtp_port") or 587),
+            smtp_user=_expand_string(str(raw_task.get("smtp_user", ""))) or None,
+            smtp_password=_expand_string(str(raw_task.get("smtp_password", ""))) or None,
+            email_to=tuple(str(item) for item in list(raw_task.get("to") or [])),
+            email_subject=str(raw_task.get("subject") or "Piply Notification"),
+            email_body=str(raw_task.get("body") or ""),
         )
 
     host = raw_task.get("host")
@@ -369,7 +479,11 @@ def _parse_task(
     )
 
 
-def load_project(config_path: str | Path | None = None) -> ProjectDefinition:
+def load_project(
+    config_path: str | Path | None = None,
+    *,
+    default_max_parallel_tasks: int | None = None,
+) -> ProjectDefinition:
     """Load and validate a Piply project definition."""
     path = Path(config_path).resolve() if config_path else discover_config()
     if not path.exists():
@@ -382,6 +496,11 @@ def load_project(config_path: str | Path | None = None) -> ProjectDefinition:
 
     if not isinstance(raw_data, dict):
         raise ConfigError("The root of the config file must be a mapping")
+
+    settings = load_settings(path)
+    effective_default_max_parallel_tasks = (
+        default_max_parallel_tasks or settings.default_max_parallel_tasks
+    )
 
     defaults = _ensure_mapping(raw_data.get("defaults"), "defaults")
     timezone_name = str(raw_data.get("timezone") or defaults.get("timezone") or "UTC")
@@ -412,9 +531,11 @@ def load_project(config_path: str | Path | None = None) -> ProjectDefinition:
                 f"Pipeline '{pipeline_id}' has an invalid schedule: {exc}"
             ) from exc
 
-        execution_mode, max_parallel_tasks = _parse_execution(
+        max_parallel_tasks = _parse_execution(
             raw_pipeline.get("execution"),
             pipeline_id,
+            default_max_parallel_tasks=effective_default_max_parallel_tasks,
+            explicit_max_parallel_tasks=raw_pipeline.get("max_parallel_tasks"),
         )
 
         title = str(raw_pipeline.get("title") or raw_pipeline.get("name") or pipeline_id)
@@ -461,6 +582,7 @@ def load_project(config_path: str | Path | None = None) -> ProjectDefinition:
             )
 
         _validate_task_graph(pipeline_id, tasks)
+        parallelizable = _detect_parallelism(tasks)
 
         triggers_on_success = tuple(
             str(item)
@@ -481,7 +603,7 @@ def load_project(config_path: str | Path | None = None) -> ProjectDefinition:
             schedule=schedule,
             enabled=enabled,
             max_concurrent_runs=max_concurrent_runs,
-            execution_mode=execution_mode,
+            parallelizable=parallelizable,
             max_parallel_tasks=max_parallel_tasks,
             triggers_on_success=triggers_on_success,
         )

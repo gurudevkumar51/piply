@@ -11,15 +11,17 @@ from piply.core.models import PipelineDefinition, RunRecord, TaskDefinition
 from piply.core.store import RunStore
 
 from .base import BaseEngine, CompletionCallback, LogCallback
+from .heartbeat import RunHeartbeat
 from .task_runner import TaskExecutionResult, TaskRunner
 
 
 class LocalEngine(BaseEngine):
     """Run Piply task graphs with lightweight local workers."""
 
-    def __init__(self) -> None:
+    def __init__(self, heartbeat_interval_seconds: int = 10) -> None:
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self.heartbeat_interval_seconds = max(2, heartbeat_interval_seconds)
 
     def dispatch(
         self,
@@ -75,7 +77,9 @@ class LocalEngine(BaseEngine):
     ) -> None:
         """Execute the full pipeline lifecycle for one run."""
         runner = TaskRunner(store=store, run_id=run_id, on_log=on_log)
+        heartbeat = RunHeartbeat(store, run_id, self.heartbeat_interval_seconds)
         store.mark_running(run_id)
+        heartbeat.start()
         runner.emit(f"Starting pipeline {pipeline.pipeline_id}")
         runner.emit(f"Flow: {pipeline.command_preview}")
         runner.emit(f"Execution mode: {pipeline.execution_summary}")
@@ -113,6 +117,7 @@ class LocalEngine(BaseEngine):
             runner.emit(traceback.format_exc().rstrip())
             store.finish_run(run_id, status="failed", exit_code=1, error=str(exc))
         finally:
+            heartbeat.stop()
             with self._lock:
                 self._threads.pop(run_id, None)
 

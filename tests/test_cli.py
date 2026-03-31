@@ -24,4 +24,6 @@ def test_init_scaffolds_multitask_project(tmp_path: Path) -> None:
     assert tuple(project.pipelines) == ("extract_flow", "report_flow")
     assert project.pipelines["extract_flow"].task_count == 3
     assert project.pipelines["extract_flow"].triggers_on_success == ("report_flow",)
+    assert project.pipelines["extract_flow"].execution_mode == "parallel"
     assert project.pipelines["report_flow"].task_count == 1
+    assert project.pipelines["report_flow"].tasks["build_report"].task_type == "python_call"

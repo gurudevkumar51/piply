@@ -326,6 +326,13 @@ select {
     gap: 20px;
 }
 
+.run-focus-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.16fr) minmax(360px, 0.84fr);
+    gap: 20px;
+    align-items: stretch;
+}
+
 .panel {
     padding: 24px;
 }
@@ -581,6 +588,60 @@ select {
     padding: 18px;
 }
 
+.dag-toolbar,
+.page-header,
+.compact-header,
+.run-stats-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.page-header,
+.compact-header {
+    justify-content: space-between;
+    padding: 22px 24px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 251, 255, 0.96));
+    box-shadow: var(--shadow);
+}
+
+.compact-header {
+    padding: 18px 22px;
+}
+
+.page-header-copy {
+    max-width: 780px;
+    color: #445875;
+    line-height: 1.6;
+}
+
+.segmented {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.toolbar-button {
+    appearance: none;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 9px 12px;
+    background: rgba(255, 255, 255, 0.88);
+    color: var(--muted);
+    cursor: pointer;
+    transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.toolbar-button:hover {
+    background: rgba(57, 117, 255, 0.08);
+    border-color: rgba(57, 117, 255, 0.22);
+    color: var(--accent);
+}
+
 .dag-header {
     display: flex;
     justify-content: space-between;
@@ -591,7 +652,6 @@ select {
 
 .dag-stage {
     min-height: 220px;
-    overflow: auto;
     border-radius: var(--radius-md);
     border: 1px dashed var(--border-strong);
     background:
@@ -604,6 +664,22 @@ select {
 
 .dag-stage svg {
     display: block;
+}
+
+.dag-viewport {
+    min-height: 320px;
+    overflow: hidden;
+    cursor: grab;
+}
+
+.dag-viewport.dragging {
+    cursor: grabbing;
+}
+
+.dag-svg {
+    width: 100%;
+    height: 100%;
+    min-height: 300px;
 }
 
 .dag-node {
@@ -646,10 +722,42 @@ select {
     font-size: 10px;
 }
 
+.dag-state-label {
+    fill: #556983;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+}
+
 .dag-edge {
     stroke: #b4c6d8;
     stroke-width: 2;
     fill: none;
+}
+
+.dag-edge-label {
+    fill: #8392a8;
+    font-family: var(--mono);
+    font-size: 10px;
+}
+
+.dag-node-group.running .dag-status-dot {
+    animation: dag-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes dag-pulse {
+    0% {
+        opacity: 0.6;
+        transform: scale(1);
+    }
+    50% {
+        opacity: 1;
+        transform: scale(1.22);
+    }
+    100% {
+        opacity: 0.6;
+        transform: scale(1);
+    }
 }
 
 .log-viewer {
@@ -661,9 +769,15 @@ select {
     padding: 12px;
 }
 
+.log-viewer.tight {
+    max-height: calc(100vh - 240px);
+    overflow-y: auto;
+    min-height: 540px;
+}
+
 .log-line {
     display: grid;
-    grid-template-columns: 120px 90px 1fr;
+    grid-template-columns: 118px 96px minmax(0, 1fr);
     gap: 12px;
     padding: 10px 12px;
     border-radius: 12px;
@@ -671,6 +785,11 @@ select {
     background: #ffffff;
     border: 1px solid #e2eaf3;
     color: #213754;
+    align-items: start;
+}
+
+.log-line > * {
+    min-width: 0;
 }
 
 .log-line time {
@@ -681,6 +800,15 @@ select {
 .log-task {
     font-family: var(--mono);
     color: var(--accent);
+}
+
+.log-message {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.55;
 }
 
 .empty-state {
@@ -716,6 +844,11 @@ select {
     font-size: 0.92rem;
 }
 
+.sticky-panel {
+    position: sticky;
+    top: 108px;
+}
+
 @media (max-width: 1180px) {
     .metrics,
     .detail-grid {
@@ -723,6 +856,10 @@ select {
     }
 
     .layout-two {
+        grid-template-columns: 1fr;
+    }
+
+    .run-focus-grid {
         grid-template-columns: 1fr;
     }
 }
@@ -755,6 +892,12 @@ select {
     }
 
     .retry-panel {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .page-header,
+    .compact-header {
         flex-direction: column;
         align-items: flex-start;
     }

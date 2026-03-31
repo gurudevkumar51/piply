@@ -16,10 +16,10 @@
             <a class="button ghost" href="/pipelines">Back to pipelines</a>
         </div>
         <div class="hero-meta" style="margin-top:18px;">
-            <span class="status-badge {% if pipeline.last_run %}{{ pipeline.last_run.status }}{% else %}queued{% endif %}">
+            <span class="status-badge {% if pipeline.last_run %}{{ pipeline.last_run.status }}{% else %}queued{% endif %}" data-last-run-status>
                 {% if pipeline.last_run %}{{ pipeline.last_run.status }}{% else %}no runs yet{% endif %}
             </span>
-            <span class="meta-pill">next {{ pipeline.next_run_label }}</span>
+            <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
             <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
             <span class="meta-pill">{{ pipeline.execution_summary }}</span>
             {% for target in pipeline.trigger_targets %}
@@ -42,7 +42,7 @@
             <div class="detail-value mono path-value">{{ pipeline.command_preview }}</div>
         </article>
         <article class="detail-card">
-            <div class="detail-label">Execution</div>
+                <div class="detail-label">Execution</div>
             <div class="detail-value">{{ pipeline.execution_summary }}</div>
         </article>
     </section>
@@ -77,7 +77,7 @@
         <div class="task-grid">
             {% for task in tasks %}
             {% set latest = task_run_map.get(task.task_id) %}
-            <article class="task-card {% if latest %}task-card-{{ latest.status }}{% endif %}">
+            <article class="task-card {% if latest %}task-card-{{ latest.status }}{% endif %}" data-task-card="{{ task.task_id }}">
                 <div class="task-card-header">
                     <div>
                         <h3 class="card-title">{{ task.title }}</h3>
@@ -86,7 +86,7 @@
                     <div class="inline-actions">
                         <span class="task-type-badge">{{ task.task_type }}</span>
                         {% if latest %}
-                        <span class="status-badge {{ latest.status }}">{{ latest.status }}</span>
+                        <span class="status-badge {{ latest.status }}" data-task-status="{{ task.task_id }}">{{ latest.status }}</span>
                         {% endif %}
                     </div>
                 </div>
@@ -155,11 +155,59 @@
 <script src="https://cdn.jsdelivr.net/npm/@dagrejs/graphlib@2.1.13/dist/graphlib.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.2/dist/dagre.min.js" defer></script>
 <script>
+const pipelineId = "{{ pipeline.pipeline_id }}";
 const dagTasks = {{ dag_tasks|tojson }};
-const taskStateMap = {{ task_state_map|tojson }};
+let taskStateMap = {{ task_state_map|tojson }};
+let pipelinePageActive = {{ 'true' if pipeline.active_runs > 0 or (pipeline.last_run and pipeline.last_run.status in ['queued', 'running']) else 'false' }};
+
+function refreshTaskStatuses(latestTaskRuns) {
+    latestTaskRuns.forEach((task) => {
+        const badge = document.querySelector(`[data-task-status="${task.task_id}"]`);
+        const card = document.querySelector(`[data-task-card="${task.task_id}"]`);
+        if (badge) {
+            badge.className = `status-badge ${task.status}`;
+            badge.textContent = task.status;
+        }
+        if (card) {
+            card.classList.remove("task-card-success", "task-card-failed");
+            if (task.status === "success") {
+                card.classList.add("task-card-success");
+            }
+            if (task.status === "failed") {
+                card.classList.add("task-card-failed");
+            }
+        }
+        taskStateMap[task.task_id] = task.status;
+    });
+}
+
+async function refreshPipelineDetail() {
+    if (!pipelinePageActive) {
+        return;
+    }
+    try {
+        const payload = await piplyRequest(`/api/pipelines/${pipelineId}`);
+        refreshTaskStatuses(payload.latest_task_runs || []);
+        const latestRunStatus = payload.pipeline.last_run ? payload.pipeline.last_run.status : "queued";
+        document.querySelectorAll("[data-last-run-status]").forEach((element) => {
+            element.className = `status-badge ${latestRunStatus}`;
+            element.textContent = payload.pipeline.last_run ? latestRunStatus : "no runs yet";
+        });
+        document.querySelectorAll("[data-next-run-label]").forEach((element) => {
+            element.textContent = payload.pipeline.next_run_label;
+        });
+        window.renderDagInto("dag-stage", dagTasks, taskStateMap);
+        pipelinePageActive = payload.pipeline.active_runs > 0 || ["queued", "running"].includes(latestRunStatus);
+    } catch (error) {
+        pipelinePageActive = false;
+    }
+}
 
 document.addEventListener("DOMContentLoaded", () => {
     renderDagInto("dag-stage", dagTasks, taskStateMap);
+    if (pipelinePageActive) {
+        setInterval(refreshPipelineDetail, 4000);
+    }
 });
 </script>
 {% endblock %}

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -10,6 +12,7 @@ import uvicorn
 
 from piply.core.loader import ConfigError, discover_config, load_project
 from piply.core.service import PipelineService
+from piply.settings import load_settings
 
 app = typer.Typer(help="Piply: lightweight orchestration for task-based Python workflows.")
 tasks_app = typer.Typer(help="Inspect pipeline tasks.")
@@ -20,6 +23,24 @@ def _resolve_config(config: str | None) -> Path:
     if config:
         return Path(config).resolve()
     return discover_config()
+
+
+def _server_command(host: str, port: int, reload: bool) -> list[str]:
+    """Build the reusable uvicorn command for foreground and detached start."""
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "piply.api.app:create_app",
+        "--factory",
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
+    if reload:
+        command.append("--reload")
+    return command
 
 
 @app.command()
@@ -55,9 +76,7 @@ def init(
                 '    description: Multi-task starter pipeline with a downstream trigger.',
                 "    schedule:",
                 "      every: 15m",
-                "    execution:",
-                "      mode: parallel",
-                "      max_parallel_tasks: 2",
+                "    max_parallel_tasks: 2",
                 "    triggers_on_success:",
                 "      - report_flow",
                 "    tasks:",
@@ -80,6 +99,9 @@ def init(
                 "      build_report:",
                 "        type: python",
                 "        path: pipelines/report.py",
+                "        function: build_report",
+                "        kwargs:",
+                "          report_name: starter-report",
             ]
         ),
         encoding="utf-8",
@@ -121,8 +143,10 @@ def init(
             [
                 "from __future__ import annotations",
                 "",
-                "print('Generating downstream report...')",
-                "print('Report complete.')",
+                "def build_report(report_name: str = 'starter-report') -> str:",
+                "    print(f'Generating downstream report: {report_name}')",
+                "    print('Report complete.')",
+                "    return report_name",
             ]
         ),
         encoding="utf-8",
@@ -225,14 +249,129 @@ def runs(
 
 
 @app.command()
+def logs(
+    run_id: str = typer.Argument(..., help="Run ID to fetch logs for."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        _, _, raw_logs = service.get_run(run_id)
+        # raw logs are returned newest first, we reverse them to print chronologically in terminal
+        for log in reversed(raw_logs):
+            typer.echo(f"[{log.created_at.strftime('%H:%M:%S.%f')[:-3]}] [{log.task_id or 'pipeline'}] {log.message}")
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1)
+
+
+@tasks_app.command("run")
+def run_task(
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier."),
+    task_id: str = typer.Argument(..., help="Task identifier."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    wait: bool = typer.Option(True, "--wait/--detach", help="Wait and stream logs in the terminal."),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        run_record = service.trigger_pipeline(
+            pipeline_id,
+            trigger="manual",
+            wait=wait,
+            on_log=typer.echo if wait else None,
+            retry_task_id=task_id, # Re-using retry mechanic for selective run
+        )
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Run ID: {run_record.run_id}")
+    if wait:
+        run_record, _, _ = service.get_run(run_record.run_id)
+        typer.echo(f"Finished with status: {run_record.status}")
+        if run_record.error:
+            typer.echo(run_record.error)
+            raise typer.Exit(code=1)
+
+
+@app.command()
+def pause(
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier to pause."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.set_pipeline_paused(pipeline_id, True)
+        typer.echo(f"Pipeline '{pipeline_id}' scheduled runs paused.")
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def resume(
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier to resume."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.set_pipeline_paused(pipeline_id, False)
+        typer.echo(f"Pipeline '{pipeline_id}' scheduled runs resumed.")
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def stop(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    service.store.set_meta("shutdown_requested", "true")
+    typer.echo("Shutdown requested. The background server will exit gracefully within a few seconds.")
+
+
+@app.command()
 def start(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8000, "--port", help="Bind port."),
     reload: bool = typer.Option(False, "--reload", help="Enable auto reload."),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run the web server in the background."),
 ) -> None:
     config_path = _resolve_config(config)
+    settings = load_settings(config_path)
+    environment = os.environ.copy()
+    environment["PIPLY_CONFIG"] = str(config_path)
+    if settings.database_path is not None:
+        environment["PIPLY_DATABASE"] = str(settings.database_path)
+
+    if detach:
+        if reload:
+            raise typer.BadParameter("--reload cannot be used with --detach.")
+        log_dir = config_path.parent / ".piply"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "server.log"
+        command = _server_command(host, port, reload=False)
+        popen_kwargs: dict[str, object] = {
+            "args": command,
+            "env": environment,
+            "stdout": log_path.open("a", encoding="utf-8"),
+            "stderr": subprocess.STDOUT,
+            "cwd": str(Path.cwd()),
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+        process = subprocess.Popen(**popen_kwargs)
+        typer.echo(f"Piply started in background on http://{host}:{port}")
+        typer.echo(f"PID: {process.pid}")
+        typer.echo(f"Logs: {log_path}")
+        return
+
     os.environ["PIPLY_CONFIG"] = str(config_path)
+    if settings.database_path is not None:
+        os.environ["PIPLY_DATABASE"] = str(settings.database_path)
     typer.echo(f"Using config: {config_path}")
     typer.echo(f"Starting Piply on http://{host}:{port}")
     uvicorn.run("piply.api.app:create_app", factory=True, host=host, port=port, reload=reload)
@@ -244,8 +383,9 @@ def ui(
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     port: int = typer.Option(8000, "--port", help="Bind port."),
     reload: bool = typer.Option(False, "--reload", help="Enable auto reload."),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run the web server in the background."),
 ) -> None:
-    start(config=config, host=host, port=port, reload=reload)
+    start(config=config, host=host, port=port, reload=reload, detach=detach)
 
 
 if __name__ == "__main__":

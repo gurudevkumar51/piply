@@ -5,6 +5,10 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from fastapi.responses import HTMLResponse, Response
+
+from piply.api.schemas import RunResponse
+
 router = APIRouter(tags=["ui"])
 
 
@@ -34,6 +38,16 @@ def dashboard_page(request: Request) -> HTMLResponse:
             "scheduler": payload["scheduler"],
             "page": "dashboard",
         },
+    )
+
+
+@router.get("/logout", response_class=HTMLResponse)
+def logout_page(request: Request) -> Response:
+    """Clear basic auth credentials by forcing a 401 challenge."""
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Piply"'},
+        content="Logged out successfully. You can close this tab or return to the dashboard to log in again.",
     )
 
 
@@ -71,6 +85,19 @@ def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
         }
         for task in detail["pipeline"].tasks.values()
     ]
+
+    # Find terminal nodes for downstream links
+    all_deps = {dep for task in detail["pipeline"].tasks.values() for dep in task.depends_on}
+    terminal_nodes = [task.task_id for task in detail["pipeline"].tasks.values() if task.task_id not in all_deps]
+
+    for target in detail["pipeline"].triggers_on_success:
+        dag_tasks.append({
+            "task_id": f"trigger_{target}",
+            "title": f"Trigger: {target}",
+            "task_type": "pipeline",
+            "depends_on": terminal_nodes,
+            "command_preview": f"Triggers pipeline '{target}'",
+        })
     task_state_map = dict(detail["summary"].latest_task_states)
     task_run_map = {task.task_id: task for task in detail["latest_task_runs"]}
     return _templates(request).TemplateResponse(
@@ -151,6 +178,7 @@ def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
         {
             "project": service.project,
             "run": run,
+            "run_payload": RunResponse.from_record(run).model_dump(mode="json"),
             "task_runs": task_runs,
             "dag_tasks": dag_tasks,
             "task_run_payloads": task_run_payloads,

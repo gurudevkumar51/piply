@@ -52,10 +52,11 @@ def test_load_project_parses_multitask_pipeline_and_trigger(tmp_path: Path) -> N
     assert pipeline.tasks["extract"].command_preview.endswith("extract.py")
 
 
-def test_load_project_parses_parallel_execution_mode(tmp_path: Path) -> None:
+def test_load_project_detects_parallelizable_graph_and_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+    (workspace / "fanout.py").write_text("print('fanout')", encoding="utf-8")
 
     config_path = tmp_path / "piply.yaml"
     config_path.write_text(
@@ -73,6 +74,14 @@ def test_load_project_parses_parallel_execution_mode(tmp_path: Path) -> None:
                 "      main:",
                 "        type: python",
                 "        path: job.py",
+                "      validate:",
+                "        type: python",
+                "        path: fanout.py",
+                "        depends_on: [main]",
+                "      publish:",
+                "        type: python",
+                "        path: fanout.py",
+                "        depends_on: [main]",
             ]
         ),
         encoding="utf-8",
@@ -82,4 +91,5 @@ def test_load_project_parses_parallel_execution_mode(tmp_path: Path) -> None:
     pipeline = project.pipelines["job_flow"]
 
     assert pipeline.execution_mode == "parallel"
+    assert pipeline.parallelizable is True
     assert pipeline.max_parallel_tasks == 3

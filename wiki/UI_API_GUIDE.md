@@ -8,6 +8,7 @@ Current stack:
 
 - FastAPI for HTTP routing
 - Jinja2 templates for server-rendered pages
+- small vanilla JS modules for DAG and action handling
 - SQLite for run metadata and raw logs
 - a background scheduler thread for time-based triggers
 
@@ -23,6 +24,7 @@ Optional flags:
 
 ```bash
 piply start --config piply-demo/piply.yaml --host 0.0.0.0 --port 8080 --reload
+piply start --config piply-demo/piply.yaml -d
 ```
 
 Compatibility alias:
@@ -37,13 +39,37 @@ Direct entry point:
 python run_api.py
 ```
 
+## Authentication
+
+Enable packaged auth with env vars or a `.env` file:
+
+```env
+PIPLY_AUTH_ENABLED=true
+PIPLY_AUTH_USERNAME=admin
+PIPLY_AUTH_PASSWORD=change-me
+PIPLY_API_TOKEN=replace-with-long-token
+```
+
+Behavior:
+
+- UI pages use HTTP Basic auth
+- API routes accept HTTP Basic auth and Bearer auth
+- Bearer auth is API-only
+
+Example:
+
+```bash
+curl http://127.0.0.1:8000/api/dashboard \
+  -H "Authorization: Bearer replace-with-long-token"
+```
+
 ## UI Routes
 
 - `GET /` dashboard
 - `GET /pipelines` pipeline list
-- `GET /pipelines/{pipeline_id}` pipeline detail with DAG view
+- `GET /pipelines/{pipeline_id}` pipeline detail with live DAG view
 - `GET /runs` run list
-- `GET /runs/{run_id}` run detail with task states and raw logs
+- `GET /runs/{run_id}` run detail with live duration, task states, and raw logs
 
 ## API Routes
 
@@ -121,6 +147,17 @@ curl -X POST http://127.0.0.1:8000/api/runs/<run_id>/retry \
   -d '{"mode": "resume", "task_id": "flaky_step"}'
 ```
 
+## DAG UI Features
+
+Pipeline and run pages now include:
+
+- zoom controls
+- pan by drag
+- DAG and tree orientations
+- dependency edge labels
+- live status colors for task nodes
+- clickable failed tasks for retry focus
+
 ## Log Ordering And Time Format
 
 Raw logs are returned newest first in both the UI and API.
@@ -148,22 +185,26 @@ The pipeline detail page is designed around two needs:
 
 That page includes:
 
-- a DAG-style graph
+- a DAG-style graph with last-known task colors
 - task cards
 - task type badges
 - recent run summaries
 - trigger targets for downstream pipelines
 
+When a pipeline still has an active run, the detail page polls for fresh task states.
+
 ## Run Detail Page
 
 The run detail page includes:
 
-- current run status
+- compact run header
 - a DAG for the specific run
+- live duration updates
+- graph and logs side by side
 - task-level progress cards
 - exit code and duration
 - pipeline command preview
-- raw logs with newest lines on top
+- newest-first raw logs with improved wrapping
 - retry controls for failed or skipped tasks
 
 While a run is active, the page refreshes periodically.
@@ -182,20 +223,19 @@ Useful environment variables:
 
 - `PIPLY_CONFIG`
 - `PIPLY_DATABASE`
+- `PIPLY_DEFAULT_MAX_PARALLEL_TASKS`
+- `PIPLY_STALE_RUN_TIMEOUT_SECONDS`
+- `PIPLY_HEARTBEAT_INTERVAL_SECONDS`
 
-## Architecture
+## Runtime Health
 
-```text
-HTTP/UI
-  |
-FastAPI routes
-  |
-PipelineService
-  |
-RunStore + LocalEngine
-  |
-SQLite + subprocess/urllib/ssh
-```
+Piply uses run heartbeats to avoid false long-running states.
+
+Behavior:
+
+- active runs are touched while executing
+- stale `queued` or `running` runs are reconciled automatically
+- reconciled runs are marked failed and visible in the UI/API immediately
 
 ## Working API Features
 
@@ -206,11 +246,11 @@ SQLite + subprocess/urllib/ssh
 - pause and resume schedules
 - inspect task-level run history
 - inspect raw logs
+- use Basic or Bearer auth when server auth is enabled
 
 ## Upcoming API And UI Work
 
 - push-style streaming logs
 - pagination for very large log sets
-- richer DAG interactions
-- authentication and API tokens for the Piply server itself
-- operator pages for secrets and connection profiles
+- connection profile pages
+- richer notification management

@@ -11,8 +11,7 @@ from typing import Literal, Protocol
 RunStatus = Literal["queued", "running", "success", "failed"]
 TaskStatus = Literal["queued", "running", "success", "failed", "skipped"]
 TriggerType = Literal["manual", "schedule", "api", "pipeline"]
-TaskType = Literal["python", "cli", "api", "ssh"]
-ExecutionMode = Literal["sequential", "parallel"]
+TaskType = Literal["python", "python_call", "cli", "api", "ssh", "email", "webhook"]
 RetryMode = Literal["startover", "resume"]
 
 
@@ -43,7 +42,9 @@ class TaskDefinition:
     enabled: bool = True
     path: Path | None = None
     python: str | None = None
-    args: tuple[str, ...] = ()
+    call: str | None = None
+    args: tuple[object, ...] = ()
+    kwargs: dict[str, object] = field(default_factory=dict)
     command: str | None = None
     cwd: Path | None = None
     env: dict[str, str] = field(default_factory=dict)
@@ -59,10 +60,19 @@ class TaskDefinition:
     key_file: Path | None = None
     ssh_binary: str = "ssh"
     connect_timeout: int = 8
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    email_to: tuple[str, ...] = ()
+    email_subject: str | None = None
+    email_body: str | None = None
 
     @property
     def operator_label(self) -> str:
         """Return a short operator name for UI and log labels."""
+        if self.task_type == "python_call":
+            return "PY CALL"
         return self.task_type.upper()
 
     @property
@@ -80,8 +90,18 @@ class TaskDefinition:
         if self.task_type == "python":
             python_executable = self.python or "python"
             path_text = str(self.path) if self.path else "<missing script>"
-            parts = [python_executable, path_text, *self.args]
+            parts = [python_executable, path_text, *(str(item) for item in self.args)]
             return " ".join(parts)
+        if self.task_type == "python_call":
+            rendered_args = ", ".join(str(item) for item in self.args)
+            rendered_kwargs = ", ".join(
+                f"{key}={value}" for key, value in self.kwargs.items()
+            )
+            signature = ", ".join(
+                item for item in [rendered_args, rendered_kwargs] if item
+            )
+            target = self.call or "<missing callable>"
+            return f"python_call {target}({signature})" if signature else f"python_call {target}()"
         if self.task_type == "cli":
             return self.command or "<missing command>"
         if self.task_type == "api":
@@ -90,6 +110,10 @@ class TaskDefinition:
             target = "@".join(part for part in [self.user, self.host] if part)
             remote = self.command or "echo piply-ssh-ok"
             return f"ssh {target} {remote}".strip()
+        if self.task_type == "email":
+            return f"email -> {', '.join(self.email_to)}"
+        if self.task_type == "webhook":
+            return f"webhook -> {self.url or '<missing url>'}"
         return self.task_id
 
 
@@ -105,7 +129,7 @@ class PipelineDefinition:
     schedule: SchedulePlan | None = None
     enabled: bool = True
     max_concurrent_runs: int = 1
-    execution_mode: ExecutionMode = "sequential"
+    parallelizable: bool = False
     max_parallel_tasks: int = 4
     triggers_on_success: tuple[str, ...] = ()
 
@@ -145,9 +169,16 @@ class PipelineDefinition:
     @property
     def execution_summary(self) -> str:
         """Return a short human-readable execution strategy label."""
-        if self.execution_mode == "parallel":
-            return f"Parallel up to {self.max_parallel_tasks} tasks"
-        return "Sequential execution"
+        if self.parallelizable and self.max_parallel_tasks > 1:
+            return f"Auto DAG concurrency up to {self.max_parallel_tasks} tasks"
+        return "Dependency-aware sequential flow"
+
+    @property
+    def execution_mode(self) -> Literal["sequential", "parallel"]:
+        """Return the effective execution mode derived from the task graph."""
+        if self.parallelizable and self.max_parallel_tasks > 1:
+            return "parallel"
+        return "sequential"
 
     def is_schedulable(self) -> bool:
         """Return whether the pipeline can be launched by the scheduler."""
@@ -281,7 +312,7 @@ class PipelineSummary:
     primary_entry: str
     command_preview: str
     max_concurrent_runs: int
-    execution_mode: ExecutionMode
+    execution_mode: Literal["sequential", "parallel"]
     max_parallel_tasks: int
     task_count: int
     trigger_targets: tuple[str, ...]
@@ -293,8 +324,8 @@ class PipelineSummary:
     def execution_summary(self) -> str:
         """Return a compact execution label for cards and headers."""
         if self.execution_mode == "parallel":
-            return f"Parallel up to {self.max_parallel_tasks} tasks"
-        return "Sequential execution"
+            return f"Auto DAG concurrency up to {self.max_parallel_tasks} tasks"
+        return "Dependency-aware sequential flow"
 
 
 def utc_now() -> datetime:

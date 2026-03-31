@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .models import (
@@ -87,6 +87,7 @@ class RunStore:
                     scheduled_for TEXT,
                     exit_code INTEGER,
                     error TEXT,
+                    heartbeat_at TEXT,
                     retry_of TEXT,
                     retry_mode TEXT,
                     retry_task_id TEXT
@@ -154,6 +155,15 @@ class RunStore:
                 connection.execute("ALTER TABLE runs ADD COLUMN retry_mode TEXT")
             if "retry_task_id" not in self._run_columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN retry_task_id TEXT")
+            if "heartbeat_at" not in self._run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN heartbeat_at TEXT")
+                connection.execute(
+                    """
+                    UPDATE runs
+                    SET heartbeat_at = COALESCE(finished_at, started_at, created_at)
+                    WHERE heartbeat_at IS NULL
+                    """
+                )
 
             if "task_id" not in self._log_columns:
                 connection.execute("ALTER TABLE logs ADD COLUMN task_id TEXT")
@@ -190,6 +200,7 @@ class RunStore:
                 "primary_entry": pipeline.primary_entry,
                 "created_at": _to_iso(created_at),
                 "scheduled_for": _to_iso(scheduled_for),
+                "heartbeat_at": _to_iso(created_at),
                 "retry_of": retry_of,
                 "retry_mode": retry_mode,
                 "retry_task_id": retry_task_id,
@@ -232,10 +243,11 @@ class RunStore:
 
     def mark_running(self, run_id: str) -> None:
         """Mark a run as actively executing."""
+        now = _to_iso(datetime.now(timezone.utc))
         with self._lock, self._connect() as connection:
             connection.execute(
-                "UPDATE runs SET status = ?, started_at = ? WHERE id = ?",
-                ("running", _to_iso(datetime.now(timezone.utc)), run_id),
+                "UPDATE runs SET status = ?, started_at = ?, heartbeat_at = ? WHERE id = ?",
+                ("running", now, now, run_id),
             )
             connection.commit()
 
@@ -248,25 +260,37 @@ class RunStore:
         error: str | None = None,
     ) -> None:
         """Persist the final pipeline-level outcome for one run."""
+        now = _to_iso(datetime.now(timezone.utc))
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 UPDATE runs
-                SET status = ?, finished_at = ?, exit_code = ?, error = ?
+                SET status = ?, finished_at = ?, exit_code = ?, error = ?, heartbeat_at = ?
                 WHERE id = ?
                 """,
                 (
                     status,
-                    _to_iso(datetime.now(timezone.utc)),
+                    now,
                     exit_code,
                     error,
+                    now,
                     run_id,
                 ),
             )
             connection.commit()
 
+    def touch_run(self, run_id: str) -> None:
+        """Refresh the heartbeat timestamp for one run."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                (_to_iso(datetime.now(timezone.utc)), run_id),
+            )
+            connection.commit()
+
     def mark_task_running(self, run_id: str, task_id: str) -> None:
         """Mark one task as actively executing."""
+        now = _to_iso(datetime.now(timezone.utc))
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
@@ -274,7 +298,11 @@ class RunStore:
                 SET status = ?, started_at = ?
                 WHERE run_id = ? AND task_id = ?
                 """,
-                ("running", _to_iso(datetime.now(timezone.utc)), run_id, task_id),
+                ("running", now, run_id, task_id),
+            )
+            connection.execute(
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                (now, run_id),
             )
             connection.commit()
 
@@ -288,6 +316,7 @@ class RunStore:
         error: str | None = None,
     ) -> None:
         """Persist the final outcome for one task run."""
+        now = _to_iso(datetime.now(timezone.utc))
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
@@ -297,12 +326,16 @@ class RunStore:
                 """,
                 (
                     status,
-                    _to_iso(datetime.now(timezone.utc)),
+                    now,
                     exit_code,
                     error,
                     run_id,
                     task_id,
                 ),
+            )
+            connection.execute(
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                (now, run_id),
             )
             connection.commit()
 
@@ -350,7 +383,74 @@ class RunStore:
                     message,
                 ),
             )
+            connection.execute(
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                (_to_iso(datetime.now(timezone.utc)), run_id),
+            )
             connection.commit()
+
+    def reconcile_stale_runs(self, stale_after_seconds: int) -> list[str]:
+        """Mark long-silent queued or running runs as failed."""
+        with self._lock, self._connect() as connection:
+            now = datetime.now(timezone.utc)
+            cutoff_dt = _to_iso(now - timedelta(seconds=stale_after_seconds))
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM runs
+                WHERE status IN ('queued', 'running')
+                  AND COALESCE(heartbeat_at, started_at, created_at) < ?
+                """,
+                (cutoff_dt,),
+            ).fetchall()
+
+            if not rows:
+                return []
+
+            stale_ids = [row["id"] for row in rows]
+            now_iso = _to_iso(now)
+            for run_id in stale_ids:
+                connection.execute(
+                    """
+                    UPDATE runs
+                    SET status = 'failed',
+                        finished_at = ?,
+                        exit_code = 1,
+                        error = COALESCE(error, 'Run marked failed after heartbeat timeout.'),
+                        heartbeat_at = ?
+                    WHERE id = ?
+                    """,
+                    (now_iso, now_iso, run_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE task_runs
+                    SET status = 'failed',
+                        finished_at = ?,
+                        error = COALESCE(error, 'Task interrupted after heartbeat timeout.')
+                    WHERE run_id = ? AND status = 'running'
+                    """,
+                    (now_iso, run_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE task_runs
+                    SET status = 'skipped',
+                        finished_at = ?,
+                        error = COALESCE(error, 'Task skipped after upstream heartbeat timeout.')
+                    WHERE run_id = ? AND status = 'queued'
+                    """,
+                    (now_iso, run_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO logs (run_id, task_id, created_at, stream, message)
+                    VALUES (?, NULL, ?, 'stderr', 'Run marked failed after heartbeat timeout.')
+                    """,
+                    (run_id, now_iso),
+                )
+            connection.commit()
+        return stale_ids
 
     def get_run(self, run_id: str) -> RunRecord | None:
         """Load one run with aggregate task and log counters."""
@@ -424,7 +524,7 @@ class RunStore:
             ).fetchall()
         return [self._row_to_task_run(row) for row in rows]
 
-    def list_logs(self, run_id: str, limit: int | None = None):
+    def list_logs(self, run_id: str, limit: int | None = None, offset: int = 0):
         """List raw logs newest first for one run."""
         query = """
             SELECT run_id, task_id, created_at, stream, message
@@ -434,8 +534,8 @@ class RunStore:
         """
         params: list[object] = [run_id]
         if limit is not None:
-            query += " LIMIT ?"
-            params.append(limit)
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
 
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
@@ -464,7 +564,7 @@ class RunStore:
 
     def count_running_runs(self, pipeline_id: str | None = None) -> int:
         """Count active pipeline runs globally or per pipeline."""
-        conditions = ["status = 'running'"]
+        conditions = ["status IN ('queued', 'running')"]
         params: list[object] = []
         if pipeline_id:
             conditions.append("pipeline_id = ?")

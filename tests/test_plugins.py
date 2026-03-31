@@ -103,3 +103,50 @@ def test_ssh_operator_executes_configured_binary(tmp_path: Path) -> None:
 
     assert stored_run.status == "success"
     assert any("fake ssh" in line.message.lower() for line in logs)
+
+
+def test_python_call_operator_runs_module_function(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "report_ops.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_report(report_name: str, batch_size: int = 10) -> dict[str, object]:",
+                "    print(f'building {report_name} with batch {batch_size}')",
+                "    return {'report_name': report_name, 'batch_size': batch_size}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Python Call Operator Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  report_flow:",
+                "    tasks:",
+                "      build_report:",
+                "        type: python_call",
+                "        path: report_ops.py",
+                "        function: build_report",
+                "        kwargs:",
+                "          report_name: nightly",
+                "          batch_size: 24",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("report_flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+    assert any("building nightly with batch 24" in line.message for line in logs)
+    assert any("Return value" in line.message for line in logs)

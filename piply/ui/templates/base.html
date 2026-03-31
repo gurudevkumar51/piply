@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@500;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/dag.js" defer></script>
     <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -31,6 +32,8 @@
                 <span class="status-dot"></span>
                 {% if scheduler.running %}scheduler live{% else %}scheduler offline{% endif %}
             </div>
+
+            <a href="/logout" class="button ghost" style="padding: 6px 12px; font-size: 0.85rem;">Logout</a>
         </nav>
 
         {% block content %}{% endblock %}

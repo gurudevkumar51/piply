@@ -4,18 +4,21 @@
 
 {% block content %}
 <div class="page-grid">
-    <section class="hero">
-        <div class="eyebrow">Run detail</div>
-        <h1 class="hero-headline"><span>{{ run.pipeline_title }}</span> execution snapshot.</h1>
-        <p class="hero-copy">
-            Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>.
-            Logs are shown newest first and refresh automatically while the run is still active.
-        </p>
-        <div class="hero-meta">
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Dag run</div>
+            <h1 class="panel-title" style="font-size:1.9rem; margin:0;">{{ run.pipeline_title }}</h1>
+            <p class="page-header-copy" style="margin:8px 0 0;">
+                Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>.
+                The graph and logs refresh automatically while the run is active.
+            </p>
+        </div>
+        <div class="run-stats-row">
             <span class="status-badge {{ run.status }}" id="run-status">{{ run.status }}</span>
             <span class="meta-pill">pipeline <a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_id }}</a></span>
-            <span class="meta-pill">started {{ run.started_at or run.created_at }}</span>
-            <span class="meta-pill">finished {{ run.finished_at or "in progress" }}</span>
+            <span class="meta-pill">duration <span id="run-duration">{% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</span></span>
+            <span class="meta-pill">tasks <span id="run-task-count">{{ run.successful_tasks }}/{{ run.task_count }}</span></span>
+            <span class="meta-pill">exit <span id="run-exit-code">{{ run.exit_code if run.exit_code is not none else "pending" }}</span></span>
             {% if run.retry_of %}
             <span class="meta-pill">retry of {{ run.retry_of }}</span>
             <span class="meta-pill">{{ run.retry_mode }}</span>
@@ -23,59 +26,64 @@
         </div>
     </section>
 
-    <section class="detail-grid">
-        <article class="detail-card">
-            <div class="detail-label">Trigger</div>
-            <div class="detail-value mono">{{ run.trigger }}</div>
+    <section class="run-focus-grid">
+        <article class="panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Run graph</h2>
+                    <p class="panel-copy">Live task status colors stay on the graph while you inspect retries and downstream paths.</p>
+                </div>
+                <div class="legend-row">
+                    <span class="status-badge success">success</span>
+                    <span class="status-badge running">running</span>
+                    <span class="status-badge failed">failed</span>
+                    <span class="status-badge queued">queued</span>
+                    <span class="status-badge skipped">skipped</span>
+                </div>
+            </div>
+            <div class="dag-shell">
+                <div class="dag-stage" id="run-dag-stage"></div>
+            </div>
+            <div class="retry-panel" id="retry-panel" {% if run.status != 'failed' %}hidden{% endif %}>
+                <div class="retry-copy">
+                    <div class="detail-label">Retry options</div>
+                    <div id="retry-selection-label">Select a failed task card or node to focus the retry, or retry the full failed flow.</div>
+                </div>
+                <div class="card-actions">
+                    <button class="button secondary" onclick="retryRun(runId, 'resume', selectedRetryTaskId)">Resume failed work</button>
+                    <button class="button ghost" onclick="retryRun(runId, 'startover')">Start over</button>
+                </div>
+            </div>
         </article>
-        <article class="detail-card">
-            <div class="detail-label">Duration</div>
-            <div class="detail-value" id="run-duration">{% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</div>
-        </article>
-        <article class="detail-card">
-            <div class="detail-label">Exit code</div>
-            <div class="detail-value" id="run-exit-code">{{ run.exit_code if run.exit_code is not none else "pending" }}</div>
-        </article>
-        <article class="detail-card">
-            <div class="detail-label">Task completion</div>
-            <div class="detail-value" id="run-task-count">{{ run.successful_tasks }}/{{ run.task_count }}</div>
-        </article>
-    </section>
 
-    <section class="panel">
-        <div class="panel-header">
-            <div>
-                <h2 class="panel-title">Run graph</h2>
-                <p class="panel-copy">The DAG reflects the live or last-known status of every task. Click failed tasks to choose a retry path.</p>
+        <article class="panel sticky-panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Raw logs</h2>
+                    <p class="panel-copy">Newest lines on top. Timestamps are formatted as HH:MM:SS.SSS.</p>
+                </div>
             </div>
-            <div class="legend-row">
-                <span class="status-badge success">success</span>
-                <span class="status-badge running">running</span>
-                <span class="status-badge failed">failed</span>
-                <span class="status-badge queued">queued</span>
-                <span class="status-badge skipped">skipped</span>
+            <div class="log-viewer tight" id="log-viewer">
+                {% if logs %}
+                    {% for line in logs %}
+                    <div class="log-line">
+                        <time>{{ line.created_at.strftime('%H:%M:%S.%f')[:-3] }}</time>
+                        <div class="log-task">{{ line.task_id or "pipeline" }}</div>
+                        <div class="log-message">{{ line.message }}</div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">No output has been captured yet for this run.</div>
+                {% endif %}
             </div>
-        </div>
-        <div class="dag-shell">
-            <div class="dag-stage" id="run-dag-stage"></div>
-        </div>
-        <div class="retry-panel" id="retry-panel" {% if run.status != 'failed' %}hidden{% endif %}>
-            <div class="retry-copy">
-                <div class="detail-label">Retry options</div>
-                <div id="retry-selection-label">Select a failed task card or node to focus the retry, or retry the whole failed flow.</div>
-            </div>
-            <div class="card-actions">
-                <button class="button secondary" onclick="retryRun(runId, 'resume', selectedRetryTaskId)">Resume failed work</button>
-                <button class="button ghost" onclick="retryRun(runId, 'startover')">Start over</button>
-            </div>
-        </div>
+        </article>
     </section>
 
     <section class="panel">
         <div class="panel-header">
             <div>
                 <h2 class="panel-title">Flow summary</h2>
-                <p class="panel-copy">Stored exactly as Piply launched it so commands and scripts stay visible for debugging.</p>
+                <p class="panel-copy">Stored exactly as Piply launched it so commands, scripts, and call targets stay visible for debugging.</p>
             </div>
             <button class="button ghost" onclick='copyText({{ run.command|tojson }})'>Copy</button>
         </div>
@@ -86,12 +94,12 @@
         <div class="panel-header">
             <div>
                 <h2 class="panel-title">Task run states</h2>
-                <p class="panel-copy">Each task keeps its own status, duration, and command preview. Failed cards are clickable for retry selection.</p>
+                <p class="panel-copy">Failed and skipped tasks can be selected directly from the cards below or from the DAG above.</p>
             </div>
         </div>
         <div class="task-grid" id="task-run-grid">
             {% for task in task_runs %}
-            <article class="task-card {% if task.status in ['failed', 'skipped'] %}retryable{% endif %} {% if task.status == 'failed' %}task-card-failed{% elif task.status == 'success' %}task-card-success{% endif %}" {% if task.status in ['failed', 'skipped'] %}onclick="selectRetryTask('{{ task.task_id }}')" data-retry-task="{{ task.task_id }}"{% endif %}>
+            <article class="task-card {% if task.status in ['failed', 'skipped'] %}retryable{% endif %} {% if task.status == 'failed' %}task-card-failed{% elif task.status == 'success' %}task-card-success{% endif %}" {% if task.status in ['failed', 'skipped'] %}onclick="selectRetryTask('{{ task.task_id }}')" data-retry-task="{{ task.task_id }}"{% endif %} data-task-card="{{ task.task_id }}">
                 <div class="task-card-header">
                     <div>
                         <h3 class="card-title">{{ task.title }}</h3>
@@ -129,28 +137,6 @@
         </div>
     </section>
     {% endif %}
-
-    <section class="panel">
-        <div class="panel-header">
-            <div>
-                <h2 class="panel-title">Raw logs</h2>
-                <p class="panel-copy">Newest lines on top. Timestamps are formatted as HH:MM:SS.SSS.</p>
-            </div>
-        </div>
-        <div class="log-viewer" id="log-viewer">
-            {% if logs %}
-                {% for line in logs %}
-                <div class="log-line">
-                    <time>{{ line.created_at.strftime('%H:%M:%S.%f')[:-3] }}</time>
-                    <div class="log-task">{{ line.task_id or "pipeline" }}</div>
-                    <div>{{ line.message }}</div>
-                </div>
-                {% endfor %}
-            {% else %}
-                <div class="empty-state">No output has been captured yet for this run.</div>
-            {% endif %}
-        </div>
-    </section>
 </div>
 {% endblock %}
 
@@ -159,9 +145,12 @@
 <script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.2/dist/dagre.min.js" defer></script>
 <script>
 const runId = "{{ run.run_id }}";
+const initialRun = {{ run_payload|tojson }};
 const initialTaskRuns = {{ task_run_payloads|tojson }};
 let active = {{ 'true' if run.status in ['queued', 'running'] else 'false' }};
 let selectedRetryTaskId = null;
+let currentRun = initialRun;
+let durationTicker = null;
 
 function updateRetryPanel(taskRuns) {
     const panel = document.getElementById("retry-panel");
@@ -217,7 +206,7 @@ function renderLogs(logs) {
         <div class="log-line">
             <time>${escapeHtml(line.time_label)}</time>
             <div class="log-task">${escapeHtml(line.task_id || "pipeline")}</div>
-            <div>${escapeHtml(line.message)}</div>
+            <div class="log-message">${escapeHtml(line.message)}</div>
         </div>
     `).join("");
 }
@@ -226,7 +215,7 @@ function renderTaskRuns(taskRuns) {
     window.currentTaskRuns = taskRuns;
     const grid = document.getElementById("task-run-grid");
     grid.innerHTML = taskRuns.map((task) => `
-        <article class="task-card ${task.status === "failed" ? "task-card-failed retryable" : ""} ${task.status === "success" ? "task-card-success" : ""} ${task.status === "skipped" ? "retryable" : ""} ${task.task_id === selectedRetryTaskId ? "retry-selected" : ""}" ${task.status === "failed" || task.status === "skipped" ? `onclick="selectRetryTask('${escapeHtml(task.task_id)}')" data-retry-task="${escapeHtml(task.task_id)}"` : ""}>
+        <article class="task-card ${task.status === "failed" ? "task-card-failed retryable" : ""} ${task.status === "success" ? "task-card-success" : ""} ${task.status === "skipped" ? "retryable" : ""} ${task.task_id === selectedRetryTaskId ? "retry-selected" : ""}" ${task.status === "failed" || task.status === "skipped" ? `onclick="selectRetryTask('${escapeHtml(task.task_id)}')" data-retry-task="${escapeHtml(task.task_id)}"` : ""} data-task-card="${escapeHtml(task.task_id)}">
             <div class="task-card-header">
                 <div>
                     <h3 class="card-title">${escapeHtml(task.title)}</h3>
@@ -237,7 +226,7 @@ function renderTaskRuns(taskRuns) {
             <div class="task-stats">
                 <span class="task-type-badge">${escapeHtml(task.task_type)}</span>
                 <span class="meta-pill">logs ${task.log_count}</span>
-                <span class="meta-pill">duration ${task.duration_seconds ? `${task.duration_seconds.toFixed(1)}s` : "-"}</span>
+                <span class="meta-pill">duration ${formatDurationSeconds(task.duration_seconds)}</span>
             </div>
             <pre class="code-block" style="margin-top:14px;">${escapeHtml(task.command_preview)}</pre>
             ${task.error ? `<p class="footer-note">${escapeHtml(task.error)}</p>` : ""}
@@ -245,7 +234,7 @@ function renderTaskRuns(taskRuns) {
         </article>
     `).join("");
     updateRetryPanel(taskRuns);
-    renderDagInto(
+    window.renderDagInto(
         "run-dag-stage",
         taskRuns.map((task) => ({
             task_id: task.task_id,
@@ -257,10 +246,52 @@ function renderTaskRuns(taskRuns) {
         })),
         Object.fromEntries(taskRuns.map((task) => [task.task_id, task.status])),
         {
-            clickableStatuses: ["failed", "skipped"],
-            onNodeClick: (node) => selectRetryTask(node.task_id),
+            clickableStatuses: ["queued", "running", "success", "failed", "skipped"],
+            onNodeClick: (node) => {
+                const currentTasks = window.currentTaskRuns || initialTaskRuns;
+                const task = currentTasks.find(t => t.task_id === node.task_id);
+                if (task && (task.status === "failed" || task.status === "skipped")) {
+                    selectRetryTask(node.task_id);
+                }
+                const card = document.querySelector(`[data-task-card="${node.task_id}"]`);
+                if (card) {
+                    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    card.style.transition = "transform 0.25s ease, box-shadow 0.25s ease";
+                    card.style.transform = "scale(1.02)";
+                    card.style.boxShadow = "var(--shadow)";
+                    card.style.borderColor = "var(--accent)";
+                    setTimeout(() => {
+                        card.style.transform = "";
+                        card.style.boxShadow = "";
+                        card.style.borderColor = "";
+                    }, 1200);
+                }
+            },
         },
     );
+}
+
+function startDurationTicker() {
+    if (durationTicker) {
+        clearInterval(durationTicker);
+    }
+
+    const durationElement = document.getElementById("run-duration");
+    const renderDuration = () => {
+        if (!currentRun.started_at) {
+            durationElement.textContent = "-";
+            return;
+        }
+        const startTime = new Date(currentRun.started_at);
+        const endTime = currentRun.finished_at ? new Date(currentRun.finished_at) : new Date();
+        const seconds = Math.max(0, Math.floor((endTime - startTime) / 1000));
+        durationElement.textContent = formatDurationSeconds(seconds);
+    };
+
+    renderDuration();
+    if (active) {
+        durationTicker = setInterval(renderDuration, 1000);
+    }
 }
 
 async function refreshRun() {
@@ -270,21 +301,29 @@ async function refreshRun() {
 
     try {
         const payload = await piplyRequest(`/api/runs/${runId}`);
+        currentRun = payload.run;
         document.getElementById("run-status").textContent = payload.run.status;
         document.getElementById("run-status").className = `status-badge ${payload.run.status}`;
-        document.getElementById("run-duration").textContent = payload.run.duration_seconds ? `${payload.run.duration_seconds.toFixed(1)}s` : "-";
         document.getElementById("run-exit-code").textContent = payload.run.exit_code ?? "pending";
         document.getElementById("run-task-count").textContent = `${payload.run.successful_tasks}/${payload.run.task_count}`;
         renderTaskRuns(payload.task_runs);
         renderLogs(payload.logs);
         active = payload.run.status === "queued" || payload.run.status === "running";
+        startDurationTicker();
+        if (!active && durationTicker) {
+            clearInterval(durationTicker);
+        }
     } catch (error) {
         active = false;
+        if (durationTicker) {
+            clearInterval(durationTicker);
+        }
     }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
     renderTaskRuns(initialTaskRuns);
+    startDurationTicker();
     if (active) {
         setInterval(refreshRun, 3000);
     }

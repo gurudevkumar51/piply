@@ -10,7 +10,7 @@ Core ideas:
 - a project contains one or more pipelines
 - each pipeline contains one or more tasks
 - tasks form a DAG through `depends_on`
-- pipelines can execute sequentially or in dependency-aware parallel mode
+- parallelism is inferred from the DAG automatically
 - a pipeline can trigger other pipelines after success
 
 ## Architecture
@@ -22,9 +22,9 @@ PipelineService
        |
 Loader + Scheduler + RunStore
        |
-LocalEngine
+LocalEngine + RunHeartbeat
        |
-python / cli / api / ssh operators
+python / python_call / cli / api / ssh operators
        |
 SQLite state + local process execution
 ```
@@ -57,9 +57,7 @@ pipelines:
     description: Main extract and validation flow
     schedule:
       every: 15m
-    execution:
-      mode: parallel
-      max_parallel_tasks: 2
+    max_parallel_tasks: 2
     triggers_on_success:
       - report_flow
     tasks:
@@ -70,12 +68,19 @@ pipelines:
         type: cli
         command: python -c "print('validated')"
         depends_on: [extract]
+      publish:
+        type: cli
+        command: python -c "print('published')"
+        depends_on: [extract]
 
   report_flow:
     tasks:
       build_report:
-        type: python
+        type: python_call
         path: pipelines/report.py
+        function: build_report
+        kwargs:
+          report_name: nightly
 ```
 
 ## Scheduling
@@ -105,20 +110,19 @@ schedule:
 
 Pipelines without a schedule are manual only.
 
-## Execution Modes
+## DAG Concurrency
 
-Pipelines can run in one of two modes:
+Piply no longer requires `mode: parallel` in the YAML.
 
-- `sequential` runs one ready task at a time
-- `parallel` runs multiple ready tasks at once while still respecting dependencies
+Behavior:
 
-Example:
+- Piply inspects the task graph
+- if only one task can be ready at a time, execution stays sequential
+- if multiple tasks can become ready together, Piply runs them in parallel
+- `max_parallel_tasks` caps that concurrency
+- `PIPLY_DEFAULT_MAX_PARALLEL_TASKS` provides the global default when a pipeline does not override it
 
-```yaml
-execution:
-  mode: parallel
-  max_parallel_tasks: 3
-```
+Legacy `execution.mode` is still accepted for backward compatibility, but new configs should prefer just `max_parallel_tasks`.
 
 ## Task Operators
 
@@ -133,8 +137,22 @@ tasks:
     path: pipelines/job.py
     python: python
     args: ["--limit", "100"]
-    cwd: .
 ```
+
+      build_report:
+        type: python
+        path: pipelines/report.py
+        function: build_report
+        kwargs:
+          report_name: nightly
+```
+
+Supported inline callable forms:
+
+- `path` + `function`
+- `module` + `function`
+- `call: package.module:function`
+- `call: relative/or/absolute_file.py::function`
 
 ### CLI Task
 
@@ -164,6 +182,32 @@ tasks:
     expected_status: 201
 ```
 
+### Webhook Task
+
+Makes a simple HTTP POST.
+
+```yaml
+tasks:
+  notify_slack:
+    type: webhook
+    url: https://hooks.slack.com/services/...
+    body: '{"text": "Flow finished"}'
+```
+
+### Email Task
+
+Sends a notification via SMTP.
+
+```yaml
+tasks:
+  notify_team:
+    type: email
+    smtp_host: smtp.internal.local
+    email_to: ["team@example.com"]
+    email_subject: "Pipeline Success"
+    email_body: "The nightly extract has finished."
+```
+
 ### SSH Task
 
 Runs a command on a remote host through SSH.
@@ -178,6 +222,34 @@ tasks:
 ```
 
 If `command` is omitted, Piply uses a simple `echo piply-ssh-ok` probe.
+
+## Authentication And Runtime Settings
+
+Piply supports configuration through environment variables and optional `.env` files.
+
+Relevant settings:
+
+- `PIPLY_CONFIG`
+- `PIPLY_DATABASE`
+- `PIPLY_DEFAULT_MAX_PARALLEL_TASKS`
+- `PIPLY_STALE_RUN_TIMEOUT_SECONDS`
+- `PIPLY_HEARTBEAT_INTERVAL_SECONDS`
+- `PIPLY_AUTH_ENABLED`
+- `PIPLY_AUTH_USERNAME`
+- `PIPLY_AUTH_PASSWORD`
+- `PIPLY_API_TOKEN`
+
+Authentication behavior:
+
+- UI routes use HTTP Basic auth when enabled
+- API routes accept HTTP Basic auth and Bearer token auth
+- static assets remain public so authenticated pages can load correctly
+
+Runtime health behavior:
+
+- active runs receive heartbeats while executing
+- stale queued or running runs are reconciled automatically
+- reconciled runs are marked failed and their remaining queued tasks are marked skipped
 
 ## Dependency Rules
 
@@ -199,9 +271,10 @@ When a pipeline run starts:
 
 1. a run record is created
 2. task run records are created in queued state
-3. tasks execute in dependency order using sequential or parallel scheduling
-4. logs are written at both task and pipeline level
-5. downstream pipelines are triggered after success when configured
+3. the engine executes tasks in dependency order
+4. any parallel branches run up to the configured worker cap
+5. logs are written at both task and pipeline level
+6. downstream pipelines are triggered after success when configured
 
 ## Retry Behavior
 
@@ -273,6 +346,8 @@ piply runs --config piply-demo/piply.yaml --limit 20
 ```bash
 piply start --config piply-demo/piply.yaml
 piply start --config piply-demo/piply.yaml --reload
+piply start --config piply-demo/piply.yaml -d
+piply stop --config piply-demo/piply.yaml
 ```
 
 Compatibility alias:
@@ -314,9 +389,10 @@ piply ui --config piply-demo/piply.yaml
 The current UI emphasizes clarity for operators:
 
 - light theme
-- DAG-style pipeline view
+- DAG controls for zoom, pan, tree view, and dependency labels
 - visible commands and script paths
-- task run summaries
+- live run duration updates
+- run graph and logs laid out side by side
 - newest-first raw log display
 - timestamps shown as `HH:MM:SS.SSS`
 
@@ -335,6 +411,7 @@ Stored records include:
 - logs
 - paused schedule overrides
 - scheduler metadata
+- run heartbeats
 
 ## Testing
 
@@ -342,7 +419,7 @@ Useful checks:
 
 ```bash
 python -m pytest -q
-python -m compileall piply
+python -m compileall piply tests
 piply validate --config piply-demo/piply.yaml
 piply run extract_demo --config piply-demo/piply.yaml --wait
 ```
@@ -350,24 +427,30 @@ piply run extract_demo --config piply-demo/piply.yaml --wait
 Current automated tests cover:
 
 - config loading for multi-task pipelines
-- parallel execution config parsing
+- auto-detected DAG parallelism and worker limits
 - downstream pipeline triggers
 - run API log ordering and time labels
 - API operator bearer token behavior
 - SSH operator custom binary execution
+- `python_call` operator execution
 - CLI starter project scaffolding
 - resume retry behavior
+- stale run reconciliation
+- auth middleware behavior
 - legacy database compatibility for manual runs
 
 ## Development Notes
 
 The active code path is centered on:
 
+- `piply/settings.py`
 - `piply/core/service.py`
 - `piply/core/store.py`
 - `piply/core/loader.py`
 - `piply/core/scheduler.py`
 - `piply/engine/local_engine.py`
+- `piply/engine/task_runner.py`
+- `piply/ui/static/dag.js`
 
 The goal is to keep new features additive and modular without pulling in heavy orchestration frameworks.
 
@@ -375,9 +458,4 @@ The goal is to keep new features additive and modular without pulling in heavy o
 
 - `piply logs`
 - `piply tasks run`
-- `piply pause`
-- `piply resume`
-- secrets helpers
-- UI auth
-- richer DAG controls
-- notifications and webhooks
+- CLI pause and resume commands

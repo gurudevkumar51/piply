@@ -10,6 +10,7 @@ from pathlib import Path
 
 from piply.engine.base import BaseEngine
 from piply.engine.local_engine import LocalEngine
+from piply.settings import PiplySettings, load_settings
 
 from .loader import discover_config, load_project
 from .models import PipelineDefinition, PipelineSummary, ProjectDefinition, RetryMode, RunRecord
@@ -39,18 +40,25 @@ class PipelineService:
         config_path: str | Path | None = None,
         database_path: str | Path | None = None,
         engine: BaseEngine | None = None,
+        settings: PiplySettings | None = None,
     ) -> None:
-        self.config_path = Path(config_path).resolve() if config_path else discover_config()
+        resolved_config_path = Path(config_path).resolve() if config_path else discover_config()
+        self.settings = settings or load_settings(resolved_config_path)
+        self.config_path = resolved_config_path
         self.database_path = (
             Path(database_path).resolve()
             if database_path
-            else (self.config_path.parent / ".piply" / "piply.db").resolve()
+            else (
+                self.settings.database_path
+                or (self.config_path.parent / ".piply" / "piply.db").resolve()
+            )
         )
         self.store = RunStore(self.database_path)
-        self.engine = engine or LocalEngine()
+        self.engine = engine or LocalEngine(heartbeat_interval_seconds=self.settings.heartbeat_interval_seconds)
         self._project: ProjectDefinition | None = None
         self._config_mtime: float | None = None
         self._lock = threading.RLock()
+        self.reconcile_runtime_health()
         self.reload_project(force=True)
 
     @property
@@ -65,13 +73,23 @@ class PipelineService:
             if not force and self._project is not None and self._config_mtime == current_mtime:
                 return self._project
 
-            self._project = load_project(self.config_path)
+            self._project = load_project(
+                self.config_path,
+                default_max_parallel_tasks=self.settings.default_max_parallel_tasks,
+            )
             self._config_mtime = current_mtime
             return self._project
 
     def validate(self) -> ProjectDefinition:
         """Validate and return the current project config."""
-        return load_project(self.config_path)
+        return load_project(
+            self.config_path,
+            default_max_parallel_tasks=self.settings.default_max_parallel_tasks,
+        )
+
+    def reconcile_runtime_health(self) -> list[str]:
+        """Reconcile stale queued or running executions before building UI views."""
+        return self.store.reconcile_stale_runs(self.settings.stale_run_timeout_seconds)
 
     def _format_next_run_label(
         self,
@@ -92,6 +110,7 @@ class PipelineService:
 
     def list_pipelines(self) -> list[PipelineSummary]:
         """Return pipeline summaries enriched with scheduling and run metadata."""
+        self.reconcile_runtime_health()
         project = self.project
         paused_ids = self.store.list_paused_pipeline_ids()
         now = datetime.now(timezone.utc)
@@ -164,15 +183,17 @@ class PipelineService:
         limit: int = 50,
     ) -> list[RunRecord]:
         """Return recent runs with optional filters."""
+        self.reconcile_runtime_health()
         return self.store.list_runs(pipeline_id=pipeline_id, status=status, limit=limit)
 
     def get_run(self, run_id: str):
         """Return one run, its task runs, and its raw logs."""
+        self.reconcile_runtime_health()
         run = self.store.get_run(run_id)
         if run is None:
             raise KeyError(f"Unknown run '{run_id}'")
         task_runs = self.store.list_task_runs(run_id)
-        logs = self.store.list_logs(run_id)
+        logs = self.store.list_logs(run_id, limit=500)
         return run, task_runs, logs
 
     def trigger_pipeline(
@@ -189,6 +210,7 @@ class PipelineService:
         initial_task_statuses: dict[str, str] | None = None,
     ) -> RunRecord:
         """Create and dispatch one new run for a pipeline."""
+        self.reconcile_runtime_health()
         pipeline = self.get_pipeline(pipeline_id)
         if scheduled_for is not None and self.store.has_run_for_slot(pipeline_id, scheduled_for):
             latest = self.store.list_runs(pipeline_id=pipeline_id, limit=1)
@@ -232,6 +254,7 @@ class PipelineService:
         on_log: Callable[[str], None] | None = None,
     ) -> RunRecord:
         """Create a retry run in startover or resume mode."""
+        self.reconcile_runtime_health()
         previous_run, previous_task_runs, _ = self.get_run(run_id)
         if previous_run.status in {"queued", "running"}:
             raise ValueError("Retry is only available after a run has finished.")
@@ -311,6 +334,7 @@ class PipelineService:
 
     def dashboard(self) -> dict[str, object]:
         """Return the dashboard payload shared by the API and UI."""
+        self.reconcile_runtime_health()
         pipelines = self.list_pipelines()
         stats = self.store.get_stats(
             scheduled_pipeline_count=sum(
@@ -328,4 +352,9 @@ class PipelineService:
             "pipelines": pipelines,
             "recent_runs": self.store.list_runs(limit=10),
             "scheduler": self.scheduler_snapshot(),
+            "settings": {
+                "auth_enabled": self.settings.auth_enabled,
+                "default_max_parallel_tasks": self.settings.default_max_parallel_tasks,
+                "stale_run_timeout_seconds": self.settings.stale_run_timeout_seconds,
+            },
         }
