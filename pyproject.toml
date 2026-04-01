@@ -41,5 +41,12 @@ dev = ["pytest>=8.0.0", "ruff>=0.4.0"]
 where = ["."]
 include = ["piply*", "tests*"]
 
+[tool.setuptools.package-data]
+piply = [
+    "ui/templates/*",
+    "ui/static/*",
+    "ui/static/**/*"
+]
+
 [tool.ruff]
 line-length = 100

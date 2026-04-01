@@ -250,7 +250,9 @@ Planned next steps:
 
 - `piply logs` for direct CLI log streaming without opening the UI
 - `piply tasks run` for targeted task execution
-- CLI pause and resume commands
+- in task box of graph view for every running, success or failed show the duration of task
+- instead of cli command we should be able to run any command from the UI
+- for cli operator we should give any batch file as well to execute
 
 
 ## More Docs
