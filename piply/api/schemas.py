@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from piply.core.models import (
     DashboardStats,
@@ -27,6 +27,12 @@ class RetryRequest(BaseModel):
 
     mode: str
     task_id: str | None = None
+
+
+class TriggerRunRequest(BaseModel):
+    """TriggerRunRequest carries optional UI-provided CLI command overrides."""
+
+    command_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class RunResponse(BaseModel):
@@ -193,6 +199,7 @@ class PipelineResponse(BaseModel):
     trigger_targets: list[str]
     active_runs: int
     latest_task_states: dict[str, str]
+    retry_summary: str
     last_run: RunResponse | None = None
 
     @classmethod
@@ -218,6 +225,7 @@ class PipelineResponse(BaseModel):
             trigger_targets=list(summary.trigger_targets),
             active_runs=summary.active_runs,
             latest_task_states=dict(summary.latest_task_states),
+            retry_summary=summary.retry_summary,
             last_run=RunResponse.from_record(summary.last_run) if summary.last_run else None,
         )
 
@@ -279,6 +287,15 @@ class SchedulerResponse(BaseModel):
     heartbeat: str | None = None
     config_path: str
     database_path: str
+    queue_depth: int | None = None
+    sensor_count: int | None = None
+
+
+class UpcomingRunResponse(BaseModel):
+    """UpcomingRunResponse previews one future scheduled slot."""
+
+    scheduled_for: datetime
+    label: str
 
 
 class DashboardResponse(BaseModel):
@@ -297,3 +314,4 @@ class RunDetailResponse(BaseModel):
     run: RunResponse
     task_runs: list[TaskRunResponse]
     logs: list[LogResponse]
+    upcoming_runs: list[UpcomingRunResponse] = Field(default_factory=list)

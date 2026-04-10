@@ -43,7 +43,19 @@ function formatDurationSeconds(totalSeconds) {
   return `${seconds}s`;
 }
 
-async function triggerPipeline(pipelineId) {
+function collectCommandOverrides(scope = document) {
+  const overrides = {};
+  scope.querySelectorAll("[data-command-override]").forEach((field) => {
+    const taskId = field.dataset.taskId;
+    const value = field.value.trim();
+    if (taskId && value) {
+      overrides[taskId] = value;
+    }
+  });
+  return overrides;
+}
+
+async function triggerPipeline(pipelineId, options = {}) {
   const button = document.querySelector(`[data-run-button="${pipelineId}"]`);
   if (button) {
     button.disabled = true;
@@ -52,9 +64,12 @@ async function triggerPipeline(pipelineId) {
   }
 
   try {
+    const payload = {
+      command_overrides: options.commandOverrides || collectCommandOverrides(options.scope || document),
+    };
     const run = await piplyRequest(`/api/pipelines/${pipelineId}/run`, {
       method: "POST",
-      body: "{}",
+      body: JSON.stringify(payload),
     });
     window.location.href = `/runs/${run.id}`;
   } catch (error) {
@@ -63,6 +78,21 @@ async function triggerPipeline(pipelineId) {
       button.disabled = false;
       button.textContent = button.dataset.originalLabel || "Run now";
     }
+  }
+}
+
+async function triggerTask(pipelineId, taskId, options = {}) {
+  const payload = {
+    command_overrides: options.commandOverrides || collectCommandOverrides(options.scope || document),
+  };
+  try {
+    const run = await piplyRequest(`/api/pipelines/${pipelineId}/tasks/${taskId}/run`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    window.location.href = `/runs/${run.id}`;
+  } catch (error) {
+    alert(error.message);
   }
 }
 
@@ -86,6 +116,52 @@ async function togglePipelinePause(pipelineId, paused) {
       body: "{}",
     });
     window.location.reload();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function cancelRun(runId) {
+  const shouldCancel = window.confirm("Cancel this run?");
+  if (!shouldCancel) {
+    return;
+  }
+  try {
+    await piplyRequest(`/api/runs/${runId}/cancel`, {
+      method: "POST",
+      body: "{}",
+    });
+    window.location.reload();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function deleteRun(runId, redirectUrl = "/runs") {
+  const shouldDelete = window.confirm("Delete this run from history?");
+  if (!shouldDelete) {
+    return;
+  }
+  try {
+    await piplyRequest(`/api/runs/${runId}`, {
+      method: "DELETE",
+    });
+    window.location.href = redirectUrl;
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function deletePipeline(pipelineId, redirectUrl = "/pipelines") {
+  const shouldDelete = window.confirm("Delete this pipeline and its stored run history?");
+  if (!shouldDelete) {
+    return;
+  }
+  try {
+    await piplyRequest(`/api/pipelines/${pipelineId}`, {
+      method: "DELETE",
+    });
+    window.location.href = redirectUrl;
   } catch (error) {
     alert(error.message);
   }

@@ -5,14 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 
-RunStatus = Literal["queued", "running", "success", "failed"]
-TaskStatus = Literal["queued", "running", "success", "failed", "skipped"]
-TriggerType = Literal["manual", "schedule", "api", "pipeline"]
-TaskType = Literal["python", "python_call", "cli", "api", "ssh", "email", "webhook"]
+RunStatus = Literal["queued", "running", "success", "failed", "cancelled"]
+TaskStatus = Literal["queued", "running", "success", "failed", "skipped", "cancelled"]
+TriggerType = Literal["manual", "schedule", "api", "pipeline", "retry", "sensor", "task"]
+TaskType = Literal["python", "cli", "api", "ssh", "email", "webhook"]
 RetryMode = Literal["startover", "resume"]
+SensorType = Literal["file_sensor", "sql_sensor"]
+QueueStatus = Literal["queued", "dispatching", "dispatched", "failed"]
 
 
 class SchedulePlan(Protocol):
@@ -28,6 +30,77 @@ class SchedulePlan(Protocol):
 
     def next_after(self, now_utc: datetime) -> datetime | None:
         ...
+
+
+@dataclass(slots=True, frozen=True)
+class RetryPolicy:
+    """RetryPolicy configures automatic retries for a pipeline."""
+
+    attempts: int = 0
+    mode: RetryMode = "startover"
+    delay_seconds: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether the retry policy should create automatic retries."""
+        return self.attempts > 0
+
+    @property
+    def summary(self) -> str:
+        """Return a compact UI label for the retry policy."""
+        if not self.enabled:
+            return "No automatic retry"
+        retry_label = "resume from failed tasks" if self.mode == "resume" else "restart full pipeline"
+        if self.delay_seconds > 0:
+            return f"{self.attempts} retries, {retry_label}, delay {self.delay_seconds}s"
+        return f"{self.attempts} retries, {retry_label}"
+
+
+@dataclass(slots=True)
+class SensorDefinition:
+    """A sensor watches external state and can enqueue pipeline work when it changes."""
+
+    sensor_id: str
+    sensor_type: SensorType
+    title: str
+    enabled: bool = True
+    path: Path | None = None
+    path_source: str | None = None
+    pattern: str = "*"
+    recursive: bool = False
+    database: Path | None = None
+    connection: str | None = None
+    table: str | None = None
+    cursor_column: str = "rowid"
+    where: str | None = None
+    ignore_existing: bool = True
+    task_id: str | None = None
+    ssh_host: str | None = None
+    ssh_user: str | None = None
+    ssh_port: int = 22
+    ssh_key_file: Path | None = None
+    ssh_binary: str = "ssh"
+    connect_timeout: int = 8
+    remote_path: str | None = None
+
+    @property
+    def is_remote(self) -> bool:
+        """Return whether this sensor watches a remote SFTP path over SSH."""
+        return self.remote_path is not None and self.ssh_host is not None
+
+    @property
+    def summary(self) -> str:
+        """Return a compact summary used in logs and future UI views."""
+        if self.sensor_type == "file_sensor":
+            if self.is_remote:
+                identity = "@".join(part for part in [self.ssh_user, self.ssh_host] if part) or "<missing host>"
+                target = f"sftp://{identity}:{self.ssh_port}{self.remote_path or ''}"
+            else:
+                target = self.path_source or (str(self.path) if self.path is not None else "<missing path>")
+            return f"file_sensor {target} [{self.pattern}]"
+        database = self.connection or (str(self.database) if self.database is not None else "<missing database>")
+        table = self.table or "<missing table>"
+        return f"sql_sensor {database}:{table}"
 
 
 @dataclass(slots=True)
@@ -71,7 +144,7 @@ class TaskDefinition:
     @property
     def operator_label(self) -> str:
         """Return a short operator name for UI and log labels."""
-        if self.task_type == "python_call":
+        if self.task_type == "python" and self.call:
             return "PY CALL"
         return self.task_type.upper()
 
@@ -88,22 +161,25 @@ class TaskDefinition:
     def command_preview(self) -> str:
         """Return the human-readable command or target for this task."""
         if self.task_type == "python":
+            if self.call:
+                rendered_args = ", ".join(str(item) for item in self.args)
+                rendered_kwargs = ", ".join(
+                    f"{key}={value}" for key, value in self.kwargs.items()
+                )
+                signature = ", ".join(item for item in [rendered_args, rendered_kwargs] if item)
+                target = self.call or "<missing callable>"
+                return f"python {target}({signature})" if signature else f"python {target}()"
             python_executable = self.python or "python"
             path_text = str(self.path) if self.path else "<missing script>"
             parts = [python_executable, path_text, *(str(item) for item in self.args)]
             return " ".join(parts)
-        if self.task_type == "python_call":
-            rendered_args = ", ".join(str(item) for item in self.args)
-            rendered_kwargs = ", ".join(
-                f"{key}={value}" for key, value in self.kwargs.items()
-            )
-            signature = ", ".join(
-                item for item in [rendered_args, rendered_kwargs] if item
-            )
-            target = self.call or "<missing callable>"
-            return f"python_call {target}({signature})" if signature else f"python_call {target}()"
         if self.task_type == "cli":
-            return self.command or "<missing command>"
+            if self.command:
+                return self.command
+            if self.path is not None:
+                parts = [str(self.path), *(str(item) for item in self.args)]
+                return " ".join(parts)
+            return "<missing command>"
         if self.task_type == "api":
             return f"{self.method.upper()} {self.url or '<missing url>'}"
         if self.task_type == "ssh":
@@ -132,6 +208,8 @@ class PipelineDefinition:
     parallelizable: bool = False
     max_parallel_tasks: int = 4
     triggers_on_success: tuple[str, ...] = ()
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+    sensors: dict[str, SensorDefinition] = field(default_factory=dict)
 
     @property
     def task_count(self) -> int:
@@ -179,6 +257,11 @@ class PipelineDefinition:
         if self.parallelizable and self.max_parallel_tasks > 1:
             return "parallel"
         return "sequential"
+
+    @property
+    def sensor_count(self) -> int:
+        """Return the number of configured sensors for this pipeline."""
+        return len(self.sensors)
 
     def is_schedulable(self) -> bool:
         """Return whether the pipeline can be launched by the scheduler."""
@@ -277,6 +360,25 @@ class LogRecord:
 
 
 @dataclass(slots=True)
+class TriggerQueueRecord:
+    """One persisted trigger item that is waiting to be dispatched or already consumed."""
+
+    queue_id: int
+    pipeline_id: str
+    trigger: TriggerType
+    status: QueueStatus
+    available_at: datetime
+    created_at: datetime
+    scheduled_for: datetime | None = None
+    source_key: str | None = None
+    dedupe_key: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+    dispatched_at: datetime | None = None
+    dispatched_run_id: str | None = None
+    error: str | None = None
+
+
+@dataclass(slots=True)
 class DashboardStats:
     """DashboardStats aggregates the most important runtime counters."""
 
@@ -319,6 +421,7 @@ class PipelineSummary:
     latest_task_states: dict[str, TaskStatus] = field(default_factory=dict)
     last_run: RunRecord | None = None
     active_runs: int = 0
+    retry_summary: str = "No automatic retry"
 
     @property
     def execution_summary(self) -> str:

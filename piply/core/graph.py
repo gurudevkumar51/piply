@@ -52,3 +52,18 @@ def downstream_closure(pipeline: PipelineDefinition, seed_task_ids: set[str]) ->
                 stack.append(dependent)
 
     return closure
+
+
+def upstream_closure(pipeline: PipelineDefinition, seed_task_ids: set[str]) -> set[str]:
+    """Return every dependency required to execute the supplied task ids."""
+    closure = set(seed_task_ids)
+    stack = list(seed_task_ids)
+
+    while stack:
+        task_id = stack.pop()
+        for dependency in pipeline.tasks[task_id].depends_on:
+            if dependency not in closure:
+                closure.add(dependency)
+                stack.append(dependency)
+
+    return closure

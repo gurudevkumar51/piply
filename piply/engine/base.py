@@ -26,7 +26,12 @@ class BaseEngine(ABC):
         wait: bool = False,
         on_log: LogCallback | None = None,
         on_success: CompletionCallback | None = None,
+        on_failure: CompletionCallback | None = None,
         initial_task_statuses: dict[str, str] | None = None,
         retry_source_run_id: str | None = None,
     ) -> None:
         """Execute a pipeline run either asynchronously or in-process."""
+
+    @abstractmethod
+    def cancel(self, run_id: str) -> bool:
+        """Request cancellation for one running pipeline."""

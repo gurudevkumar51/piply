@@ -125,3 +125,173 @@ def test_auth_middleware_supports_basic_for_ui_and_bearer_for_api(tmp_path: Path
     assert ui_unauthorized.status_code == 401
     assert ui_authorized.status_code == 200
     assert api_bearer.status_code == 200
+
+
+def test_run_api_includes_upcoming_runs_and_pipeline_run_overrides(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: API Override Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  cli_flow:",
+                "    schedule:",
+                "      every: 5m",
+                "    tasks:",
+                "      command_task:",
+                "        type: cli",
+                "        command: python -c \"print('original')\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    previous_config = os.environ.get("PIPLY_CONFIG")
+    previous_database = os.environ.get("PIPLY_DATABASE")
+    os.environ["PIPLY_CONFIG"] = str(config_path)
+    os.environ["PIPLY_DATABASE"] = str(tmp_path / "api.db")
+    try:
+        app = create_app(str(config_path))
+        with TestClient(app) as client:
+            run_response = client.post(
+                "/api/pipelines/cli_flow/run",
+                json={"command_overrides": {"command_task": "python -c \"print('override-from-api')\""}},
+            )
+            assert run_response.status_code == 200
+            run_id = run_response.json()["id"]
+
+            for _ in range(30):
+                detail = client.get(f"/api/runs/{run_id}")
+                if detail.json()["run"]["status"] == "success":
+                    break
+            payload = detail.json()
+    finally:
+        if previous_config is None:
+            os.environ.pop("PIPLY_CONFIG", None)
+        else:
+            os.environ["PIPLY_CONFIG"] = previous_config
+        if previous_database is None:
+            os.environ.pop("PIPLY_DATABASE", None)
+        else:
+            os.environ["PIPLY_DATABASE"] = previous_database
+
+    assert payload["run"]["status"] == "success"
+    assert payload["upcoming_runs"]
+    assert any("override-from-api" in line["message"] for line in payload["logs"])
+
+
+def test_pipeline_run_api_still_accepts_empty_body(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: API Empty Body Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  cli_flow:",
+                "    tasks:",
+                "      command_task:",
+                "        type: cli",
+                "        command: python -c \"print('no-body-trigger')\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    previous_config = os.environ.get("PIPLY_CONFIG")
+    previous_database = os.environ.get("PIPLY_DATABASE")
+    os.environ["PIPLY_CONFIG"] = str(config_path)
+    os.environ["PIPLY_DATABASE"] = str(tmp_path / "empty-body.db")
+    try:
+        app = create_app(str(config_path))
+        with TestClient(app) as client:
+            run_response = client.post("/api/pipelines/cli_flow/run")
+            assert run_response.status_code == 200
+            run_id = run_response.json()["id"]
+
+            for _ in range(30):
+                detail = client.get(f"/api/runs/{run_id}")
+                if detail.json()["run"]["status"] == "success":
+                    break
+            payload = detail.json()
+    finally:
+        if previous_config is None:
+            os.environ.pop("PIPLY_CONFIG", None)
+        else:
+            os.environ["PIPLY_CONFIG"] = previous_config
+        if previous_database is None:
+            os.environ.pop("PIPLY_DATABASE", None)
+        else:
+            os.environ["PIPLY_DATABASE"] = previous_database
+
+    assert payload["run"]["status"] == "success"
+    assert any("no-body-trigger" in line["message"] for line in payload["logs"])
+
+
+def test_pipeline_task_run_api_executes_selected_task_scope(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "extract.py").write_text("print('extract-ok')", encoding="utf-8")
+    (workspace / "publish.py").write_text("print('publish-ok')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Task Run API Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  task_flow:",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: extract.py",
+                "      publish:",
+                "        type: python",
+                "        path: publish.py",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    previous_config = os.environ.get("PIPLY_CONFIG")
+    previous_database = os.environ.get("PIPLY_DATABASE")
+    os.environ["PIPLY_CONFIG"] = str(config_path)
+    os.environ["PIPLY_DATABASE"] = str(tmp_path / "task-scope.db")
+    try:
+        app = create_app(str(config_path))
+        with TestClient(app) as client:
+            run_response = client.post("/api/pipelines/task_flow/tasks/publish/run", json={})
+            assert run_response.status_code == 200
+            run_id = run_response.json()["id"]
+
+            for _ in range(30):
+                detail = client.get(f"/api/runs/{run_id}")
+                if detail.json()["run"]["status"] == "success":
+                    break
+            payload = detail.json()
+    finally:
+        if previous_config is None:
+            os.environ.pop("PIPLY_CONFIG", None)
+        else:
+            os.environ["PIPLY_CONFIG"] = previous_config
+        if previous_database is None:
+            os.environ.pop("PIPLY_DATABASE", None)
+        else:
+            os.environ["PIPLY_DATABASE"] = previous_database
+
+    task_ids = [task["task_id"] for task in payload["task_runs"]]
+    assert payload["run"]["status"] == "success"
+    assert task_ids == ["extract", "publish"]
+    assert any("publish-ok" in line["message"] for line in payload["logs"])

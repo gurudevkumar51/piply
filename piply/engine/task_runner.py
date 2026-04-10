@@ -38,17 +38,27 @@ class TaskRunner:
         store: RunStore,
         run_id: str,
         on_log: Callable[[str], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+        register_process: Callable[[subprocess.Popen], None] | None = None,
+        unregister_process: Callable[[subprocess.Popen], None] | None = None,
     ) -> None:
         self.store = store
         self.run_id = run_id
         self.on_log = on_log
+        self.is_cancelled = is_cancelled
+        self.register_process = register_process
+        self.unregister_process = unregister_process
 
     def run(self, task: TaskDefinition) -> TaskExecutionResult:
         """Dispatch one task to the correct lightweight operator."""
-        if task.task_type == "python" or task.task_type == "python_call":
+        if self.is_cancelled and self.is_cancelled():
+            self.emit("Task cancelled before execution started.", task_id=task.task_id)
+            return TaskExecutionResult(status="cancelled")
+
+        if task.task_type == "python":
             if task.call:
                 return self._run_python_call_task(task)
-            
+
             command = [task.python or "python", str(task.path), *(str(item) for item in task.args)]
             return self._run_subprocess(
                 command=command,
@@ -58,6 +68,8 @@ class TaskRunner:
             )
 
         if task.task_type == "cli":
+            if task.command is None and task.path is not None:
+                return self._run_cli_path_task(task)
             return self._run_subprocess(
                 command=task.command or "",
                 cwd=task.working_directory,
@@ -110,11 +122,18 @@ class TaskRunner:
                 bufsize=1,
                 shell=shell,
             )
+            if self.register_process is not None:
+                self.register_process(process)
             assert process.stdout is not None
             for line in process.stdout:
+                if self.is_cancelled and self.is_cancelled():
+                    process.terminate()
                 self.emit(line.rstrip(), task_id=task_id)
 
             exit_code = process.wait()
+            if self.is_cancelled and self.is_cancelled():
+                self.emit("Task cancelled.", task_id=task_id)
+                return TaskExecutionResult(status="cancelled")
             if exit_code == 0:
                 self.emit("Task completed successfully.", task_id=task_id)
                 return TaskExecutionResult(status="success", exit_code=exit_code)
@@ -126,6 +145,43 @@ class TaskRunner:
             message = str(exc)
             self.emit(message, task_id=task_id)
             return TaskExecutionResult(status="failed", error=message)
+        finally:
+            if "process" in locals() and self.unregister_process is not None:
+                self.unregister_process(process)
+
+    def _run_cli_path_task(self, task: TaskDefinition) -> TaskExecutionResult:
+        """Run a configured CLI path, including Windows batch files."""
+        assert task.path is not None
+        suffix = task.path.suffix.lower()
+        if suffix in {".bat", ".cmd"}:
+            command = ["cmd.exe", "/c", str(task.path), *(str(item) for item in task.args)]
+            return self._run_subprocess(
+                command=command,
+                cwd=task.working_directory,
+                env=task.env,
+                task_id=task.task_id,
+            )
+        if suffix == ".ps1":
+            command = [
+                "powershell",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(task.path),
+                *(str(item) for item in task.args),
+            ]
+            return self._run_subprocess(
+                command=command,
+                cwd=task.working_directory,
+                env=task.env,
+                task_id=task.task_id,
+            )
+        return self._run_subprocess(
+            command=[str(task.path), *(str(item) for item in task.args)],
+            cwd=task.working_directory,
+            env=task.env,
+            task_id=task.task_id,
+        )
 
     def _load_callable(self, task: TaskDefinition):
         """Resolve a callable from a module reference or a file path reference."""
@@ -183,6 +239,10 @@ class TaskRunner:
                 for line in output.splitlines():
                     self.emit(line, task_id=task.task_id)
 
+        if self.is_cancelled and self.is_cancelled():
+            self.emit("Task cancelled.", task_id=task.task_id)
+            return TaskExecutionResult(status="cancelled")
+
         if result is not None:
             if isinstance(result, (dict, list, tuple, int, float, bool)):
                 rendered = json.dumps(result, default=str)
@@ -215,6 +275,9 @@ class TaskRunner:
                 status_code = response.getcode()
                 preview = payload[:400] if payload else "<empty>"
                 self.emit(f"Response {status_code}: {preview}", task_id=task.task_id)
+                if self.is_cancelled and self.is_cancelled():
+                    self.emit("Task cancelled.", task_id=task.task_id)
+                    return TaskExecutionResult(status="cancelled")
                 if status_code not in task.expected_status:
                     message = f"Unexpected status {status_code}. Expected one of {task.expected_status}."
                     return TaskExecutionResult(status="failed", error=message)
@@ -250,6 +313,9 @@ class TaskRunner:
                     server.starttls()
                     server.login(task.smtp_user, task.smtp_password)
                 server.send_message(msg)
+            if self.is_cancelled and self.is_cancelled():
+                self.emit("Task cancelled.", task_id=task.task_id)
+                return TaskExecutionResult(status="cancelled")
             self.emit("Email sent successfully.", task_id=task.task_id)
             return TaskExecutionResult(status="success", exit_code=0)
         except Exception as exc:

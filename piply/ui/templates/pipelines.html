@@ -54,6 +54,10 @@
                     <div class="detail-label">Next run</div>
                     <div class="detail-value">{{ pipeline.next_run_label }}</div>
                 </div>
+                <div class="detail-card">
+                    <div class="detail-label">Retry policy</div>
+                    <div class="detail-value">{{ pipeline.retry_summary }}</div>
+                </div>
             </div>
 
             <div class="tag-row" style="margin-bottom:18px;">
@@ -71,6 +75,7 @@
                 <button class="button {% if pipeline.paused %}secondary{% else %}warn{% endif %}" onclick="togglePipelinePause('{{ pipeline.pipeline_id }}', {{ 'false' if pipeline.paused else 'true' }})">
                     {% if pipeline.paused %}Resume schedule{% else %}Pause schedule{% endif %}
                 </button>
+                <button class="button ghost" onclick="deletePipeline('{{ pipeline.pipeline_id }}')">Delete</button>
                 <a class="button ghost" href="/pipelines/{{ pipeline.pipeline_id }}">Open details</a>
             </div>
         </article>

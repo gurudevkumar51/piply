@@ -36,6 +36,7 @@
                         <th>Tasks</th>
                         <th>Started</th>
                         <th>Finished</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -48,6 +49,16 @@
                         <td>{{ run.successful_tasks }}/{{ run.task_count }}</td>
                         <td>{{ run.started_at or run.created_at }}</td>
                         <td>{{ run.finished_at or "-" }}</td>
+                        <td>
+                            <div class="table-actions">
+                                <a class="button ghost" href="/runs/{{ run.run_id }}">Open</a>
+                                {% if run.status in ['queued', 'running'] %}
+                                <button class="button warn" onclick="cancelRun('{{ run.run_id }}')">Cancel</button>
+                                {% else %}
+                                <button class="button ghost" onclick="deleteRun('{{ run.run_id }}')">Delete</button>
+                                {% endif %}
+                            </div>
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>

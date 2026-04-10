@@ -10,6 +10,7 @@ from piply.api.schemas import (
     RunDetailResponse,
     RunResponse,
     TaskRunResponse,
+    UpcomingRunResponse,
 )
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -38,13 +39,16 @@ def get_run(request: Request, run_id: str) -> RunDetailResponse:
     """Return one run with task runs and raw logs."""
     service = _get_service(request)
     try:
-        run, task_runs, logs = service.get_run(run_id)
+        payload = service.get_run_detail(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return RunDetailResponse(
-        run=RunResponse.from_record(run),
-        task_runs=[TaskRunResponse.from_record(item) for item in task_runs],
-        logs=[LogResponse.from_record(item) for item in logs],
+        run=RunResponse.from_record(payload["run"]),
+        task_runs=[TaskRunResponse.from_record(item) for item in payload["task_runs"]],
+        logs=[LogResponse.from_record(item) for item in payload["logs"]],
+        upcoming_runs=[
+            UpcomingRunResponse(**item) for item in payload["upcoming_runs"]
+        ],
     )
 
 
@@ -91,3 +95,29 @@ def get_run_logs(
         }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{run_id}/cancel", response_model=RunResponse)
+def cancel_run(request: Request, run_id: str) -> RunResponse:
+    """Cancel one queued or running run."""
+    service = _get_service(request)
+    try:
+        run = service.cancel_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RunResponse.from_record(run)
+
+
+@router.delete("/{run_id}")
+def delete_run(request: Request, run_id: str) -> dict[str, str]:
+    """Delete one finished run from history."""
+    service = _get_service(request)
+    try:
+        service.delete_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "deleted", "run_id": run_id}

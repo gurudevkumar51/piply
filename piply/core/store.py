@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import uuid
@@ -15,6 +16,7 @@ from .models import (
     PipelineDefinition,
     RetryMode,
     RunRecord,
+    TriggerQueueRecord,
     TaskRunRecord,
 )
 
@@ -131,13 +133,40 @@ class RunStore:
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS trigger_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pipeline_id TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    available_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    scheduled_for TEXT,
+                    source_key TEXT,
+                    dedupe_key TEXT,
+                    payload_json TEXT,
+                    dispatched_at TEXT,
+                    dispatched_run_id TEXT,
+                    error TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS sensor_state (
+                    sensor_key TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_runs_pipeline_id ON runs(pipeline_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
                 CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id, position);
                 CREATE INDEX IF NOT EXISTS idx_logs_run_id ON logs(run_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_trigger_queue_status_available
+                    ON trigger_queue(status, available_at, id);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_unique_schedule_slot
                     ON runs(pipeline_id, scheduled_for)
                     WHERE scheduled_for IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trigger_queue_dedupe
+                    ON trigger_queue(dedupe_key)
+                    WHERE dedupe_key IS NOT NULL;
                 """
             )
 
@@ -336,6 +365,42 @@ class RunStore:
             connection.execute(
                 "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
                 (now, run_id),
+            )
+            connection.commit()
+
+    def cancel_run(self, run_id: str, reason: str = "Run cancelled by user.") -> None:
+        """Mark one queued or running run as cancelled."""
+        now = _to_iso(datetime.now(timezone.utc))
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE runs
+                SET status = 'cancelled',
+                    finished_at = ?,
+                    exit_code = NULL,
+                    error = COALESCE(error, ?),
+                    heartbeat_at = ?
+                WHERE id = ? AND status IN ('queued', 'running')
+                """,
+                (now, reason, now, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = 'cancelled',
+                    finished_at = ?,
+                    exit_code = NULL,
+                    error = COALESCE(error, ?)
+                WHERE run_id = ? AND status IN ('queued', 'running')
+                """,
+                (now, reason, run_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO logs (run_id, task_id, created_at, stream, message)
+                VALUES (?, NULL, ?, 'stderr', ?)
+                """,
+                (run_id, now, reason),
             )
             connection.commit()
 
@@ -555,6 +620,26 @@ class RunStore:
         runs = self.list_runs(pipeline_id=pipeline_id, limit=1)
         return runs[0] if runs else None
 
+    def get_run_for_slot(self, pipeline_id: str, scheduled_for: datetime) -> RunRecord | None:
+        """Return the run materialized for one scheduled slot when it exists."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    runs.*,
+                    (SELECT COUNT(*) FROM logs WHERE logs.run_id = runs.id) AS log_count,
+                    (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id) AS task_count,
+                    (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id AND task_runs.status = 'success') AS successful_tasks,
+                    (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id AND task_runs.status = 'failed') AS failed_tasks,
+                    (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id AND task_runs.status = 'skipped') AS skipped_tasks
+                FROM runs
+                WHERE pipeline_id = ? AND scheduled_for = ?
+                LIMIT 1
+                """,
+                (pipeline_id, _to_iso(scheduled_for)),
+            ).fetchone()
+        return self._row_to_run(row) if row else None
+
     def get_latest_task_states_for_pipeline(self, pipeline_id: str) -> dict[str, str]:
         """Return the latest known task status map for one pipeline."""
         latest_run = self.get_latest_run_for_pipeline(pipeline_id)
@@ -577,6 +662,43 @@ class RunStore:
             ).fetchone()
         return int(row["count"])
 
+    def delete_run(self, run_id: str) -> None:
+        """Delete one finished run and all related task runs and logs."""
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM logs WHERE run_id = ?", (run_id,))
+            connection.execute("DELETE FROM task_runs WHERE run_id = ?", (run_id,))
+            connection.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+            connection.commit()
+
+    def delete_pipeline_runs(self, pipeline_id: str) -> None:
+        """Delete every persisted run and override state for one pipeline."""
+        with self._lock, self._connect() as connection:
+            run_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM runs WHERE pipeline_id = ?",
+                    (pipeline_id,),
+                ).fetchall()
+            ]
+            if run_ids:
+                placeholders = ", ".join("?" for _ in run_ids)
+                connection.execute(
+                    f"DELETE FROM logs WHERE run_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM task_runs WHERE run_id IN ({placeholders})",
+                    run_ids,
+                )
+            connection.execute("DELETE FROM runs WHERE pipeline_id = ?", (pipeline_id,))
+            connection.execute("DELETE FROM pipeline_overrides WHERE pipeline_id = ?", (pipeline_id,))
+            connection.execute("DELETE FROM trigger_queue WHERE pipeline_id = ?", (pipeline_id,))
+            connection.execute(
+                "DELETE FROM sensor_state WHERE sensor_key LIKE ?",
+                (f"{pipeline_id}:%",),
+            )
+            connection.commit()
+
     def has_run_for_slot(self, pipeline_id: str, scheduled_for: datetime) -> bool:
         """Return whether a scheduled slot has already been materialized."""
         with self._connect() as connection:
@@ -590,6 +712,186 @@ class RunStore:
                 (pipeline_id, _to_iso(scheduled_for)),
             ).fetchone()
         return row is not None
+
+    def get_latest_materialized_slot(self, pipeline_id: str) -> datetime | None:
+        """Return the newest scheduled slot present in either runs or the queue."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(slot_value) AS latest_slot
+                FROM (
+                    SELECT scheduled_for AS slot_value
+                    FROM runs
+                    WHERE pipeline_id = ? AND scheduled_for IS NOT NULL
+                    UNION ALL
+                    SELECT scheduled_for AS slot_value
+                    FROM trigger_queue
+                    WHERE pipeline_id = ? AND scheduled_for IS NOT NULL
+                )
+                """,
+                (pipeline_id, pipeline_id),
+            ).fetchone()
+        return _from_iso(row["latest_slot"]) if row and row["latest_slot"] else None
+
+    def enqueue_trigger(
+        self,
+        pipeline_id: str,
+        trigger: str,
+        *,
+        available_at: datetime,
+        scheduled_for: datetime | None = None,
+        source_key: str | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> bool:
+        """Persist one queued trigger event for later dispatch."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO trigger_queue (
+                    pipeline_id, trigger, status, available_at, created_at,
+                    scheduled_for, source_key, dedupe_key, payload_json
+                ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pipeline_id,
+                    trigger,
+                    _to_iso(available_at),
+                    _to_iso(datetime.now(timezone.utc)),
+                    _to_iso(scheduled_for),
+                    source_key,
+                    dedupe_key,
+                    json.dumps(payload or {}, sort_keys=True),
+                ),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def list_due_queue(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 200,
+    ) -> list[TriggerQueueRecord]:
+        """Return queued trigger events that are ready to be dispatched."""
+        current = _to_iso(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM trigger_queue
+                WHERE status = 'queued' AND available_at <= ?
+                ORDER BY available_at ASC, id ASC
+                LIMIT ?
+                """,
+                (current, limit),
+            ).fetchall()
+        return [self._row_to_queue_record(row) for row in rows]
+
+    def mark_queue_dispatched(self, queue_id: int, run_id: str) -> None:
+        """Mark one trigger event as successfully dispatched to a run."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE trigger_queue
+                SET status = 'dispatched',
+                    dispatched_at = ?,
+                    dispatched_run_id = ?,
+                    error = NULL
+                WHERE id = ?
+                """,
+                (_to_iso(datetime.now(timezone.utc)), run_id, queue_id),
+            )
+            connection.commit()
+
+    def claim_queue_item(self, queue_id: int) -> bool:
+        """Move one queued trigger event into a short-lived dispatching state."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE trigger_queue
+                SET status = 'dispatching',
+                    dispatched_at = ?,
+                    error = NULL
+                WHERE id = ? AND status = 'queued'
+                """,
+                (_to_iso(datetime.now(timezone.utc)), queue_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def mark_queue_failed(self, queue_id: int, error: str) -> None:
+        """Mark one trigger event as failed after an unrecoverable dispatch error."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE trigger_queue
+                SET status = 'failed',
+                    dispatched_at = ?,
+                    error = ?
+                WHERE id = ?
+                """,
+                (_to_iso(datetime.now(timezone.utc)), error, queue_id),
+            )
+            connection.commit()
+
+    def requeue_stale_dispatches(self, max_age_seconds: int = 300) -> int:
+        """Return abandoned dispatching queue items back to queued state."""
+        cutoff = _to_iso(datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds))
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE trigger_queue
+                SET status = 'queued',
+                    dispatched_at = NULL,
+                    error = NULL
+                WHERE status = 'dispatching'
+                  AND dispatched_run_id IS NULL
+                  AND COALESCE(dispatched_at, created_at) <= ?
+                """,
+                (cutoff,),
+            )
+            connection.commit()
+        return int(cursor.rowcount or 0)
+
+    def count_queue(self, status: str = "queued") -> int:
+        """Return the number of queued trigger items in one status bucket."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM trigger_queue WHERE status = ?",
+                (status,),
+            ).fetchone()
+        return int(row["count"] or 0)
+
+    def get_sensor_state(self, sensor_key: str) -> dict[str, object] | None:
+        """Load one persisted sensor cursor or snapshot state."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state_json FROM sensor_state WHERE sensor_key = ?",
+                (sensor_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["state_json"])
+        return value if isinstance(value, dict) else None
+
+    def set_sensor_state(self, sensor_key: str, state: dict[str, object]) -> None:
+        """Persist one sensor cursor or snapshot state."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO sensor_state (sensor_key, state_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(sensor_key)
+                DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at
+                """,
+                (
+                    sensor_key,
+                    json.dumps(state, sort_keys=True),
+                    _to_iso(datetime.now(timezone.utc)),
+                ),
+            )
+            connection.commit()
 
     def get_stats(
         self,
@@ -714,4 +1016,25 @@ class RunStore:
             error=row["error"],
             depends_on=depends_on,
             log_count=int(row["log_count"] or 0),
+        )
+
+    def _row_to_queue_record(self, row: sqlite3.Row) -> TriggerQueueRecord:
+        """Convert one trigger_queue row into a TriggerQueueRecord."""
+        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return TriggerQueueRecord(
+            queue_id=int(row["id"]),
+            pipeline_id=row["pipeline_id"],
+            trigger=row["trigger"],
+            status=row["status"],
+            available_at=_from_iso(row["available_at"]) or datetime.now(timezone.utc),
+            created_at=_from_iso(row["created_at"]) or datetime.now(timezone.utc),
+            scheduled_for=_from_iso(row["scheduled_for"]),
+            source_key=row["source_key"],
+            dedupe_key=row["dedupe_key"],
+            payload=payload,
+            dispatched_at=_from_iso(row["dispatched_at"]),
+            dispatched_run_id=row["dispatched_run_id"],
+            error=row["error"],
         )

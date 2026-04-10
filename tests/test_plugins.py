@@ -105,7 +105,7 @@ def test_ssh_operator_executes_configured_binary(tmp_path: Path) -> None:
     assert any("fake ssh" in line.message.lower() for line in logs)
 
 
-def test_python_call_operator_runs_module_function(tmp_path: Path) -> None:
+def test_python_operator_runs_module_function(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "report_ops.py").write_text(
@@ -126,13 +126,13 @@ def test_python_call_operator_runs_module_function(tmp_path: Path) -> None:
         "\n".join(
             [
                 'version: "1"',
-                "title: Python Call Operator Test",
+                "title: Python Operator Test",
                 "workspace: workspace",
                 "pipelines:",
                 "  report_flow:",
                 "    tasks:",
                 "      build_report:",
-                "        type: python_call",
+                "        type: python",
                 "        path: report_ops.py",
                 "        function: build_report",
                 "        kwargs:",
@@ -150,3 +150,38 @@ def test_python_call_operator_runs_module_function(tmp_path: Path) -> None:
     assert stored_run.status == "success"
     assert any("building nightly with batch 24" in line.message for line in logs)
     assert any("Return value" in line.message for line in logs)
+
+
+def test_cli_operator_executes_batch_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    batch_file = workspace / "job.cmd"
+    batch_file.write_text(
+        "@echo off\r\necho batch-path-ok\r\nexit /b 0\r\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: CLI Path Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  job_flow:",
+                "    tasks:",
+                "      batch_task:",
+                "        type: cli",
+                "        path: job.cmd",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("job_flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+    assert any("batch-path-ok" in line.message for line in logs)

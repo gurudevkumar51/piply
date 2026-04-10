@@ -62,10 +62,15 @@ class PiplySettings:
     default_max_parallel_tasks: int
     stale_run_timeout_seconds: int
     heartbeat_interval_seconds: int
+    scheduler_poll_interval_seconds: int
+    queue_dispatch_batch_size: int
+    queue_dispatch_stale_seconds: int
+    upcoming_run_preview_count: int
     auth_enabled: bool
     auth_username: str | None
     auth_password: str | None
     api_token: str | None
+    env_values: dict[str, str]
 
 
 def _candidate_env_files(config_path: Path | None) -> list[Path]:
@@ -111,6 +116,22 @@ def load_settings(
         2,
         _parse_int(merged_env.get("PIPLY_HEARTBEAT_INTERVAL_SECONDS"), 10),
     )
+    scheduler_poll_interval_seconds = max(
+        2,
+        _parse_int(merged_env.get("PIPLY_SCHEDULER_POLL_INTERVAL_SECONDS"), 10),
+    )
+    queue_dispatch_batch_size = max(
+        1,
+        _parse_int(merged_env.get("PIPLY_QUEUE_DISPATCH_BATCH_SIZE"), 100),
+    )
+    queue_dispatch_stale_seconds = max(
+        30,
+        _parse_int(merged_env.get("PIPLY_QUEUE_DISPATCH_STALE_SECONDS"), 300),
+    )
+    upcoming_run_preview_count = max(
+        1,
+        _parse_int(merged_env.get("PIPLY_UPCOMING_RUN_PREVIEW_COUNT"), 8),
+    )
 
     auth_username = merged_env.get("PIPLY_AUTH_USERNAME")
     auth_password = merged_env.get("PIPLY_AUTH_PASSWORD")
@@ -125,8 +146,13 @@ def load_settings(
         default_max_parallel_tasks=default_max_parallel_tasks,
         stale_run_timeout_seconds=stale_run_timeout_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
+        scheduler_poll_interval_seconds=scheduler_poll_interval_seconds,
+        queue_dispatch_batch_size=queue_dispatch_batch_size,
+        queue_dispatch_stale_seconds=queue_dispatch_stale_seconds,
+        upcoming_run_preview_count=upcoming_run_preview_count,
         auth_enabled=auth_enabled,
         auth_username=auth_username,
         auth_password=auth_password,
         api_token=api_token,
+        env_values=merged_env,
     )

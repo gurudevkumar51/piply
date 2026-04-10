@@ -19,6 +19,8 @@
             <span class="meta-pill">config {{ project.config_path }}</span>
             <span class="meta-pill">workspace {{ project.workspace }}</span>
             <span class="meta-pill">heartbeat {{ scheduler.heartbeat or 'waiting for first tick' }}</span>
+            <span class="meta-pill">queue {{ scheduler.queue_depth or '0' }}</span>
+            <span class="meta-pill">sensors {{ scheduler.sensor_count or '0' }}</span>
         </div>
     </section>
 
@@ -129,6 +131,10 @@
                 <div class="detail-card">
                     <div class="detail-label">Persistence</div>
                     <div class="detail-value mono path-value">{{ scheduler.database_path }}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Queue depth</div>
+                    <div class="detail-value">{{ scheduler.queue_depth or "0" }}</div>
                 </div>
             </div>
         </article>

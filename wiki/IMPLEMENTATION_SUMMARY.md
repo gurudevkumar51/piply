@@ -2,101 +2,87 @@
 
 ## Current Direction
 
-Piply now centers on a lightweight local runtime instead of a Prefect-heavy architecture.
+Piply is now centered on a lightweight local orchestration runtime rather than an external orchestration dependency.
 
 The active implementation is built around:
 
 - YAML pipeline definitions
-- task DAGs inside each pipeline
+- multi-task DAG execution
 - downstream pipeline triggers
-- lightweight scheduling
-- SQLite-backed run tracking
-- operator-friendly web UI
-- small modular support layers for settings, auth, heartbeats, and DAG rendering
+- a durable SQLite-backed internal queue
+- task-level run and log tracking
+- server-rendered UI plus JSON API
+- modular runtime pieces that can grow over time
 
-## Implemented Features
+## Implemented Runtime Features
 
-### Runtime
+- multiple tasks per pipeline
+- dependency validation and cycle detection
+- DAG-inferred sequential or parallel execution
+- pipeline-level retry policy with `resume` or `startover`
+- manual targeted retry through `piply tasks retry`
+- pipeline-to-pipeline triggers on success
+- queue-backed schedule backfill for missed slots
+- run cancellation
+- run and pipeline deletion
+- stale run reconciliation with heartbeats
+- queue dispatch requeue for abandoned dispatches
 
-- multi-task pipelines with dependency validation
-- single-task backward compatibility for older `entrypoint` or `script` configs
-- downstream pipeline triggers with `triggers_on_success`
-- local execution engine with task-level tracking
-- DAG-inferred concurrency with per-pipeline and global worker caps
-- retry runs with `resume` and `startover`
-- run history and raw log persistence
-- scheduler loop with pause and resume support
-- stale run reconciliation using run heartbeats
+## Implemented Operator Features
 
-### Operators
+- `python` for script execution
+- `python` for callable execution through `path/module/call + function`
+- `cli` for shell commands
+- `cli` path execution for `.cmd`, `.bat`, `.ps1`, and direct executables
+- `api` with bearer token support
+- `webhook`
+- `email`
+- `ssh`
 
-- `python` operator for local scripts and module callables
-- `cli` operator for local shell commands
-- `api` operator with bearer token support
-- `webhook` operator for HTTP POST requests
-- `email` operator for SMTP notifications
-- `ssh` operator for remote command execution or connectivity probes
+## Implemented Sensor Features
 
-### UI
+- `file_sensor` for local paths
+- `file_sensor` for SFTP URIs polled over SSH
+- `sql_sensor` for local SQLite paths
+- `sql_sensor` for connection-string based polling
+- optional task targeting inside sensor-triggered pipelines
+- sensor cursor persistence in SQLite
 
-- light visual theme
-- dashboard with scheduler status and recent runs
-- pipeline detail page with richer DAG controls
-- pipeline detail page with relative same-day next-run labels
-- visible command previews for each task
-- run detail page with compact header and graph/log side-by-side layout
-- run detail page live duration updates and task-focused retry controls
-- timestamps formatted as `HH:MM:SS.SSS`
+## Config And Secret Handling
 
-### CLI
+- `.env` files are loaded without adding a third-party dependency
+- config strings can expand secrets and connection values from `.env`
+- runtime settings fall back to defaults when omitted
+- common settings now include scheduler and queue tuning controls
 
-Working commands today:
+## UI State
 
-- `piply init`
-- `piply validate`
-- `piply list`
-- `piply tasks list`
-- `piply run`
-- `piply runs`
-- `piply start`
-- `piply start -d`
-- `piply stop`
-- `piply ui`
+Current UI behavior includes:
 
-### Server Auth
+- light theme
+- dashboard status cards
+- pipeline DAG with flow, stage, and focus modes
+- task selection panel on pipeline detail
+- task-run action panel on run detail
+- live task duration labels on graph nodes
+- log filtering by selected task
+- upcoming runs preview
+- task-scoped execution from the pipeline page
 
-- Basic auth for UI and API
-- optional Bearer auth for API routes
-- `.env` support without adding a heavy dependency
+## Active Runtime Modules
 
-## Starter Project Behavior
-
-`piply init` now creates:
-
-- `piply.yaml`
-- `pipelines/extract.py`
-- `pipelines/report.py`
-
-The starter config includes:
-
-- one pipeline with three tasks
-- one downstream report pipeline
-- one pipeline trigger chain from extract to report
-- a `python_call` example in the downstream flow
-
-## Active Modules
-
-Core runtime:
+Core:
 
 - `piply/settings.py`
-- `piply/core/loader.py`
 - `piply/core/models.py`
-- `piply/core/scheduling.py`
-- `piply/core/scheduler.py`
+- `piply/core/loader.py`
 - `piply/core/service.py`
 - `piply/core/store.py`
+- `piply/core/scheduler.py`
+- `piply/core/scheduling.py`
 - `piply/core/retry.py`
 - `piply/core/graph.py`
+- `piply/core/sensors.py`
 
 Execution:
 
@@ -116,20 +102,53 @@ HTTP and UI:
 - `piply/api/schemas.py`
 - `piply/ui/static/app.js`
 - `piply/ui/static/dag.js`
+- `piply/ui/static/styles.css`
 - `piply/ui/templates/`
+
+## Cleanup Notes
+
+Recent cleanup focused on keeping the project lean:
+
+- removed unused `profiles.py`
+- removed duplicate imports
+- normalized Python callable execution under `type: python`
+- kept sensors and scheduling centered on SQLite-backed state instead of adding heavier queue infrastructure
+- continued using small focused modules instead of pushing more logic into giant files
 
 ## Verification Status
 
-The current verification target is:
+Current verification expectations:
 
-- tests passing
-- package compilation passing
-- CLI validation and run flow working
-- API/UI smoke routes working
-- legacy database compatibility preserved for manual runs
+- automated tests pass
+- package compilation passes
+- CLI validation passes
+- demo run flow works
+- API task-run route works
+- queue-backed scheduler and sensors stay covered by tests
+
+## Working Commands
+
+- `piply init`
+- `piply validate`
+- `piply list`
+- `piply tasks list`
+- `piply tasks run`
+- `piply tasks retry`
+- `piply run`
+- `piply runs`
+- `piply logs`
+- `piply pause`
+- `piply resume`
+- `piply start`
+- `piply start -d`
+- `piply stop`
+- `piply ui`
 
 ## Upcoming Commands And Todos
 
-- `piply logs`
-- `piply tasks run`
-- CLI pause and resume commands
+- `piply logs --follow`
+- richer queue metrics and worker introspection
+- more SQL sensor adapters
+- API polling and webhook-trigger sensors
+- reusable task templates
+- external secret backends

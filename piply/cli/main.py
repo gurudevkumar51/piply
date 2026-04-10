@@ -70,12 +70,17 @@ def init(
                 "  python: python",
                 "  env:",
                 "    PIPLY_ENV: development",
+                "",
                 "pipelines:",
                 "  extract_flow:",
                 '    title: Extract Flow',
                 '    description: Multi-task starter pipeline with a downstream trigger.',
                 "    schedule:",
                 "      every: 15m",
+                "    retry:",
+                "      attempts: 2",
+                "      mode: resume",
+                "      delay_seconds: 10",
                 "    max_parallel_tasks: 2",
                 "    triggers_on_success:",
                 "      - report_flow",
@@ -236,6 +241,39 @@ def run(
             raise typer.Exit(code=1)
 
 
+@tasks_app.command("retry")
+def retry_task(
+    run_id: str = typer.Argument(..., help="Failed run identifier."),
+    task_id: str = typer.Argument(..., help="Failed task identifier to retry from."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    mode: str = typer.Option("resume", "--mode", help="Retry mode: resume or startover."),
+    wait: bool = typer.Option(True, "--wait/--detach", help="Wait and stream logs in the terminal."),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"resume", "startover"}:
+        raise typer.BadParameter("--mode must be 'resume' or 'startover'.")
+    try:
+        run_record = service.retry_run(
+            run_id,
+            mode=normalized_mode,  # type: ignore[arg-type]
+            task_id=task_id,
+            wait=wait,
+            on_log=typer.echo if wait else None,
+        )
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Run ID: {run_record.run_id}")
+    if wait:
+        run_record, _, _ = service.get_run(run_record.run_id)
+        typer.echo(f"Finished with status: {run_record.status}")
+        if run_record.error:
+            typer.echo(run_record.error)
+            raise typer.Exit(code=1)
+
+
 @app.command()
 def runs(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
@@ -273,12 +311,12 @@ def run_task(
 ) -> None:
     service = PipelineService(config_path=_resolve_config(config))
     try:
-        run_record = service.trigger_pipeline(
+        run_record = service.trigger_task(
             pipeline_id,
-            trigger="manual",
+            task_id,
+            trigger="task",
             wait=wait,
             on_log=typer.echo if wait else None,
-            retry_task_id=task_id, # Re-using retry mechanic for selective run
         )
     except KeyError as exc:
         typer.echo(str(exc))

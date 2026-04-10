@@ -309,3 +309,192 @@ def test_same_day_schedule_uses_relative_next_run_label(tmp_path: Path) -> None:
     summary = service.list_pipelines()[0]
 
     assert summary.next_run_label.startswith("in ")
+
+
+def test_trigger_pipeline_accepts_command_override(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Override Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  cli_flow:",
+                "    tasks:",
+                "      command_task:",
+                "        type: cli",
+                "        command: python -c \"print('original')\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline(
+        "cli_flow",
+        wait=True,
+        command_overrides={"command_task": "python -c \"print('override')\""},
+    )
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+    assert any("override" in line.message for line in logs)
+
+
+def test_retry_policy_creates_automatic_resume_retry(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "extract.py").write_text("print('extract complete')", encoding="utf-8")
+    (workspace / "flaky.py").write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "",
+                "flag = Path('retry.ok')",
+                "if flag.exists():",
+                "    print('retry recovered')",
+                "else:",
+                "    flag.write_text('ok', encoding='utf-8')",
+                "    raise SystemExit(1)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Auto Retry Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  retry_flow:",
+                "    retry:",
+                "      attempts: 1",
+                "      mode: resume",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: extract.py",
+                "      flaky_step:",
+                "        type: python",
+                "        path: flaky.py",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    initial_run = service.trigger_pipeline("retry_flow", wait=True)
+
+    retry_runs = []
+    for _ in range(40):
+        retry_runs = [run for run in service.list_runs(pipeline_id="retry_flow") if run.retry_of == initial_run.run_id]
+        if retry_runs and retry_runs[0].status == "success":
+            break
+        time.sleep(0.2)
+
+    assert retry_runs
+    assert retry_runs[0].status == "success"
+    assert retry_runs[0].retry_mode == "resume"
+
+
+def test_cancel_and_delete_run(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "slow.py").write_text(
+        "\n".join(
+            [
+                "import sys",
+                "import time",
+                "print('started', flush=True)",
+                "time.sleep(10)",
+                "print('finished', flush=True)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Cancel Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  slow_flow:",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: slow.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("slow_flow", wait=False)
+    time.sleep(0.6)
+    service.cancel_run(run.run_id)
+
+    cancelled_run = None
+    for _ in range(40):
+        cancelled_run = service.store.get_run(run.run_id)
+        if cancelled_run and cancelled_run.status == "cancelled":
+            break
+        time.sleep(0.2)
+
+    assert cancelled_run is not None
+    assert cancelled_run.status == "cancelled"
+
+    service.delete_run(run.run_id)
+    assert service.store.get_run(run.run_id) is None
+
+
+def test_delete_pipeline_updates_config_and_store(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Delete Pipeline Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  source_flow:",
+                "    triggers_on_success:",
+                "      - target_flow",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+                "  target_flow:",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("target_flow", wait=True)
+    assert service.store.get_run(run.run_id) is not None
+
+    service.delete_pipeline("target_flow")
+
+    assert "target_flow" not in service.project.pipelines
+    assert service.store.get_run(run.run_id) is None
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "target_flow:" not in config_text

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from piply.api.schemas import PipelineDetailResponse, PipelineResponse, RunResponse
+from piply.api.schemas import (
+    PipelineDetailResponse,
+    PipelineResponse,
+    RunResponse,
+    TriggerRunRequest,
+)
 
 router = APIRouter(prefix="/api/pipelines", tags=["pipelines"])
 
@@ -33,13 +38,48 @@ def get_pipeline(request: Request, pipeline_id: str) -> PipelineDetailResponse:
 
 
 @router.post("/{pipeline_id}/run", response_model=RunResponse)
-def trigger_pipeline(request: Request, pipeline_id: str) -> RunResponse:
+def trigger_pipeline(
+    request: Request,
+    pipeline_id: str,
+    payload: TriggerRunRequest | None = None,
+) -> RunResponse:
     """Trigger one manual pipeline run."""
     service = _get_service(request)
     try:
-        run = service.trigger_pipeline(pipeline_id, trigger="manual", wait=False)
+        run = service.trigger_pipeline(
+            pipeline_id,
+            trigger="manual",
+            wait=False,
+            command_overrides=(payload.command_overrides if payload is not None else None),
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RunResponse.from_record(run)
+
+
+@router.post("/{pipeline_id}/tasks/{task_id}/run", response_model=RunResponse)
+def trigger_pipeline_task(
+    request: Request,
+    pipeline_id: str,
+    task_id: str,
+    payload: TriggerRunRequest | None = None,
+) -> RunResponse:
+    """Trigger one task and its upstream dependencies as a focused manual run."""
+    service = _get_service(request)
+    try:
+        run = service.trigger_task(
+            pipeline_id,
+            task_id,
+            trigger="task",
+            wait=False,
+            command_overrides=(payload.command_overrides if payload is not None else None),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)
 
 
@@ -63,3 +103,16 @@ def resume_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return PipelineResponse.from_summary(summary)
+
+
+@router.delete("/{pipeline_id}")
+def delete_pipeline(request: Request, pipeline_id: str) -> dict[str, str]:
+    """Delete one pipeline definition and its stored history."""
+    service = _get_service(request)
+    try:
+        service.delete_pipeline(pipeline_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "deleted", "pipeline_id": pipeline_id}

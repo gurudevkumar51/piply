@@ -5,16 +5,21 @@ from __future__ import annotations
 import sqlite3
 import threading
 from collections.abc import Callable
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import yaml
 
 from piply.engine.base import BaseEngine
 from piply.engine.local_engine import LocalEngine
 from piply.settings import PiplySettings, load_settings
 
+from .graph import upstream_closure
 from .loader import discover_config, load_project
-from .models import PipelineDefinition, PipelineSummary, ProjectDefinition, RetryMode, RunRecord
+from .models import PipelineDefinition, PipelineSummary, ProjectDefinition, RetryMode, RetryPolicy, RunRecord
 from .retry import build_retry_plan
+from .sensors import poll_file_sensor, poll_sql_sensor
 from .store import RunStore
 
 
@@ -142,6 +147,7 @@ class PipelineService:
                     latest_task_states=latest_task_states,
                     last_run=last_run,
                     active_runs=self.store.count_running_runs(pipeline.pipeline_id),
+                    retry_summary=pipeline.retry_policy.summary,
                 )
             )
         return sorted(summaries, key=lambda item: item.title.lower())
@@ -175,6 +181,250 @@ class PipelineService:
             "recent_runs": self.store.list_runs(pipeline_id=pipeline_id, limit=12),
         }
 
+    def list_upcoming_runs(
+        self,
+        pipeline_id: str,
+        *,
+        count: int | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, object]]:
+        """Preview the next scheduled slots for one pipeline."""
+        pipeline = self.get_pipeline(pipeline_id)
+        effective_count = count or self.settings.upcoming_run_preview_count
+        if pipeline.schedule is None or effective_count < 1:
+            return []
+
+        current = now or datetime.now(timezone.utc)
+        upcoming: list[dict[str, object]] = []
+        cursor = current
+        for _ in range(effective_count):
+            next_run_at = pipeline.schedule.next_after(cursor)
+            if next_run_at is None:
+                break
+            upcoming.append(
+                {
+                    "scheduled_for": next_run_at,
+                    "label": self._format_next_run_label(next_run_at, now=current),
+                }
+            )
+            cursor = next_run_at + timedelta(seconds=1)
+        return upcoming
+
+    def _iter_due_schedule_slots(
+        self,
+        pipeline: PipelineDefinition,
+        *,
+        now: datetime,
+        limit: int = 256,
+    ) -> list[datetime]:
+        """Return every due schedule slot that has not yet been materialized."""
+        if pipeline.schedule is None:
+            return []
+
+        current_slot = pipeline.schedule.current_slot(now)
+        if current_slot is None:
+            return []
+
+        latest_slot = self.store.get_latest_materialized_slot(pipeline.pipeline_id)
+        if latest_slot is None:
+            return [current_slot]
+
+        slots: list[datetime] = []
+        cursor = latest_slot
+        for _ in range(limit):
+            next_slot = pipeline.schedule.next_after(cursor)
+            if next_slot is None or next_slot > now:
+                break
+            slots.append(next_slot)
+            cursor = next_slot
+        return slots
+
+    def _sensor_state_key(self, pipeline_id: str, sensor_id: str) -> str:
+        """Build the stable storage key for one sensor state snapshot."""
+        return f"{pipeline_id}:{sensor_id}"
+
+    def enqueue_pipeline_trigger(
+        self,
+        pipeline_id: str,
+        *,
+        trigger: str,
+        available_at: datetime | None = None,
+        scheduled_for: datetime | None = None,
+        payload: dict[str, object] | None = None,
+        source_key: str | None = None,
+        dedupe_key: str | None = None,
+    ) -> bool:
+        """Persist one trigger event in the lightweight internal queue."""
+        self.get_pipeline(pipeline_id)
+        return self.store.enqueue_trigger(
+            pipeline_id,
+            trigger,
+            available_at=available_at or datetime.now(timezone.utc),
+            scheduled_for=scheduled_for,
+            source_key=source_key,
+            dedupe_key=dedupe_key,
+            payload=payload,
+        )
+
+    def enqueue_due_schedules(self, *, now: datetime | None = None) -> int:
+        """Backfill and enqueue every due scheduled slot that is not yet materialized."""
+        current = now or datetime.now(timezone.utc)
+        paused_ids = self.store.list_paused_pipeline_ids()
+        enqueued = 0
+        for pipeline in self.project.pipelines.values():
+            if not pipeline.is_schedulable() or pipeline.pipeline_id in paused_ids:
+                continue
+            for slot in self._iter_due_schedule_slots(pipeline, now=current):
+                slot_iso = slot.isoformat()
+                if self.enqueue_pipeline_trigger(
+                    pipeline.pipeline_id,
+                    trigger="schedule",
+                    available_at=slot,
+                    scheduled_for=slot,
+                    payload={"scheduled_for": slot_iso},
+                    source_key=slot_iso,
+                    dedupe_key=f"schedule:{pipeline.pipeline_id}:{slot_iso}",
+                ):
+                    enqueued += 1
+        return enqueued
+
+    def poll_sensors(self, *, now: datetime | None = None) -> int:
+        """Poll configured sensors and enqueue pipeline triggers for new events."""
+        current = now or datetime.now(timezone.utc)
+        paused_ids = self.store.list_paused_pipeline_ids()
+        enqueued = 0
+        for pipeline in self.project.pipelines.values():
+            if not pipeline.enabled or pipeline.pipeline_id in paused_ids:
+                continue
+            for sensor in pipeline.sensors.values():
+                if not sensor.enabled:
+                    continue
+                sensor_key = self._sensor_state_key(pipeline.pipeline_id, sensor.sensor_id)
+                state = self.store.get_sensor_state(sensor_key)
+                if sensor.sensor_type == "file_sensor":
+                    next_state, event = poll_file_sensor(sensor, state)
+                else:
+                    next_state, event = poll_sql_sensor(sensor, state)
+                self.store.set_sensor_state(sensor_key, next_state)
+                if event is None:
+                    continue
+
+                payload = dict(event.payload)
+                payload["sensor_summary"] = sensor.summary
+                if sensor.task_id is not None:
+                    payload["task_id"] = sensor.task_id
+
+                if self.enqueue_pipeline_trigger(
+                    pipeline.pipeline_id,
+                    trigger="sensor",
+                    available_at=current,
+                    payload=payload,
+                    source_key=f"{sensor.sensor_id}:{event.source_key}",
+                    dedupe_key=f"sensor:{pipeline.pipeline_id}:{sensor.sensor_id}:{event.source_key}",
+                ):
+                    enqueued += 1
+        return enqueued
+
+    def drain_trigger_queue(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 100,
+    ) -> list[str]:
+        """Dispatch due queue items while keeping per-pipeline order intact."""
+        self.reconcile_runtime_health()
+        effective_limit = max(1, min(limit, self.settings.queue_dispatch_batch_size))
+        self.store.requeue_stale_dispatches(self.settings.queue_dispatch_stale_seconds)
+        current = now or datetime.now(timezone.utc)
+        dispatched_run_ids: list[str] = []
+        blocked_pipelines: set[str] = set()
+
+        for item in self.store.list_due_queue(now=current, limit=effective_limit):
+            if item.pipeline_id in blocked_pipelines:
+                continue
+            try:
+                pipeline = self.get_pipeline(item.pipeline_id)
+            except KeyError as exc:
+                self.store.mark_queue_failed(item.queue_id, str(exc))
+                continue
+
+            if not pipeline.enabled or self.store.is_pipeline_paused(item.pipeline_id):
+                blocked_pipelines.add(item.pipeline_id)
+                continue
+            if self.store.count_running_runs(item.pipeline_id) > 0:
+                blocked_pipelines.add(item.pipeline_id)
+                continue
+
+            if not self.store.claim_queue_item(item.queue_id):
+                blocked_pipelines.add(item.pipeline_id)
+                continue
+
+            payload = item.payload
+            try:
+                if item.trigger == "retry":
+                    retry_of = payload.get("retry_of")
+                    if not isinstance(retry_of, str) or not retry_of:
+                        raise ValueError("Retry queue item is missing retry_of.")
+                    mode = str(payload.get("mode") or "resume")
+                    task_id = None if payload.get("task_id") is None else str(payload.get("task_id"))
+                    run = self.retry_run(
+                        retry_of,
+                        mode=mode,  # type: ignore[arg-type]
+                        task_id=task_id,
+                        wait=False,
+                    )
+                elif item.trigger == "sensor" and isinstance(payload.get("task_id"), str):
+                    run = self.trigger_task(
+                        item.pipeline_id,
+                        str(payload["task_id"]),
+                        trigger="sensor",
+                        wait=False,
+                    )
+                else:
+                    run = self.trigger_pipeline(
+                        item.pipeline_id,
+                        trigger=item.trigger,
+                        scheduled_for=item.scheduled_for,
+                        wait=False,
+                    )
+                self.store.mark_queue_dispatched(item.queue_id, run.run_id)
+                dispatched_run_ids.append(run.run_id)
+
+                if item.trigger == "schedule" and item.scheduled_for is not None:
+                    self.store.append_log(
+                        run.run_id,
+                        f"Scheduled slot {item.scheduled_for.isoformat()} dispatched from the queue.",
+                    )
+                if item.trigger == "sensor":
+                    sensor_id = payload.get("sensor_id") or "sensor"
+                    self.store.append_log(
+                        run.run_id,
+                        f"Triggered by sensor '{sensor_id}'.",
+                    )
+                    if payload.get("sensor_type") == "file_sensor" and payload.get("new_files"):
+                        self.store.append_log(
+                            run.run_id,
+                            f"Detected new files: {', '.join(str(item) for item in payload['new_files'])}",
+                        )
+                    if payload.get("sensor_type") == "sql_sensor":
+                        self.store.append_log(
+                            run.run_id,
+                            (
+                                f"Detected new rows in {payload.get('table')} "
+                                f"from cursor {payload.get('cursor_from')} to {payload.get('cursor_to')}."
+                            ),
+                        )
+                if item.trigger == "pipeline" and isinstance(payload.get("source_run_id"), str):
+                    self.store.append_log(
+                        run.run_id,
+                        f"Triggered from upstream run {payload['source_run_id']}.",
+                    )
+            except Exception as exc:  # pragma: no cover - defensive path
+                self.store.mark_queue_failed(item.queue_id, str(exc))
+            blocked_pipelines.add(item.pipeline_id)
+
+        return dispatched_run_ids
+
     def list_runs(
         self,
         *,
@@ -196,6 +446,58 @@ class PipelineService:
         logs = self.store.list_logs(run_id, limit=500)
         return run, task_runs, logs
 
+    def get_run_detail(self, run_id: str) -> dict[str, object]:
+        """Return one run plus task runs, logs, and upcoming schedule slots."""
+        run, task_runs, logs = self.get_run(run_id)
+        return {
+            "run": run,
+            "task_runs": task_runs,
+            "logs": logs,
+            "upcoming_runs": self.list_upcoming_runs(run.pipeline_id, count=8),
+        }
+
+    def _clone_pipeline_with_command_overrides(
+        self,
+        pipeline: PipelineDefinition,
+        command_overrides: dict[str, str] | None,
+    ) -> PipelineDefinition:
+        """Apply manual CLI command overrides for one triggered run."""
+        if not command_overrides:
+            return pipeline
+
+        updated_tasks: dict[str, object] = {}
+        for task_id, task in pipeline.tasks.items():
+            override = command_overrides.get(task_id)
+            if override is None:
+                updated_tasks[task_id] = task
+                continue
+            if task.task_type != "cli":
+                raise ValueError(f"Task '{task_id}' does not support command overrides.")
+            stripped = override.strip()
+            if not stripped:
+                raise ValueError(f"Task '{task_id}' command override cannot be empty.")
+            updated_tasks[task_id] = replace(task, command=stripped, path=None)
+
+        return replace(pipeline, tasks=updated_tasks)
+
+    def _clone_pipeline_for_task(self, pipeline: PipelineDefinition, task_id: str) -> PipelineDefinition:
+        """Build a task-focused pipeline that includes the selected task and its dependencies."""
+        if task_id not in pipeline.tasks:
+            raise KeyError(f"Unknown task '{task_id}' in pipeline '{pipeline.pipeline_id}'")
+        required_ids = upstream_closure(pipeline, {task_id})
+        scoped_tasks = {
+            current_task_id: current_task
+            for current_task_id, current_task in pipeline.tasks.items()
+            if current_task_id in required_ids
+        }
+        return replace(
+            pipeline,
+            tasks=scoped_tasks,
+            schedule=None,
+            triggers_on_success=(),
+            retry_policy=RetryPolicy(),
+        )
+
     def trigger_pipeline(
         self,
         pipeline_id: str,
@@ -208,14 +510,18 @@ class PipelineService:
         retry_mode: RetryMode | None = None,
         retry_task_id: str | None = None,
         initial_task_statuses: dict[str, str] | None = None,
+        command_overrides: dict[str, str] | None = None,
     ) -> RunRecord:
         """Create and dispatch one new run for a pipeline."""
         self.reconcile_runtime_health()
-        pipeline = self.get_pipeline(pipeline_id)
+        pipeline = self._clone_pipeline_with_command_overrides(
+            self.get_pipeline(pipeline_id),
+            command_overrides,
+        )
         if scheduled_for is not None and self.store.has_run_for_slot(pipeline_id, scheduled_for):
-            latest = self.store.list_runs(pipeline_id=pipeline_id, limit=1)
-            if latest:
-                return latest[0]
+            existing = self.store.get_run_for_slot(pipeline_id, scheduled_for)
+            if existing is not None:
+                return existing
 
         try:
             run = self.store.create_run(
@@ -233,15 +539,48 @@ class PipelineService:
                 wait=wait,
                 on_log=on_log,
                 on_success=self._handle_pipeline_success,
+                on_failure=self._handle_pipeline_failure,
                 initial_task_statuses=initial_task_statuses or {},
                 retry_source_run_id=retry_of,
             )
         except sqlite3.IntegrityError:
             if scheduled_for is not None:
-                latest = self.store.list_runs(pipeline_id=pipeline_id, limit=1)
-                if latest:
-                    return latest[0]
+                existing = self.store.get_run_for_slot(pipeline_id, scheduled_for)
+                if existing is not None:
+                    return existing
             raise
+        return self.store.get_run(run.run_id) or run
+
+    def trigger_task(
+        self,
+        pipeline_id: str,
+        task_id: str,
+        *,
+        trigger: str = "task",
+        wait: bool = False,
+        on_log: Callable[[str], None] | None = None,
+        command_overrides: dict[str, str] | None = None,
+    ) -> RunRecord:
+        """Create and dispatch one run scoped to a selected task and its dependencies."""
+        self.reconcile_runtime_health()
+        pipeline = self._clone_pipeline_for_task(self.get_pipeline(pipeline_id), task_id)
+        pipeline = self._clone_pipeline_with_command_overrides(pipeline, command_overrides)
+        run = self.store.create_run(
+            pipeline,
+            trigger=trigger,
+            retry_task_id=task_id,
+        )
+        self.engine.dispatch(
+            pipeline,
+            run,
+            self.store,
+            wait=wait,
+            on_log=on_log,
+            on_success=self._handle_pipeline_success,
+            on_failure=self._handle_pipeline_failure,
+            initial_task_statuses={},
+            retry_source_run_id=None,
+        )
         return self.store.get_run(run.run_id) or run
 
     def retry_run(
@@ -270,7 +609,7 @@ class PipelineService:
         reused_task_statuses = {task_id: "success" for task_id in retry_plan.reuse_task_ids}
         retry_run = self.store.create_run(
             pipeline,
-            trigger="manual",
+            trigger="retry",
             retry_of=previous_run.run_id,
             retry_mode=mode,
             retry_task_id=task_id,
@@ -301,6 +640,7 @@ class PipelineService:
             wait=wait,
             on_log=on_log,
             on_success=self._handle_pipeline_success,
+            on_failure=self._handle_pipeline_failure,
             initial_task_statuses=reused_task_statuses,
             retry_source_run_id=previous_run.run_id,
         )
@@ -309,27 +649,150 @@ class PipelineService:
     def _handle_pipeline_success(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Trigger downstream pipelines after a successful run completes."""
         if not pipeline.triggers_on_success:
+            self.drain_trigger_queue(limit=20)
             return
         for target in pipeline.triggers_on_success:
             self.store.append_log(
                 run.run_id,
                 f"Triggering downstream pipeline '{target}' after successful completion.",
             )
-            self.trigger_pipeline(target, trigger="pipeline", wait=False)
+            self.enqueue_pipeline_trigger(
+                target,
+                trigger="pipeline",
+                payload={
+                    "source_run_id": run.run_id,
+                    "source_pipeline_id": pipeline.pipeline_id,
+                },
+                source_key=run.run_id,
+                dedupe_key=f"pipeline:{run.run_id}:{target}",
+            )
+        self.drain_trigger_queue(limit=20)
+
+    def _retry_depth(self, run: RunRecord) -> int:
+        """Return how many retry generations exist behind the supplied run."""
+        depth = 0
+        current = run
+        while current.retry_of:
+            previous = self.store.get_run(current.retry_of)
+            if previous is None:
+                break
+            depth += 1
+            current = previous
+        return depth
+
+    def _handle_pipeline_failure(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Schedule an automatic retry when the pipeline retry policy allows it."""
+        retry_policy = pipeline.retry_policy
+        if not retry_policy.enabled or run.status != "failed":
+            self.drain_trigger_queue(limit=20)
+            return
+
+        retry_depth = self._retry_depth(run)
+        if retry_depth >= retry_policy.attempts:
+            self.store.append_log(
+                run.run_id,
+                "Retry policy exhausted. No more automatic retries will be created.",
+            )
+            self.drain_trigger_queue(limit=20)
+            return
+
+        self.store.append_log(
+            run.run_id,
+            (
+                f"Automatic retry {retry_depth + 1}/{retry_policy.attempts} queued "
+                f"using {retry_policy.mode} mode."
+            ),
+        )
+
+        self.enqueue_pipeline_trigger(
+            run.pipeline_id,
+            trigger="retry",
+            available_at=datetime.now(timezone.utc) + timedelta(seconds=retry_policy.delay_seconds),
+            payload={
+                "retry_of": run.run_id,
+                "mode": retry_policy.mode,
+            },
+            source_key=run.run_id,
+            dedupe_key=f"retry:{run.run_id}:{retry_depth + 1}",
+        )
+
+        if retry_policy.delay_seconds > 0:
+            timer = threading.Timer(retry_policy.delay_seconds, lambda: self.drain_trigger_queue(limit=20))
+            timer.daemon = True
+            timer.start()
+            return
+        self.drain_trigger_queue(limit=20)
 
     def set_pipeline_paused(self, pipeline_id: str, paused: bool) -> PipelineSummary:
         """Pause or resume a pipeline schedule."""
         self.get_pipeline(pipeline_id)
         self.store.set_pipeline_paused(pipeline_id, paused)
+        if not paused:
+            self.drain_trigger_queue(limit=20)
         return self.get_pipeline_summary(pipeline_id)
 
-    def scheduler_snapshot(self) -> dict[str, str | bool | None]:
+    def cancel_run(self, run_id: str) -> RunRecord:
+        """Request cancellation for one queued or running run."""
+        self.reconcile_runtime_health()
+        run = self.store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run '{run_id}'")
+        if run.status not in {"queued", "running"}:
+            raise ValueError("Only queued or running runs can be cancelled.")
+
+        self.store.append_log(run_id, "Cancellation requested by user.", stream="stderr")
+        cancelled = self.engine.cancel(run_id)
+        if run.status == "queued" or not cancelled:
+            self.store.cancel_run(run_id)
+        return self.store.get_run(run_id) or run
+
+    def delete_run(self, run_id: str) -> None:
+        """Delete one finished run from the runtime store."""
+        self.reconcile_runtime_health()
+        run = self.store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run '{run_id}'")
+        if run.status in {"queued", "running"}:
+            raise ValueError("Cancel the run before deleting it.")
+        self.store.delete_run(run_id)
+
+    def delete_pipeline(self, pipeline_id: str) -> None:
+        """Delete one pipeline from the config and remove its stored history."""
+        if self.store.count_running_runs(pipeline_id) > 0:
+            raise ValueError("Cancel active runs before deleting this pipeline.")
+
+        raw_data = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
+        root_key = "pipelines" if "pipelines" in raw_data else "jobs"
+        pipelines = raw_data.get(root_key)
+        if not isinstance(pipelines, dict) or pipeline_id not in pipelines:
+            raise KeyError(f"Unknown pipeline '{pipeline_id}'")
+
+        pipelines.pop(pipeline_id)
+        for candidate in pipelines.values():
+            if not isinstance(candidate, dict):
+                continue
+            triggers = candidate.get("triggers_on_success")
+            if isinstance(triggers, list):
+                candidate["triggers_on_success"] = [
+                    item for item in triggers if str(item) != pipeline_id
+                ]
+
+        self.config_path.write_text(
+            yaml.safe_dump(raw_data, sort_keys=False, allow_unicode=False),
+            encoding="utf-8",
+        )
+        self.store.delete_pipeline_runs(pipeline_id)
+        self.reload_project(force=True)
+
+    def scheduler_snapshot(self) -> dict[str, str | bool | int | None]:
         """Return scheduler heartbeat and database metadata for the UI."""
         return {
             "running": self.store.get_meta("scheduler_running") == "true",
             "heartbeat": self.store.get_meta("scheduler_heartbeat"),
             "config_path": str(self.config_path),
             "database_path": str(self.database_path),
+            "queue_depth": self.store.count_queue(),
+            "sensor_count": sum(pipeline.sensor_count for pipeline in self.project.pipelines.values()),
         }
 
     def dashboard(self) -> dict[str, object]:
@@ -356,5 +819,9 @@ class PipelineService:
                 "auth_enabled": self.settings.auth_enabled,
                 "default_max_parallel_tasks": self.settings.default_max_parallel_tasks,
                 "stale_run_timeout_seconds": self.settings.stale_run_timeout_seconds,
+                "heartbeat_interval_seconds": self.settings.heartbeat_interval_seconds,
+                "scheduler_poll_interval_seconds": self.settings.scheduler_poll_interval_seconds,
+                "queue_dispatch_batch_size": self.settings.queue_dispatch_batch_size,
+                "queue_dispatch_stale_seconds": self.settings.queue_dispatch_stale_seconds,
             },
         }

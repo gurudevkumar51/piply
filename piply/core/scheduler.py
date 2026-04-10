@@ -12,9 +12,10 @@ from .service import PipelineService
 class PipelineScheduler:
     """PipelineScheduler polls schedules and launches due pipeline runs."""
 
-    def __init__(self, service: PipelineService, poll_interval: int = 10) -> None:
+    def __init__(self, service: PipelineService, poll_interval: int | None = None) -> None:
         self.service = service
-        self.poll_interval = max(2, poll_interval)
+        resolved_poll_interval = poll_interval or service.settings.scheduler_poll_interval_seconds
+        self.poll_interval = max(2, resolved_poll_interval)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -44,31 +45,18 @@ class PipelineScheduler:
             self.tick()
             self._stop_event.wait(self.poll_interval)
 
-    def tick(self) -> None:
+    def tick(self, now: datetime | None = None) -> None:
         """Evaluate due schedules and launch eligible pipeline runs."""
-        now = datetime.now(timezone.utc)
-        self.service.store.set_meta("scheduler_heartbeat", now.isoformat())
+        current = now or datetime.now(timezone.utc)
+        self.service.store.set_meta("scheduler_heartbeat", current.isoformat())
         self.service.reconcile_runtime_health()
         self.service.reload_project()
-
-        for summary in self.service.list_pipelines():
-            if not summary.enabled or summary.paused:
-                continue
-            pipeline = self.service.get_pipeline(summary.pipeline_id)
-            if pipeline.schedule is None:
-                continue
-            if self.service.store.count_running_runs(pipeline.pipeline_id) >= pipeline.max_concurrent_runs:
-                continue
-
-            slot = pipeline.schedule.current_slot(now)
-            if slot is None:
-                continue
-            if self.service.store.has_run_for_slot(pipeline.pipeline_id, slot):
-                continue
-
-            self.service.trigger_pipeline(
-                pipeline.pipeline_id,
-                trigger="schedule",
-                scheduled_for=slot,
-                wait=False,
+        self.service.enqueue_due_schedules(now=current)
+        self.service.poll_sensors(now=current)
+        for _ in range(self.service.settings.queue_dispatch_batch_size):
+            dispatched = self.service.drain_trigger_queue(
+                now=current,
+                limit=self.service.settings.queue_dispatch_batch_size,
             )
+            if not dispatched:
+                break
