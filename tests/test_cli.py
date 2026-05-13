@@ -19,18 +19,28 @@ def test_init_scaffolds_multitask_project(tmp_path: Path) -> None:
     assert (project_dir / "piply.yaml").exists()
     assert (project_dir / "pipelines" / "extract.py").exists()
     assert (project_dir / "pipelines" / "report.py").exists()
+    assert (project_dir / "sensor_inbox").exists()
 
     project = load_project(project_dir / "piply.yaml")
 
-    assert tuple(project.pipelines) == ("extract_flow", "report_flow")
-    assert project.pipelines["extract_flow"].task_count == 3
+    assert tuple(project.pipelines) == (
+        "extract_flow",
+        "report_flow",
+        "operator_examples",
+        "sensor_examples",
+    )
+    assert project.pipelines["extract_flow"].task_count == 4
     assert project.pipelines["extract_flow"].triggers_on_success == ("report_flow",)
     assert project.pipelines["extract_flow"].execution_mode == "parallel"
     assert project.pipelines["extract_flow"].retry_policy.attempts == 2
     assert project.pipelines["extract_flow"].retry_policy.mode == "resume"
+    assert project.pipelines["extract_flow"].tasks["transform"].depends_on == ("extract",)
     assert project.pipelines["report_flow"].task_count == 1
     assert project.pipelines["report_flow"].tasks["build_report"].task_type == "python"
     assert project.pipelines["report_flow"].tasks["build_report"].call is not None
+    assert project.pipelines["operator_examples"].enabled is False
+    assert project.pipelines["sensor_examples"].enabled is False
+    assert project.pipelines["sensor_examples"].sensor_count == 2
 
 
 def test_tasks_retry_cli_retries_from_selected_failed_task(tmp_path: Path) -> None:

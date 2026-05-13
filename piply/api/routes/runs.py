@@ -9,6 +9,8 @@ from piply.api.schemas import (
     RetryRequest,
     RunDetailResponse,
     RunResponse,
+    TaskDetailResponse,
+    TaskOutputResponse,
     TaskRunResponse,
     UpcomingRunResponse,
 )
@@ -26,11 +28,12 @@ def list_runs(
     request: Request,
     pipeline_id: str | None = None,
     status: str | None = None,
+    tenant: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[RunResponse]:
     """List runs with optional filters."""
     service = _get_service(request)
-    runs = service.list_runs(pipeline_id=pipeline_id, status=status, limit=limit)
+    runs = service.list_runs(pipeline_id=pipeline_id, status=status, tenant_id=tenant, limit=limit)
     return [RunResponse.from_record(item) for item in runs]
 
 
@@ -95,6 +98,47 @@ def get_run_logs(
         }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{run_id}/tasks/{task_id}", response_model=TaskDetailResponse)
+def get_task_detail(request: Request, run_id: str, task_id: str) -> TaskDetailResponse:
+    """Return one task run with logs and output metadata."""
+    service = _get_service(request)
+    try:
+        payload = service.get_task_detail(run_id, task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    output = payload["output"]
+    return TaskDetailResponse(
+        run=RunResponse.from_record(payload["run"]),
+        task_run=TaskRunResponse.from_record(payload["task_run"]),
+        logs=[LogResponse.from_record(item) for item in payload["logs"]],
+        output=TaskOutputResponse.from_record(output) if output is not None else None,
+    )
+
+
+@router.get("/{run_id}/tasks/{task_id}/output", response_model=TaskOutputResponse)
+def get_task_output(request: Request, run_id: str, task_id: str) -> TaskOutputResponse:
+    """Return captured task output metadata and JSON value when available."""
+    service = _get_service(request)
+    try:
+        output = service.get_task_output(run_id, task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return TaskOutputResponse.from_record(output)
+
+
+@router.post("/{run_id}/tasks/{task_id}/retry", response_model=RunResponse)
+def retry_task_from_run(request: Request, run_id: str, task_id: str) -> RunResponse:
+    """Resume a failed run from a selected task."""
+    service = _get_service(request)
+    try:
+        run = service.retry_run(run_id, mode="resume", task_id=task_id, wait=False)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RunResponse.from_record(run)
 
 
 @router.post("/{run_id}/cancel", response_model=RunResponse)

@@ -8,6 +8,7 @@ from piply.api.schemas import (
     PipelineDetailResponse,
     PipelineResponse,
     RunResponse,
+    TaskResponse,
     TriggerRunRequest,
 )
 
@@ -46,17 +47,34 @@ def trigger_pipeline(
     """Trigger one manual pipeline run."""
     service = _get_service(request)
     try:
+        initial_context = {}
+        if payload is not None and payload.params:
+            initial_context["params"] = payload.params
         run = service.trigger_pipeline(
             pipeline_id,
             trigger="manual",
             wait=False,
             command_overrides=(payload.command_overrides if payload is not None else None),
+            tenant_id=(payload.tenant_id if payload is not None else None),
+            initial_context=initial_context,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)
+
+
+@router.get("/{pipeline_id}/tasks/{task_id}", response_model=TaskResponse)
+def get_pipeline_task(request: Request, pipeline_id: str, task_id: str) -> TaskResponse:
+    """Return one task definition from a pipeline."""
+    service = _get_service(request)
+    try:
+        pipeline = service.get_pipeline(pipeline_id)
+        task = pipeline.tasks[task_id]
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return TaskResponse.from_definition(task)
 
 
 @router.post("/{pipeline_id}/tasks/{task_id}/run", response_model=RunResponse)
@@ -74,6 +92,34 @@ def trigger_pipeline_task(
             task_id,
             trigger="task",
             wait=False,
+            command_overrides=(payload.command_overrides if payload is not None else None),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RunResponse.from_record(run)
+
+
+@router.post("/{pipeline_id}/chain/{target_pipeline_id}", response_model=RunResponse)
+def chain_pipeline(
+    request: Request,
+    pipeline_id: str,
+    target_pipeline_id: str,
+    payload: TriggerRunRequest | None = None,
+) -> RunResponse:
+    """Trigger a downstream pipeline while preserving parent and tenant context."""
+    service = _get_service(request)
+    try:
+        service.get_pipeline(pipeline_id)
+        initial_context = {"params": payload.params} if payload is not None and payload.params else {}
+        run = service.trigger_pipeline(
+            target_pipeline_id,
+            trigger="pipeline",
+            wait=False,
+            parent_pipeline_id=pipeline_id,
+            tenant_id=(payload.tenant_id if payload is not None else None),
+            initial_context=initial_context,
             command_overrides=(payload.command_overrides if payload is not None else None),
         )
     except KeyError as exc:

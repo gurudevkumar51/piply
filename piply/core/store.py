@@ -16,9 +16,11 @@ from .models import (
     PipelineDefinition,
     RetryMode,
     RunRecord,
+    TaskOutputRecord,
     TriggerQueueRecord,
     TaskRunRecord,
 )
+from .outputs import load_json_output, serialize_task_output
 
 
 def _to_iso(value: datetime | None) -> str | None:
@@ -92,7 +94,10 @@ class RunStore:
                     heartbeat_at TEXT,
                     retry_of TEXT,
                     retry_mode TEXT,
-                    retry_task_id TEXT
+                    retry_task_id TEXT,
+                    parent_run_id TEXT,
+                    parent_pipeline_id TEXT,
+                    tenant_id TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS task_runs (
@@ -121,6 +126,20 @@ class RunStore:
                     stream TEXT NOT NULL,
                     message TEXT NOT NULL,
                     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_outputs (
+                    run_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    output_type TEXT NOT NULL,
+                    preview TEXT NOT NULL,
+                    is_json INTEGER NOT NULL DEFAULT 0,
+                    json_value TEXT,
+                    metadata_json TEXT,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                    UNIQUE(run_id, task_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS pipeline_overrides (
@@ -158,6 +177,7 @@ class RunStore:
                 CREATE INDEX IF NOT EXISTS idx_runs_pipeline_id ON runs(pipeline_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
                 CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id, position);
+                CREATE INDEX IF NOT EXISTS idx_task_outputs_run_id ON task_outputs(run_id);
                 CREATE INDEX IF NOT EXISTS idx_logs_run_id ON logs(run_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_trigger_queue_status_available
                     ON trigger_queue(status, available_at, id);
@@ -193,6 +213,14 @@ class RunStore:
                     WHERE heartbeat_at IS NULL
                     """
                 )
+            if "parent_run_id" not in self._run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN parent_run_id TEXT")
+            if "parent_pipeline_id" not in self._run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN parent_pipeline_id TEXT")
+            if "tenant_id" not in self._run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN tenant_id TEXT")
+
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_runs_tenant ON runs(tenant_id)")
 
             if "task_id" not in self._log_columns:
                 connection.execute("ALTER TABLE logs ADD COLUMN task_id TEXT")
@@ -209,6 +237,9 @@ class RunStore:
         retry_of: str | None = None,
         retry_mode: RetryMode | None = None,
         retry_task_id: str | None = None,
+        parent_run_id: str | None = None,
+        parent_pipeline_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> RunRecord:
         """Insert one new run and its queued task records."""
         with self._lock, self._connect() as connection:
@@ -233,6 +264,9 @@ class RunStore:
                 "retry_of": retry_of,
                 "retry_mode": retry_mode,
                 "retry_task_id": retry_task_id,
+                "parent_run_id": parent_run_id,
+                "parent_pipeline_id": parent_pipeline_id,
+                "tenant_id": tenant_id,
             }
 
             if "script_path" in self._run_columns:
@@ -367,6 +401,86 @@ class RunStore:
                 (now, run_id),
             )
             connection.commit()
+
+    def record_task_output(self, run_id: str, task_id: str, output: object) -> TaskOutputRecord:
+        """Persist bounded metadata and JSON value for one successful task output."""
+        serialized = serialize_task_output(output)
+        now = datetime.now(timezone.utc)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO task_outputs (
+                    run_id, task_id, output_type, preview, is_json, json_value,
+                    metadata_json, size_bytes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, task_id)
+                DO UPDATE SET
+                    output_type = excluded.output_type,
+                    preview = excluded.preview,
+                    is_json = excluded.is_json,
+                    json_value = excluded.json_value,
+                    metadata_json = excluded.metadata_json,
+                    size_bytes = excluded.size_bytes,
+                    created_at = excluded.created_at
+                """,
+                (
+                    run_id,
+                    task_id,
+                    serialized.output_type,
+                    serialized.preview,
+                    1 if serialized.is_json else 0,
+                    serialized.json_value,
+                    json.dumps(serialized.metadata, sort_keys=True),
+                    serialized.size_bytes,
+                    _to_iso(now),
+                ),
+            )
+            connection.execute(
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                (_to_iso(now), run_id),
+            )
+            connection.commit()
+        record = self.get_task_output(run_id, task_id)
+        assert record is not None
+        return record
+
+    def get_task_output(self, run_id: str, task_id: str) -> TaskOutputRecord | None:
+        """Return persisted output metadata for one task."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM task_outputs
+                WHERE run_id = ? AND task_id = ?
+                """,
+                (run_id, task_id),
+            ).fetchone()
+        return self._row_to_task_output(row) if row else None
+
+    def list_task_outputs(self, run_id: str) -> list[TaskOutputRecord]:
+        """Return all task outputs captured for one run in task order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT task_outputs.*
+                FROM task_outputs
+                LEFT JOIN task_runs
+                  ON task_runs.run_id = task_outputs.run_id
+                 AND task_runs.task_id = task_outputs.task_id
+                WHERE task_outputs.run_id = ?
+                ORDER BY COALESCE(task_runs.position, 999999), task_outputs.created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [self._row_to_task_output(row) for row in rows]
+
+    def output_context_for_run(self, run_id: str) -> dict[str, object]:
+        """Return JSON-restorable outputs for use as downstream pipeline context."""
+        context: dict[str, object] = {}
+        for output in self.list_task_outputs(run_id):
+            if output.is_json and output.json_value is not None:
+                context[output.task_id] = load_json_output(output.json_value)
+        return context
 
     def cancel_run(self, run_id: str, reason: str = "Run cancelled by user.") -> None:
         """Mark one queued or running run as cancelled."""
@@ -541,6 +655,9 @@ class RunStore:
         *,
         pipeline_id: str | None = None,
         status: str | None = None,
+        tenant_id: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
         limit: int = 50,
     ) -> list[RunRecord]:
         """List recent runs with optional pipeline and status filters."""
@@ -552,6 +669,15 @@ class RunStore:
         if status:
             conditions.append("status = ?")
             params.append(status)
+        if tenant_id:
+            conditions.append("tenant_id = ?")
+            params.append(tenant_id)
+        if created_after is not None:
+            conditions.append("created_at >= ?")
+            params.append(_to_iso(created_after))
+        if created_before is not None:
+            conditions.append("created_at <= ?")
+            params.append(_to_iso(created_before))
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         query = f"""
@@ -580,30 +706,93 @@ class RunStore:
                 """
                 SELECT
                     task_runs.*,
+                    task_outputs.output_type,
+                    task_outputs.preview AS output_preview,
+                    task_outputs.is_json AS output_is_json,
                     (SELECT COUNT(*) FROM logs WHERE logs.run_id = task_runs.run_id AND logs.task_id = task_runs.task_id) AS log_count
                 FROM task_runs
-                WHERE run_id = ?
+                LEFT JOIN task_outputs
+                  ON task_outputs.run_id = task_runs.run_id
+                 AND task_outputs.task_id = task_runs.task_id
+                WHERE task_runs.run_id = ?
                 ORDER BY position ASC
                 """,
                 (run_id,),
             ).fetchall()
         return [self._row_to_task_run(row) for row in rows]
 
-    def list_logs(self, run_id: str, limit: int | None = None, offset: int = 0):
+    def list_logs(
+        self,
+        run_id: str,
+        limit: int | None = None,
+        offset: int = 0,
+        *,
+        task_id: str | None = None,
+    ):
         """List raw logs newest first for one run."""
+        conditions = ["run_id = ?"]
+        params: list[object] = [run_id]
+        if task_id is not None:
+            conditions.append("task_id = ?")
+            params.append(task_id)
+
         query = """
             SELECT run_id, task_id, created_at, stream, message
             FROM logs
-            WHERE run_id = ?
+            WHERE {where_clause}
             ORDER BY id DESC
-        """
-        params: list[object] = [run_id]
+        """.format(where_clause=" AND ".join(conditions))
         if limit is not None:
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
 
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
+        return [
+            LogRecord(
+                run_id=row["run_id"],
+                task_id=row["task_id"],
+                created_at=_from_iso(row["created_at"]) or datetime.now(timezone.utc),
+                stream=row["stream"],
+                message=row["message"],
+            )
+            for row in rows
+        ]
+
+    def search_logs(
+        self,
+        *,
+        query: str | None = None,
+        pipeline_id: str | None = None,
+        task_id: str | None = None,
+        limit: int = 300,
+    ) -> list[LogRecord]:
+        """Search recent logs across runs with lightweight SQLite filters."""
+        conditions: list[str] = []
+        params: list[object] = []
+        if query:
+            conditions.append("logs.message LIKE ?")
+            params.append(f"%{query}%")
+        if pipeline_id:
+            conditions.append("runs.pipeline_id = ?")
+            params.append(pipeline_id)
+        if task_id:
+            conditions.append("logs.task_id = ?")
+            params.append(task_id)
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT logs.run_id, logs.task_id, logs.created_at, logs.stream, logs.message
+                FROM logs
+                JOIN runs ON runs.id = logs.run_id
+                {where_clause}
+                ORDER BY logs.id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
         return [
             LogRecord(
                 run_id=row["run_id"],
@@ -666,6 +855,7 @@ class RunStore:
         """Delete one finished run and all related task runs and logs."""
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM logs WHERE run_id = ?", (run_id,))
+            connection.execute("DELETE FROM task_outputs WHERE run_id = ?", (run_id,))
             connection.execute("DELETE FROM task_runs WHERE run_id = ?", (run_id,))
             connection.execute("DELETE FROM runs WHERE id = ?", (run_id,))
             connection.commit()
@@ -684,6 +874,10 @@ class RunStore:
                 placeholders = ", ".join("?" for _ in run_ids)
                 connection.execute(
                     f"DELETE FROM logs WHERE run_id IN ({placeholders})",
+                    run_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM task_outputs WHERE run_id IN ({placeholders})",
                     run_ids,
                 )
                 connection.execute(
@@ -997,6 +1191,9 @@ class RunStore:
             retry_of=row["retry_of"] if "retry_of" in row.keys() else None,
             retry_mode=row["retry_mode"] if "retry_mode" in row.keys() else None,
             retry_task_id=row["retry_task_id"] if "retry_task_id" in row.keys() else None,
+            parent_run_id=row["parent_run_id"] if "parent_run_id" in row.keys() else None,
+            parent_pipeline_id=row["parent_pipeline_id"] if "parent_pipeline_id" in row.keys() else None,
+            tenant_id=row["tenant_id"] if "tenant_id" in row.keys() else None,
         )
 
     def _row_to_task_run(self, row: sqlite3.Row) -> TaskRunRecord:
@@ -1016,6 +1213,26 @@ class RunStore:
             error=row["error"],
             depends_on=depends_on,
             log_count=int(row["log_count"] or 0),
+            output_type=row["output_type"] if "output_type" in row.keys() else None,
+            output_preview=row["output_preview"] if "output_preview" in row.keys() else None,
+            output_is_json=bool(row["output_is_json"]) if "output_is_json" in row.keys() else False,
+        )
+
+    def _row_to_task_output(self, row: sqlite3.Row) -> TaskOutputRecord:
+        """Convert one task output row into a TaskOutputRecord."""
+        metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return TaskOutputRecord(
+            run_id=row["run_id"],
+            task_id=row["task_id"],
+            output_type=row["output_type"],
+            preview=row["preview"],
+            is_json=bool(row["is_json"]),
+            json_value=row["json_value"],
+            metadata=metadata,
+            size_bytes=int(row["size_bytes"] or 0),
+            created_at=_from_iso(row["created_at"]),
         )
 
     def _row_to_queue_record(self, row: sqlite3.Row) -> TriggerQueueRecord:

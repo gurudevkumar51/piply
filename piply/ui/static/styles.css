@@ -1008,6 +1008,205 @@ select {
     flex-wrap: wrap;
 }
 
+.filter-bar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.filter-bar input,
+.filter-bar select {
+    min-height: 42px;
+    min-width: 160px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    color: var(--text);
+}
+
+.runtime-chart {
+    display: flex;
+    align-items: end;
+    gap: 8px;
+    min-height: 160px;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background:
+        linear-gradient(rgba(57, 117, 255, 0.05) 1px, transparent 1px),
+        #fbfdff;
+    background-size: 100% 32px;
+}
+
+.runtime-bar {
+    display: block;
+    flex: 1 1 18px;
+    min-width: 12px;
+    max-width: 42px;
+    border-radius: 6px 6px 2px 2px;
+    background: var(--border-strong);
+    transition: transform 0.16s ease, filter 0.16s ease;
+}
+
+.runtime-bar:hover {
+    transform: translateY(-2px);
+    filter: saturate(1.12);
+}
+
+.runtime-bar.success {
+    background: var(--green);
+}
+
+.runtime-bar.failed {
+    background: var(--red);
+}
+
+.runtime-bar.running {
+    background: var(--accent);
+}
+
+.runtime-bar.queued,
+.runtime-bar.skipped {
+    background: var(--amber);
+}
+
+.shortcut-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+}
+
+.shortcut-card {
+    display: block;
+}
+
+.matrix-panel {
+    padding: 0;
+    overflow: hidden;
+}
+
+.matrix-scroll {
+    overflow: auto;
+    max-height: calc(100vh - 260px);
+}
+
+.execution-matrix-table {
+    min-width: 760px;
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.execution-matrix-table th,
+.execution-matrix-table td {
+    padding: 10px;
+    border-bottom: 1px solid #e1e9f2;
+    border-right: 1px solid #e1e9f2;
+    background: rgba(255, 255, 255, 0.9);
+    vertical-align: middle;
+}
+
+.execution-matrix-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f8fbff;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+}
+
+.execution-matrix-table .task-col {
+    position: sticky;
+    left: 0;
+    z-index: 3;
+    min-width: 220px;
+    max-width: 280px;
+    text-align: left;
+}
+
+.matrix-run-status {
+    margin-top: 8px;
+}
+
+.matrix-cell {
+    width: 100%;
+    min-width: 92px;
+    min-height: 54px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    gap: 4px;
+    color: #ffffff;
+    cursor: pointer;
+}
+
+.matrix-cell span,
+.matrix-cell small {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+}
+
+.matrix-cell.success {
+    background: var(--green);
+}
+
+.matrix-cell.failed {
+    background: var(--red);
+}
+
+.matrix-cell.running {
+    background: var(--accent);
+}
+
+.matrix-cell.skipped,
+.matrix-cell.cancelled {
+    background: #7b8ca6;
+}
+
+.matrix-cell.queued {
+    background: var(--amber);
+}
+
+.drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(19, 36, 62, 0.26);
+}
+
+.side-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 31;
+    width: min(560px, 100vw);
+    height: 100vh;
+    overflow: auto;
+    padding: 22px;
+    border-left: 1px solid var(--border);
+    background: #ffffff;
+    box-shadow: -18px 0 42px rgba(28, 49, 78, 0.16);
+    transform: translateX(102%);
+    transition: transform 0.2s ease;
+}
+
+.side-drawer[aria-hidden="false"] {
+    transform: translateX(0);
+}
+
+.drawer-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 18px;
+}
+
 .footer-note {
     margin-top: 10px;
     color: var(--muted);
@@ -1080,6 +1279,17 @@ select {
     .compact-header {
         flex-direction: column;
         align-items: flex-start;
+    }
+
+    .filter-bar,
+    .filter-bar input,
+    .filter-bar select,
+    .filter-bar .button {
+        width: 100%;
+    }
+
+    .side-drawer {
+        width: 100vw;
     }
 
     .dag-viewport {

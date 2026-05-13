@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -16,6 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
+from piply.core.context import RuntimeTaskContext
 from piply.core.models import TaskDefinition
 from piply.core.store import RunStore
 
@@ -27,6 +29,7 @@ class TaskExecutionResult:
     status: str
     exit_code: int | None = None
     error: str | None = None
+    output: object | None = None
 
 
 class TaskRunner:
@@ -41,6 +44,7 @@ class TaskRunner:
         is_cancelled: Callable[[], bool] | None = None,
         register_process: Callable[[subprocess.Popen], None] | None = None,
         unregister_process: Callable[[subprocess.Popen], None] | None = None,
+        context: RuntimeTaskContext | None = None,
     ) -> None:
         self.store = store
         self.run_id = run_id
@@ -48,6 +52,7 @@ class TaskRunner:
         self.is_cancelled = is_cancelled
         self.register_process = register_process
         self.unregister_process = unregister_process
+        self.context = context if context is not None else RuntimeTaskContext()
 
     def run(self, task: TaskDefinition) -> TaskExecutionResult:
         """Dispatch one task to the correct lightweight operator."""
@@ -110,8 +115,15 @@ class TaskRunner:
         """Run a local process and stream its merged stdout/stderr."""
         environment = os.environ.copy()
         environment.update(env)
+        context_json = self.context.to_env_json()
+        if context_json is not None:
+            environment["PIPLY_CONTEXT_JSON"] = context_json
+        environment["PIPLY_RUN_ID"] = self.run_id
+        environment["PIPLY_TASK_ID"] = task_id
 
         try:
+            output_lines: list[str] = []
+            output_size = 0
             process = subprocess.Popen(
                 command,
                 cwd=None if cwd is None else str(cwd),
@@ -128,7 +140,11 @@ class TaskRunner:
             for line in process.stdout:
                 if self.is_cancelled and self.is_cancelled():
                     process.terminate()
-                self.emit(line.rstrip(), task_id=task_id)
+                stripped_line = line.rstrip()
+                if output_size < 262_144:
+                    output_lines.append(stripped_line)
+                    output_size += len(stripped_line.encode("utf-8")) + 1
+                self.emit(stripped_line, task_id=task_id)
 
             exit_code = process.wait()
             if self.is_cancelled and self.is_cancelled():
@@ -136,7 +152,11 @@ class TaskRunner:
                 return TaskExecutionResult(status="cancelled")
             if exit_code == 0:
                 self.emit("Task completed successfully.", task_id=task_id)
-                return TaskExecutionResult(status="success", exit_code=exit_code)
+                return TaskExecutionResult(
+                    status="success",
+                    exit_code=exit_code,
+                    output="\n".join(output_lines),
+                )
 
             message = f"Process exited with code {exit_code}."
             self.emit(message, task_id=task_id)
@@ -223,7 +243,7 @@ class TaskRunner:
         try:
             callable_object = self._load_callable(task)
             with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                result = callable_object(*task.args, **task.kwargs)
+                result = self._invoke_callable(callable_object, task)
         except Exception as exc:
             stdio_output = [stdout_buffer.getvalue().rstrip(), stderr_buffer.getvalue().rstrip()]
             for output in stdio_output:
@@ -251,7 +271,30 @@ class TaskRunner:
             self.emit(f"Return value: {rendered}", task_id=task.task_id)
 
         self.emit("Task completed successfully.", task_id=task.task_id)
-        return TaskExecutionResult(status="success", exit_code=0)
+        return TaskExecutionResult(status="success", exit_code=0, output=result)
+
+    def _invoke_callable(self, callable_object, task: TaskDefinition):
+        """Invoke a Python callable, injecting context only when it explicitly asks."""
+        kwargs = dict(task.kwargs)
+        try:
+            signature = inspect.signature(callable_object)
+        except (TypeError, ValueError):
+            return callable_object(*task.args, **kwargs)
+
+        parameter = signature.parameters.get("context")
+        if parameter is not None and "context" not in kwargs:
+            positional_names = [
+                name
+                for name, candidate in signature.parameters.items()
+                if candidate.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            if "context" not in positional_names[: len(task.args)]:
+                kwargs["context"] = self.context.snapshot()
+        return callable_object(*task.args, **kwargs)
 
     def _run_api_task(self, task: TaskDefinition) -> TaskExecutionResult:
         """Run one API task using urllib and optional bearer auth."""
@@ -281,7 +324,7 @@ class TaskRunner:
                 if status_code not in task.expected_status:
                     message = f"Unexpected status {status_code}. Expected one of {task.expected_status}."
                     return TaskExecutionResult(status="failed", error=message)
-                return TaskExecutionResult(status="success", exit_code=status_code)
+                return TaskExecutionResult(status="success", exit_code=status_code, output=payload)
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")
             message = f"HTTPError {exc.code}: {body_text[:400]}"
@@ -317,7 +360,14 @@ class TaskRunner:
                 self.emit("Task cancelled.", task_id=task.task_id)
                 return TaskExecutionResult(status="cancelled")
             self.emit("Email sent successfully.", task_id=task.task_id)
-            return TaskExecutionResult(status="success", exit_code=0)
+            return TaskExecutionResult(
+                status="success",
+                exit_code=0,
+                output={
+                    "to": list(task.email_to),
+                    "subject": task.email_subject or "Piply Notification",
+                },
+            )
         except Exception as exc:
             message = f"Failed to send email: {exc}"
             self.emit(message, task_id=task.task_id)

@@ -229,6 +229,9 @@ function renderPipelineInspector(taskId) {
     const statusText = latest?.status || task.status || "queued";
     const logCount = latest?.log_count ?? 0;
     const durationText = formatDurationSeconds(latest?.duration_seconds ?? task.duration_seconds);
+    const outputBlock = latest?.output_preview
+        ? `<div class="inspector-section"><div class="small-kicker">Output preview</div><pre class="code-block inspector-code">${escapeHtml(latest.output_preview)}</pre></div>`
+        : "";
     const errorBlock = latest?.error ? `<p class="footer-note">${escapeHtml(latest.error)}</p>` : "";
         const actionButton = isTriggerNode
         ? `<a class="button secondary" href="/pipelines/${task.task_id.replace("trigger_", "")}">Open downstream pipeline</a>`
@@ -254,6 +257,7 @@ function renderPipelineInspector(taskId) {
             <div class="small-kicker">Command or target</div>
             <pre class="code-block inspector-code">${escapeHtml(task.command_preview || "No command preview available.")}</pre>
         </div>
+        ${outputBlock}
         ${errorBlock}
         <div class="card-actions" style="margin-top:16px;">
             ${actionButton}
@@ -271,7 +275,7 @@ function renderPipelineDag() {
             selectedNodeId: selectedPipelineTaskId,
             clickableStatuses: ["queued", "running", "success", "failed", "skipped", "cancelled"],
             onNodeClick: (node) => {
-                focusPipelineTask(node.task_id, true, false);
+                focusPipelineTask(node.task_id, false, false);
             },
             defaultLayout: "flow",
         },

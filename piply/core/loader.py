@@ -13,7 +13,14 @@ import yaml
 
 from piply.settings import load_settings
 
-from .models import PipelineDefinition, ProjectDefinition, RetryPolicy, SensorDefinition, TaskDefinition
+from .models import (
+    PipelineDefinition,
+    ProjectDefinition,
+    RetryPolicy,
+    SensorDefinition,
+    TaskDefinition,
+    UpstreamFailureBehavior,
+)
 from .scheduling import CronSchedule, IntervalSchedule, ScheduleError, parse_interval
 
 
@@ -214,6 +221,28 @@ def _parse_depends_on(raw_value: Any, label: str) -> tuple[str, ...]:
         if not TASK_ID_PATTERN.match(dependency):
             raise ConfigError(f"{label} contains an invalid task id '{dependency}'")
     return depends_on
+
+
+def _parse_upstream_failure_behavior(raw_task: dict[str, Any], label: str) -> UpstreamFailureBehavior:
+    """Parse task-level behavior when one or more upstream dependencies fail."""
+    fail_flag = bool(raw_task.get("fail_if_upstream_failed", False))
+    continue_flag = bool(raw_task.get("continue_if_upstream_failed", False))
+    if fail_flag and continue_flag:
+        raise ConfigError(
+            f"{label} cannot set both fail_if_upstream_failed and continue_if_upstream_failed"
+        )
+    if fail_flag:
+        return "fail"
+    if continue_flag:
+        return "continue"
+
+    raw_value = raw_task.get("on_upstream_failure")
+    if raw_value in (None, "", False):
+        return "skip"
+    behavior = str(raw_value).strip().lower()
+    if behavior not in {"skip", "fail", "continue"}:
+        raise ConfigError(f"{label} on_upstream_failure must be one of: skip, fail, continue")
+    return behavior  # type: ignore[return-value]
 
 
 def _is_sftp_path(value: str) -> bool:
@@ -490,6 +519,10 @@ def _parse_task(
         raw_task.get("depends_on"),
         f"Pipeline '{pipeline_id}' task '{task_id}' depends_on",
     )
+    on_upstream_failure = _parse_upstream_failure_behavior(
+        raw_task,
+        f"Pipeline '{pipeline_id}' task '{task_id}'",
+    )
     enabled = bool(raw_task.get("enabled", True))
 
     task_env = dict(inherited_env)
@@ -552,6 +585,7 @@ def _parse_task(
                 task_type="python",
                 description=description,
                 depends_on=depends_on,
+                on_upstream_failure=on_upstream_failure,
                 enabled=enabled,
                 call=callable_text,
                 args=tuple(raw_args),
@@ -580,6 +614,7 @@ def _parse_task(
             task_type="python",
             description=description,
             depends_on=depends_on,
+            on_upstream_failure=on_upstream_failure,
             enabled=enabled,
             path=path,
             python=_expand_string(str(raw_task.get("python") or default_python), env_values),
@@ -611,6 +646,7 @@ def _parse_task(
             task_type="cli",
             description=description,
             depends_on=depends_on,
+            on_upstream_failure=on_upstream_failure,
             enabled=enabled,
             path=resolved_path,
             command=None if command is None else _expand_string(str(command), env_values),
@@ -642,6 +678,7 @@ def _parse_task(
             task_type=task_type,
             description=description,
             depends_on=depends_on,
+            on_upstream_failure=on_upstream_failure,
             enabled=enabled,
             url=_expand_string(str(url), env_values),
             method=method,
@@ -662,6 +699,7 @@ def _parse_task(
             task_type="email",
             description=description,
             depends_on=depends_on,
+            on_upstream_failure=on_upstream_failure,
             enabled=enabled,
             smtp_host=_expand_string(str(raw_task.get("smtp_host") or "localhost"), env_values),
             smtp_port=int(raw_task.get("smtp_port") or 587),
@@ -683,6 +721,7 @@ def _parse_task(
         task_type="ssh",
         description=description,
         depends_on=depends_on,
+        on_upstream_failure=on_upstream_failure,
         enabled=enabled,
         host=_expand_string(str(host), env_values),
         user=None if raw_task.get("user") is None else _expand_string(str(raw_task.get("user")), env_values),

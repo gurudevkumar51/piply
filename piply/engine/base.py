@@ -29,6 +29,7 @@ class BaseEngine(ABC):
         on_failure: CompletionCallback | None = None,
         initial_task_statuses: dict[str, str] | None = None,
         retry_source_run_id: str | None = None,
+        initial_context: dict[str, object] | None = None,
     ) -> None:
         """Execute a pipeline run either asynchronously or in-process."""
 

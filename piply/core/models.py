@@ -15,6 +15,7 @@ TaskType = Literal["python", "cli", "api", "ssh", "email", "webhook"]
 RetryMode = Literal["startover", "resume"]
 SensorType = Literal["file_sensor", "sql_sensor"]
 QueueStatus = Literal["queued", "dispatching", "dispatched", "failed"]
+UpstreamFailureBehavior = Literal["skip", "fail", "continue"]
 
 
 class SchedulePlan(Protocol):
@@ -112,6 +113,7 @@ class TaskDefinition:
     task_type: TaskType
     description: str = ""
     depends_on: tuple[str, ...] = ()
+    on_upstream_failure: UpstreamFailureBehavior = "skip"
     enabled: bool = True
     path: Path | None = None
     python: str | None = None
@@ -311,6 +313,9 @@ class RunRecord:
     retry_of: str | None = None
     retry_mode: RetryMode | None = None
     retry_task_id: str | None = None
+    parent_run_id: str | None = None
+    parent_pipeline_id: str | None = None
+    tenant_id: str | None = None
 
     @property
     def duration_seconds(self) -> float | None:
@@ -338,6 +343,9 @@ class TaskRunRecord:
     error: str | None = None
     depends_on: tuple[str, ...] = ()
     log_count: int = 0
+    output_type: str | None = None
+    output_preview: str | None = None
+    output_is_json: bool = False
 
     @property
     def duration_seconds(self) -> float | None:
@@ -357,6 +365,21 @@ class LogRecord:
     stream: str
     message: str
     task_id: str | None = None
+
+
+@dataclass(slots=True)
+class TaskOutputRecord:
+    """Persisted metadata for a task output captured during a run."""
+
+    run_id: str
+    task_id: str
+    output_type: str
+    preview: str
+    is_json: bool
+    json_value: str | None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    size_bytes: int = 0
+    created_at: datetime | None = None
 
 
 @dataclass(slots=True)

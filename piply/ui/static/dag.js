@@ -228,7 +228,7 @@
       label.setAttribute("x", "22");
       label.setAttribute("y", String(top + 24));
       label.setAttribute("class", "dag-stage-label");
-      label.textContent = depth === 0 ? "Stage 1 · entry" : `Stage ${depth + 1}`;
+      label.textContent = depth === 0 ? "Stage 1 - entry" : `Stage ${depth + 1}`;
       rootGroup.appendChild(label);
     });
   }
@@ -286,8 +286,8 @@
       graph.setNode(task.task_id, {
         ...task,
         status: taskStateMap[task.task_id] || task.status || "queued",
-        width: 250,
-        height: 116,
+        width: 230,
+        height: 104,
       });
     });
 
@@ -300,8 +300,8 @@
     window.dagre.layout(graph);
 
     const nodeMetrics = graph.nodes().map((nodeId) => graph.node(nodeId));
-    const width = Math.max(...nodeMetrics.map((node) => node.x + 190), 600);
-    const height = Math.max(...nodeMetrics.map((node) => node.y + 130), 320);
+    const width = Math.max(...nodeMetrics.map((node) => node.x + 170), 600);
+    const height = Math.max(...nodeMetrics.map((node) => node.y + 122), 320);
 
     const viewport = document.createElement("div");
     viewport.className = `dag-viewport ${layout.id === "focus" ? "focus-mode" : ""}`;
@@ -372,7 +372,7 @@
       const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
       rect.setAttribute("width", node.width);
       rect.setAttribute("height", node.height);
-      rect.setAttribute("rx", "18");
+      rect.setAttribute("rx", "8");
       rect.setAttribute("class", `dag-node dag-node-${node.status}${isSelected ? " selected" : ""}`);
       rect.setAttribute("fill", palette.fill);
       rect.setAttribute("stroke", palette.stroke);
@@ -412,7 +412,7 @@
       if (durationText) {
         const durationNode = document.createElementNS("http://www.w3.org/2000/svg", "text");
         durationNode.setAttribute("x", "16");
-        durationNode.setAttribute("y", "90");
+        durationNode.setAttribute("y", "86");
         durationNode.setAttribute("class", "dag-duration");
         durationNode.textContent = `duration ${durationText}`;
         group.appendChild(durationNode);
@@ -420,14 +420,16 @@
 
       const hintNode = document.createElementNS("http://www.w3.org/2000/svg", "text");
       hintNode.setAttribute("x", "16");
-      hintNode.setAttribute("y", "106");
+      hintNode.setAttribute("y", durationText ? "100" : "88");
       hintNode.setAttribute("class", "dag-hint");
       hintNode.textContent = isSelected ? "selected" : "click for actions";
       group.appendChild(hintNode);
 
       if (clickable && typeof options.onNodeClick === "function") {
         group.style.cursor = "pointer";
-        group.addEventListener("click", () => {
+        group.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
           state.selectedNodeId = node.task_id;
           options.onNodeClick(node, { selectedNodeId: state.selectedNodeId });
           redraw();

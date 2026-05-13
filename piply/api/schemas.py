@@ -13,6 +13,7 @@ from piply.core.models import (
     PipelineSummary,
     RunRecord,
     TaskDefinition,
+    TaskOutputRecord,
     TaskRunRecord,
 )
 
@@ -33,6 +34,8 @@ class TriggerRunRequest(BaseModel):
     """TriggerRunRequest carries optional UI-provided CLI command overrides."""
 
     command_overrides: dict[str, str] = Field(default_factory=dict)
+    params: dict[str, object] = Field(default_factory=dict)
+    tenant_id: str | None = None
 
 
 class RunResponse(BaseModel):
@@ -60,6 +63,9 @@ class RunResponse(BaseModel):
     retry_of: str | None = None
     retry_mode: str | None = None
     retry_task_id: str | None = None
+    parent_run_id: str | None = None
+    parent_pipeline_id: str | None = None
+    tenant_id: str | None = None
 
     @classmethod
     def from_record(cls, record: RunRecord) -> "RunResponse":
@@ -87,6 +93,9 @@ class RunResponse(BaseModel):
             retry_of=record.retry_of,
             retry_mode=record.retry_mode,
             retry_task_id=record.retry_task_id,
+            parent_run_id=record.parent_run_id,
+            parent_pipeline_id=record.parent_pipeline_id,
+            tenant_id=record.tenant_id,
         )
 
 
@@ -100,6 +109,7 @@ class TaskResponse(BaseModel):
     depends_on: list[str]
     enabled: bool
     command_preview: str
+    on_upstream_failure: str
 
     @classmethod
     def from_definition(cls, definition: TaskDefinition) -> "TaskResponse":
@@ -112,6 +122,7 @@ class TaskResponse(BaseModel):
             depends_on=list(definition.depends_on),
             enabled=definition.enabled,
             command_preview=definition.command_preview,
+            on_upstream_failure=definition.on_upstream_failure,
         )
 
 
@@ -132,6 +143,9 @@ class TaskRunResponse(BaseModel):
     depends_on: list[str]
     log_count: int = 0
     duration_seconds: float | None = None
+    output_type: str | None = None
+    output_preview: str | None = None
+    output_is_json: bool = False
 
     @classmethod
     def from_record(cls, record: TaskRunRecord) -> "TaskRunResponse":
@@ -151,6 +165,43 @@ class TaskRunResponse(BaseModel):
             depends_on=list(record.depends_on),
             log_count=record.log_count,
             duration_seconds=record.duration_seconds,
+            output_type=record.output_type,
+            output_preview=record.output_preview,
+            output_is_json=record.output_is_json,
+        )
+
+
+class TaskOutputResponse(BaseModel):
+    """TaskOutputResponse exposes persisted output metadata and optional JSON."""
+
+    run_id: str
+    task_id: str
+    output_type: str
+    preview: str
+    is_json: bool
+    json_value: object | None = None
+    metadata: dict[str, object]
+    size_bytes: int
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_record(cls, record: TaskOutputRecord) -> "TaskOutputResponse":
+        """Convert one TaskOutputRecord to an API response."""
+        import json
+
+        decoded = None
+        if record.is_json and record.json_value is not None:
+            decoded = json.loads(record.json_value)
+        return cls(
+            run_id=record.run_id,
+            task_id=record.task_id,
+            output_type=record.output_type,
+            preview=record.preview,
+            is_json=record.is_json,
+            json_value=decoded,
+            metadata=record.metadata,
+            size_bytes=record.size_bytes,
+            created_at=record.created_at,
         )
 
 
@@ -305,6 +356,9 @@ class DashboardResponse(BaseModel):
     stats: DashboardStatsResponse
     pipelines: list[PipelineResponse]
     recent_runs: list[RunResponse]
+    recent_failures: list[RunResponse] = Field(default_factory=list)
+    active_pipelines: list[PipelineResponse] = Field(default_factory=list)
+    runtime_trend: list[dict[str, object]] = Field(default_factory=list)
     scheduler: SchedulerResponse
 
 
@@ -315,3 +369,42 @@ class RunDetailResponse(BaseModel):
     task_runs: list[TaskRunResponse]
     logs: list[LogResponse]
     upcoming_runs: list[UpcomingRunResponse] = Field(default_factory=list)
+
+
+class TaskDetailResponse(BaseModel):
+    """TaskDetailResponse exposes one task run, logs, and captured output."""
+
+    run: RunResponse
+    task_run: TaskRunResponse
+    logs: list[LogResponse]
+    output: TaskOutputResponse | None = None
+
+
+class MatrixCellResponse(BaseModel):
+    """One task/run status cell for the execution matrix."""
+
+    run_id: str
+    task_id: str
+    status: str
+    duration_seconds: float | None = None
+    log_count: int = 0
+    error: str | None = None
+    output_preview: str | None = None
+
+
+class MatrixRowResponse(BaseModel):
+    """One task row in the execution matrix."""
+
+    task: TaskResponse
+    cells: list[MatrixCellResponse]
+
+
+class ExecutionMatrixResponse(BaseModel):
+    """Execution matrix payload for the grid view."""
+
+    pipelines: list[PipelineResponse]
+    selected_pipeline_id: str | None
+    runs: list[RunResponse]
+    rows: list[MatrixRowResponse]
+    trend: list[dict[str, object]]
+    filters: dict[str, object] = Field(default_factory=dict)

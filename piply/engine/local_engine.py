@@ -6,6 +6,7 @@ import threading
 import traceback
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
+from piply.core.context import RuntimeTaskContext
 from piply.core.graph import topological_order
 from piply.core.models import PipelineDefinition, RunRecord, TaskDefinition
 from piply.core.store import RunStore
@@ -37,6 +38,7 @@ class LocalEngine(BaseEngine):
         on_failure: CompletionCallback | None = None,
         initial_task_statuses: dict[str, str] | None = None,
         retry_source_run_id: str | None = None,
+        initial_context: dict[str, object] | None = None,
     ) -> None:
         """Execute a pipeline either inline or in a background thread."""
         with self._lock:
@@ -52,6 +54,7 @@ class LocalEngine(BaseEngine):
                 on_failure=on_failure,
                 initial_task_statuses=initial_task_statuses or {},
                 retry_source_run_id=retry_source_run_id,
+                initial_context=initial_context or {},
             )
             return
 
@@ -64,6 +67,7 @@ class LocalEngine(BaseEngine):
                 "on_failure": on_failure,
                 "initial_task_statuses": initial_task_statuses or {},
                 "retry_source_run_id": retry_source_run_id,
+                "initial_context": initial_context or {},
             },
             daemon=True,
             name=f"piply-run-{run.run_id}",
@@ -83,9 +87,11 @@ class LocalEngine(BaseEngine):
         on_failure: CompletionCallback | None = None,
         initial_task_statuses: dict[str, str],
         retry_source_run_id: str | None,
+        initial_context: dict[str, object],
     ) -> None:
         """Execute the full pipeline lifecycle for one run."""
         cancel_event = self._cancel_events.get(run_id) or threading.Event()
+        context = RuntimeTaskContext(initial_context)
         runner = TaskRunner(
             store=store,
             run_id=run_id,
@@ -93,6 +99,7 @@ class LocalEngine(BaseEngine):
             is_cancelled=cancel_event.is_set,
             register_process=lambda process: self._register_process(run_id, process),
             unregister_process=lambda process: self._unregister_process(run_id, process),
+            context=context,
         )
         heartbeat = RunHeartbeat(store, run_id, self.heartbeat_interval_seconds)
         store.mark_running(run_id)
@@ -120,6 +127,7 @@ class LocalEngine(BaseEngine):
                     run_id,
                     store,
                     runner,
+                    context,
                     task_statuses,
                     cancel_event,
                 )
@@ -129,6 +137,7 @@ class LocalEngine(BaseEngine):
                     run_id,
                     store,
                     runner,
+                    context,
                     task_statuses,
                     cancel_event,
                 )
@@ -166,6 +175,7 @@ class LocalEngine(BaseEngine):
         run_id: str,
         store: RunStore,
         runner: TaskRunner,
+        context: RuntimeTaskContext,
         task_statuses: dict[str, str],
         cancel_event: threading.Event,
     ) -> str | None:
@@ -176,7 +186,7 @@ class LocalEngine(BaseEngine):
                 break
             if task.task_id in task_statuses:
                 continue
-            result = self._run_or_skip_task(task, run_id, store, runner, task_statuses)
+            result = self._run_or_skip_task(task, run_id, store, runner, context, task_statuses)
             if result.status == "failed" and first_error is None:
                 first_error = result.error or f"Task {task.task_id} failed"
         return first_error
@@ -187,6 +197,7 @@ class LocalEngine(BaseEngine):
         run_id: str,
         store: RunStore,
         runner: TaskRunner,
+        context: RuntimeTaskContext,
         task_statuses: dict[str, str],
         cancel_event: threading.Event,
     ) -> str | None:
@@ -236,15 +247,18 @@ class LocalEngine(BaseEngine):
                         continue
 
                     if any(status != "success" for status in dependency_statuses):
-                        result = self._skip_task(
+                        result = self._handle_upstream_failure(
                             task,
                             run_id,
                             store,
                             runner,
-                            "Skipped because one or more upstream tasks did not succeed.",
+                            dependency_statuses,
                         )
-                        task_statuses[task.task_id] = result.status
-                        continue
+                        if result is not None:
+                            task_statuses[task.task_id] = result.status
+                            if result.status == "failed" and first_error is None:
+                                first_error = result.error or f"Task {task.task_id} failed"
+                            continue
 
                     in_flight[executor.submit(self._execute_task, task, run_id, store, runner)] = task
 
@@ -266,6 +280,7 @@ class LocalEngine(BaseEngine):
                         error=result.error,
                     )
                     task_statuses[task.task_id] = result.status
+                    self._capture_successful_output(task, run_id, store, runner, context, result)
                     if result.status == "failed" and first_error is None:
                         first_error = result.error or f"Task {task.task_id} failed"
 
@@ -277,6 +292,7 @@ class LocalEngine(BaseEngine):
         run_id: str,
         store: RunStore,
         runner: TaskRunner,
+        context: RuntimeTaskContext,
         task_statuses: dict[str, str],
     ) -> TaskExecutionResult:
         """Run one task in sequential mode or mark it skipped."""
@@ -287,15 +303,16 @@ class LocalEngine(BaseEngine):
             return result
 
         if any(status != "success" for status in dependency_statuses):
-            result = self._skip_task(
+            result = self._handle_upstream_failure(
                 task,
                 run_id,
                 store,
                 runner,
-                "Skipped because one or more upstream tasks did not succeed.",
+                dependency_statuses,
             )
-            task_statuses[task.task_id] = result.status
-            return result
+            if result is not None:
+                task_statuses[task.task_id] = result.status
+                return result
 
         result = self._execute_task(task, run_id, store, runner)
         store.finish_task_run(
@@ -306,7 +323,40 @@ class LocalEngine(BaseEngine):
             error=result.error,
         )
         task_statuses[task.task_id] = result.status
+        self._capture_successful_output(task, run_id, store, runner, context, result)
         return result
+
+    def _handle_upstream_failure(
+        self,
+        task: TaskDefinition,
+        run_id: str,
+        store: RunStore,
+        runner: TaskRunner,
+        dependency_statuses: list[str | None],
+    ) -> TaskExecutionResult | None:
+        """Apply task-level upstream failure behavior, preserving skip by default."""
+        failed_text = ", ".join(str(status) for status in dependency_statuses if status != "success")
+        if task.on_upstream_failure == "continue":
+            runner.emit(
+                f"Continuing despite upstream status: {failed_text}.",
+                task_id=task.task_id,
+            )
+            return None
+        if task.on_upstream_failure == "fail":
+            return self._fail_task(
+                task,
+                run_id,
+                store,
+                runner,
+                "Failed because one or more upstream tasks did not succeed.",
+            )
+        return self._skip_task(
+            task,
+            run_id,
+            store,
+            runner,
+            "Skipped because one or more upstream tasks did not succeed.",
+        )
 
     def _skip_task(
         self,
@@ -320,6 +370,36 @@ class LocalEngine(BaseEngine):
         runner.emit(reason, task_id=task.task_id)
         store.finish_task_run(run_id, task.task_id, status="skipped", error=reason)
         return TaskExecutionResult(status="skipped", error=reason)
+
+    def _fail_task(
+        self,
+        task: TaskDefinition,
+        run_id: str,
+        store: RunStore,
+        runner: TaskRunner,
+        reason: str,
+    ) -> TaskExecutionResult:
+        """Persist a dependency-induced task failure and emit its reason."""
+        runner.emit(reason, task_id=task.task_id)
+        store.finish_task_run(run_id, task.task_id, status="failed", exit_code=1, error=reason)
+        return TaskExecutionResult(status="failed", exit_code=1, error=reason)
+
+    def _capture_successful_output(
+        self,
+        task: TaskDefinition,
+        run_id: str,
+        store: RunStore,
+        runner: TaskRunner,
+        context: RuntimeTaskContext,
+        result: TaskExecutionResult,
+    ) -> None:
+        """Store successful task output in the runtime context and persisted metadata."""
+        if result.status != "success":
+            return
+        context.set_task_output(task.task_id, result.output)
+        output_record = store.record_task_output(run_id, task.task_id, result.output)
+        if output_record.preview:
+            runner.emit(f"Output captured: {output_record.preview}", task_id=task.task_id)
 
     def _cancel_task(
         self,

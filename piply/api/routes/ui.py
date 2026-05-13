@@ -33,6 +33,9 @@ def dashboard_page(request: Request) -> HTMLResponse:
             "stats": payload["stats"],
             "pipelines": payload["pipelines"],
             "recent_runs": payload["recent_runs"],
+            "recent_failures": payload["recent_failures"],
+            "active_pipelines": payload["active_pipelines"],
+            "runtime_trend": payload["runtime_trend"],
             "scheduler": payload["scheduler"],
             "page": "dashboard",
         },
@@ -111,6 +114,8 @@ def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
             "log_count": task.log_count,
             "duration_seconds": task.duration_seconds,
             "error": task.error,
+            "output_preview": task.output_preview,
+            "output_type": task.output_type,
         }
         for task in detail["latest_task_runs"]
     ]
@@ -186,6 +191,8 @@ def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
             "log_count": task.log_count,
             "duration_seconds": task.duration_seconds,
             "error": task.error,
+            "output_preview": task.output_preview,
+            "output_type": task.output_type,
         }
         for task in task_runs
     ]
@@ -224,5 +231,74 @@ def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
             "upcoming_run_payloads": upcoming_run_payloads,
             "scheduler": service.scheduler_snapshot(),
             "page": "runs",
+        },
+    )
+
+
+@router.get("/execution-matrix", response_class=HTMLResponse)
+def execution_matrix_page(
+    request: Request,
+    pipeline_id: str | None = None,
+    tenant: str | None = None,
+    status: str | None = None,
+) -> HTMLResponse:
+    """Render the execution matrix page."""
+    service = _service(request)
+    payload = service.execution_matrix(
+        pipeline_id=pipeline_id,
+        tenant_id=tenant,
+        status=status,
+    )
+    return _templates(request).TemplateResponse(
+        request,
+        "execution_matrix.html",
+        {
+            "project": service.project,
+            "matrix": payload,
+            "scheduler": service.scheduler_snapshot(),
+            "page": "matrix",
+        },
+    )
+
+
+@router.get("/logs", response_class=HTMLResponse)
+def logs_page(
+    request: Request,
+    q: str | None = None,
+    pipeline_id: str | None = None,
+    task_id: str | None = None,
+) -> HTMLResponse:
+    """Render searchable logs."""
+    service = _service(request)
+    return _templates(request).TemplateResponse(
+        request,
+        "logs.html",
+        {
+            "project": service.project,
+            "logs": service.search_logs(query=q, pipeline_id=pipeline_id, task_id=task_id),
+            "pipelines": service.list_pipelines(),
+            "query": q or "",
+            "selected_pipeline_id": pipeline_id or "",
+            "selected_task_id": task_id or "",
+            "scheduler": service.scheduler_snapshot(),
+            "page": "logs",
+        },
+    )
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request) -> HTMLResponse:
+    """Render lightweight settings and runtime configuration."""
+    service = _service(request)
+    payload = service.dashboard()
+    return _templates(request).TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "project": service.project,
+            "pipelines": payload["pipelines"],
+            "settings": payload["settings"],
+            "scheduler": payload["scheduler"],
+            "page": "settings",
         },
     )

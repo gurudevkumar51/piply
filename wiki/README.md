@@ -9,6 +9,7 @@ Piply is a lightweight DAG runner for script-heavy teams. It keeps the runtime s
 - dependency-aware execution
 - automatic schedule backfill through a durable internal queue
 - pipeline-to-pipeline triggers
+- pipeline-to-pipeline context passing (JSON outputs)
 - file and SQL sensors
 - retries, logs, and run history
 - packaged UI, API, and CLI
@@ -63,6 +64,10 @@ Each pipeline can define:
 - `sensors`
 - `tasks`
 
+Each task can also define:
+
+- `on_upstream_failure` (`skip`, `fail`, `continue`)
+
 ## Python Task Model
 
 Piply now treats file execution and callable execution as one task type:
@@ -86,6 +91,40 @@ Backward compatibility:
 
 - older `python_call` configs still load
 - new configs should use `type: python`
+
+## Output Passing
+
+Task outputs are captured and can be consumed by downstream tasks automatically:
+
+- Python callable tasks can declare a `context` parameter and read upstream outputs as `context["task_id"]`.
+- Captured outputs are stored as bounded metadata and JSON when the return value is JSON-serializable.
+
+Example:
+
+```yaml
+tasks:
+  extract_data:
+    type: python
+    path: pipelines/ops.py
+    function: extract_data
+  transform_data:
+    type: python
+    path: pipelines/ops.py
+    function: transform_data
+    depends_on: [extract_data]
+```
+
+```python
+def transform_data(context):
+    upstream = context["extract_data"]
+    return {"records": upstream["records"] + 1}
+```
+
+Pipeline-to-pipeline passing:
+
+- When `triggers_on_success` launches a downstream pipeline, JSON outputs from the upstream run are attached to the downstream run context.
+- Downstream callable tasks can read them via `context["task_id"]` and `context["upstream"]["task_id"]`.
+- CLI runs with `--wait` also finish downstream pipeline triggers inline, which keeps local smoke tests deterministic.
 
 ## Sensors
 
@@ -188,6 +227,12 @@ Current DAG pages support:
 - task actions from the selected node
 - log filtering by selected task on the run page
 
+Additional operator pages:
+
+- Execution Matrix (`/execution-matrix`): task rows x run columns grid with a run-duration trend header
+- Logs (`/logs`): search across recent runs
+- Settings (`/settings`): schedule pause/resume and runtime config visibility
+
 ## Working CLI Commands
 
 - `piply init`
@@ -206,10 +251,23 @@ Current DAG pages support:
 - `piply stop`
 - `piply ui`
 
+## Starter Project
+
+`piply init` creates:
+
+- `extract_flow`: runnable scheduled pipeline with Python callable output passing, CLI tasks, retry policy, and a downstream trigger
+- `report_flow`: runnable downstream pipeline that can read upstream JSON outputs through `context`
+- `operator_examples`: disabled reference pipeline for `cli`, `api`, `webhook`, `email`, and `ssh`
+- `sensor_examples`: disabled reference pipeline for `file_sensor` and `sql_sensor`
+- `pipelines/extract.py`, `pipelines/report.py`, and `sensor_inbox/`
+
 ## Roadmap Pointers
 
 - `piply logs --follow`
-- more SQL adapters
-- API or webhook polling sensors
+- richer queue and worker metrics
+- more SQL adapters and sensor types
+- API polling and webhook-trigger sensors
 - reusable task templates
 - external secret backends
+- plugin hooks for custom operators
+- optional distributed runner

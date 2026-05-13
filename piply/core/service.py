@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import inspect
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -60,11 +61,31 @@ class PipelineService:
         )
         self.store = RunStore(self.database_path)
         self.engine = engine or LocalEngine(heartbeat_interval_seconds=self.settings.heartbeat_interval_seconds)
+        self._engine_accepts_initial_context = self._detect_engine_initial_context_support()
+        self._dispatch_context = threading.local()
         self._project: ProjectDefinition | None = None
         self._config_mtime: float | None = None
         self._lock = threading.RLock()
         self.reconcile_runtime_health()
         self.reload_project(force=True)
+
+    def _detect_engine_initial_context_support(self) -> bool:
+        """Return whether the configured engine accepts initial runtime context."""
+        try:
+            signature = inspect.signature(self.engine.dispatch)
+        except (TypeError, ValueError):
+            return False
+        return (
+            "initial_context" in signature.parameters
+            or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+        )
+
+    def _should_wait_for_pipeline_triggers(self) -> bool:
+        """Return whether the current dispatch should finish downstream pipeline triggers inline."""
+        return bool(getattr(self._dispatch_context, "wait_for_pipeline_triggers", False))
 
     @property
     def project(self) -> ProjectDefinition:
@@ -330,6 +351,7 @@ class PipelineService:
         *,
         now: datetime | None = None,
         limit: int = 100,
+        wait_for_pipeline_triggers: bool = False,
     ) -> list[str]:
         """Dispatch due queue items while keeping per-pipeline order intact."""
         self.reconcile_runtime_health()
@@ -381,11 +403,43 @@ class PipelineService:
                         wait=False,
                     )
                 else:
+                    parent_run_id = (
+                        str(payload["source_run_id"])
+                        if isinstance(payload.get("source_run_id"), str)
+                        else None
+                    )
+                    parent_pipeline_id = (
+                        str(payload["source_pipeline_id"])
+                        if isinstance(payload.get("source_pipeline_id"), str)
+                        else None
+                    )
+                    tenant_id = (
+                        str(payload["tenant_id"])
+                        if isinstance(payload.get("tenant_id"), str)
+                        else None
+                    )
+                    initial_context: dict[str, object] = {}
+                    if isinstance(payload.get("context"), dict):
+                        initial_context.update(payload["context"])  # type: ignore[arg-type]
+                    if isinstance(payload.get("upstream"), dict):
+                        initial_context.setdefault("upstream", payload["upstream"])
+                    if parent_run_id is not None:
+                        initial_context.setdefault(
+                            "parent",
+                            {
+                                "run_id": parent_run_id,
+                                "pipeline_id": parent_pipeline_id,
+                            },
+                        )
                     run = self.trigger_pipeline(
                         item.pipeline_id,
                         trigger=item.trigger,
                         scheduled_for=item.scheduled_for,
-                        wait=False,
+                        wait=wait_for_pipeline_triggers and item.trigger == "pipeline",
+                        parent_run_id=parent_run_id,
+                        parent_pipeline_id=parent_pipeline_id,
+                        tenant_id=tenant_id,
+                        initial_context=initial_context,
                     )
                 self.store.mark_queue_dispatched(item.queue_id, run.run_id)
                 dispatched_run_ids.append(run.run_id)
@@ -430,11 +484,21 @@ class PipelineService:
         *,
         pipeline_id: str | None = None,
         status: str | None = None,
+        tenant_id: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
         limit: int = 50,
     ) -> list[RunRecord]:
         """Return recent runs with optional filters."""
         self.reconcile_runtime_health()
-        return self.store.list_runs(pipeline_id=pipeline_id, status=status, limit=limit)
+        return self.store.list_runs(
+            pipeline_id=pipeline_id,
+            status=status,
+            tenant_id=tenant_id,
+            created_after=created_after,
+            created_before=created_before,
+            limit=limit,
+        )
 
     def get_run(self, run_id: str):
         """Return one run, its task runs, and its raw logs."""
@@ -455,6 +519,28 @@ class PipelineService:
             "logs": logs,
             "upcoming_runs": self.list_upcoming_runs(run.pipeline_id, count=8),
         }
+
+    def get_task_detail(self, run_id: str, task_id: str) -> dict[str, object]:
+        """Return one task run with logs and output metadata."""
+        run, task_runs, _ = self.get_run(run_id)
+        task = next((item for item in task_runs if item.task_id == task_id), None)
+        if task is None:
+            raise KeyError(f"Unknown task '{task_id}' in run '{run_id}'")
+        logs = self.store.list_logs(run_id, limit=500, task_id=task_id)
+        return {
+            "run": run,
+            "task_run": task,
+            "logs": logs,
+            "output": self.store.get_task_output(run_id, task_id),
+        }
+
+    def get_task_output(self, run_id: str, task_id: str):
+        """Return one task output metadata record."""
+        self.get_task_detail(run_id, task_id)
+        output = self.store.get_task_output(run_id, task_id)
+        if output is None:
+            raise KeyError(f"No output captured for task '{task_id}' in run '{run_id}'")
+        return output
 
     def _clone_pipeline_with_command_overrides(
         self,
@@ -498,6 +584,35 @@ class PipelineService:
             retry_policy=RetryPolicy(),
         )
 
+    def _dispatch_engine(
+        self,
+        pipeline: PipelineDefinition,
+        run: RunRecord,
+        *,
+        wait: bool,
+        on_log: Callable[[str], None] | None,
+        initial_task_statuses: dict[str, str],
+        retry_source_run_id: str | None,
+        initial_context: dict[str, object] | None = None,
+    ) -> None:
+        """Dispatch a run while preserving compatibility with older custom engines."""
+        kwargs: dict[str, object] = {
+            "wait": wait,
+            "on_log": on_log,
+            "on_success": self._handle_pipeline_success,
+            "on_failure": self._handle_pipeline_failure,
+            "initial_task_statuses": initial_task_statuses,
+            "retry_source_run_id": retry_source_run_id,
+        }
+        if self._engine_accepts_initial_context:
+            kwargs["initial_context"] = initial_context or {}
+        previous_wait = self._should_wait_for_pipeline_triggers()
+        self._dispatch_context.wait_for_pipeline_triggers = previous_wait or wait
+        try:
+            self.engine.dispatch(pipeline, run, self.store, **kwargs)
+        finally:
+            self._dispatch_context.wait_for_pipeline_triggers = previous_wait
+
     def trigger_pipeline(
         self,
         pipeline_id: str,
@@ -511,6 +626,10 @@ class PipelineService:
         retry_task_id: str | None = None,
         initial_task_statuses: dict[str, str] | None = None,
         command_overrides: dict[str, str] | None = None,
+        parent_run_id: str | None = None,
+        parent_pipeline_id: str | None = None,
+        tenant_id: str | None = None,
+        initial_context: dict[str, object] | None = None,
     ) -> RunRecord:
         """Create and dispatch one new run for a pipeline."""
         self.reconcile_runtime_health()
@@ -531,17 +650,21 @@ class PipelineService:
                 retry_of=retry_of,
                 retry_mode=retry_mode,
                 retry_task_id=retry_task_id,
+                parent_run_id=parent_run_id,
+                parent_pipeline_id=parent_pipeline_id,
+                tenant_id=tenant_id,
             )
-            self.engine.dispatch(
+            dispatch_context = dict(initial_context or {})
+            if tenant_id is not None:
+                dispatch_context.setdefault("tenant_id", tenant_id)
+            self._dispatch_engine(
                 pipeline,
                 run,
-                self.store,
                 wait=wait,
                 on_log=on_log,
-                on_success=self._handle_pipeline_success,
-                on_failure=self._handle_pipeline_failure,
                 initial_task_statuses=initial_task_statuses or {},
                 retry_source_run_id=retry_of,
+                initial_context=dispatch_context,
             )
         except sqlite3.IntegrityError:
             if scheduled_for is not None:
@@ -570,16 +693,14 @@ class PipelineService:
             trigger=trigger,
             retry_task_id=task_id,
         )
-        self.engine.dispatch(
+        self._dispatch_engine(
             pipeline,
             run,
-            self.store,
             wait=wait,
             on_log=on_log,
-            on_success=self._handle_pipeline_success,
-            on_failure=self._handle_pipeline_failure,
             initial_task_statuses={},
             retry_source_run_id=None,
+            initial_context={},
         )
         return self.store.get_run(run.run_id) or run
 
@@ -613,6 +734,9 @@ class PipelineService:
             retry_of=previous_run.run_id,
             retry_mode=mode,
             retry_task_id=task_id,
+            parent_run_id=previous_run.parent_run_id,
+            parent_pipeline_id=previous_run.parent_pipeline_id,
+            tenant_id=previous_run.tenant_id,
         )
 
         if mode == "resume":
@@ -633,24 +757,33 @@ class PipelineService:
                 f"Retry created from run {previous_run.run_id} using startover mode.",
             )
 
-        self.engine.dispatch(
+        retry_context: dict[str, object] = {}
+        if previous_run.tenant_id is not None:
+            retry_context["tenant_id"] = previous_run.tenant_id
+        if mode == "resume":
+            retry_context.update(self.store.output_context_for_run(previous_run.run_id))
+
+        self._dispatch_engine(
             pipeline,
             retry_run,
-            self.store,
             wait=wait,
             on_log=on_log,
-            on_success=self._handle_pipeline_success,
-            on_failure=self._handle_pipeline_failure,
             initial_task_statuses=reused_task_statuses,
             retry_source_run_id=previous_run.run_id,
+            initial_context=retry_context,
         )
         return self.store.get_run(retry_run.run_id) or retry_run
 
     def _handle_pipeline_success(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Trigger downstream pipelines after a successful run completes."""
+        wait_for_pipeline_triggers = self._should_wait_for_pipeline_triggers()
         if not pipeline.triggers_on_success:
-            self.drain_trigger_queue(limit=20)
+            self.drain_trigger_queue(
+                limit=20,
+                wait_for_pipeline_triggers=wait_for_pipeline_triggers,
+            )
             return
+        output_context = self.store.output_context_for_run(run.run_id)
         for target in pipeline.triggers_on_success:
             self.store.append_log(
                 run.run_id,
@@ -662,11 +795,17 @@ class PipelineService:
                 payload={
                     "source_run_id": run.run_id,
                     "source_pipeline_id": pipeline.pipeline_id,
+                    "tenant_id": run.tenant_id,
+                    "context": output_context,
+                    "upstream": output_context,
                 },
                 source_key=run.run_id,
                 dedupe_key=f"pipeline:{run.run_id}:{target}",
             )
-        self.drain_trigger_queue(limit=20)
+        self.drain_trigger_queue(
+            limit=20,
+            wait_for_pipeline_triggers=wait_for_pipeline_triggers,
+        )
 
     def _retry_depth(self, run: RunRecord) -> int:
         """Return how many retry generations exist behind the supplied run."""
@@ -795,10 +934,116 @@ class PipelineService:
             "sensor_count": sum(pipeline.sensor_count for pipeline in self.project.pipelines.values()),
         }
 
+    def search_logs(
+        self,
+        *,
+        query: str | None = None,
+        pipeline_id: str | None = None,
+        task_id: str | None = None,
+        limit: int = 300,
+    ):
+        """Search recent log messages across runs."""
+        self.reconcile_runtime_health()
+        return self.store.search_logs(
+            query=query,
+            pipeline_id=pipeline_id,
+            task_id=task_id,
+            limit=limit,
+        )
+
+    def execution_matrix(
+        self,
+        *,
+        pipeline_id: str | None = None,
+        tenant_id: str | None = None,
+        status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        limit: int = 24,
+    ) -> dict[str, object]:
+        """Build an Airflow-style grid of tasks by recent pipeline runs."""
+        self.reconcile_runtime_health()
+        pipelines = self.list_pipelines()
+        selected_pipeline_id = pipeline_id
+        if selected_pipeline_id is None:
+            selected_pipeline_id = pipelines[0].pipeline_id if pipelines else None
+        if selected_pipeline_id is None:
+            return {"pipelines": [], "selected_pipeline_id": None, "runs": [], "rows": [], "trend": []}
+
+        pipeline = self.get_pipeline(selected_pipeline_id)
+        runs = self.list_runs(
+            pipeline_id=selected_pipeline_id,
+            status=status,
+            tenant_id=tenant_id,
+            created_after=date_from,
+            created_before=date_to,
+            limit=limit,
+        )
+        ordered_runs = list(reversed(runs))
+        task_runs_by_run = {
+            run.run_id: {task.task_id: task for task in self.store.list_task_runs(run.run_id)}
+            for run in ordered_runs
+        }
+        rows: list[dict[str, object]] = []
+        for task in pipeline.tasks.values():
+            cells = []
+            for run in ordered_runs:
+                task_run = task_runs_by_run.get(run.run_id, {}).get(task.task_id)
+                cells.append(
+                    {
+                        "run_id": run.run_id,
+                        "task_id": task.task_id,
+                        "status": task_run.status if task_run else "queued",
+                        "duration_seconds": task_run.duration_seconds if task_run else None,
+                        "log_count": task_run.log_count if task_run else 0,
+                        "error": task_run.error if task_run else None,
+                        "output_preview": task_run.output_preview if task_run else None,
+                    }
+                )
+            rows.append({"task": task, "cells": cells})
+
+        trend = [
+            {
+                "run_id": run.run_id,
+                "status": run.status,
+                "duration_seconds": run.duration_seconds or 0,
+                "created_at": run.created_at,
+            }
+            for run in ordered_runs
+        ]
+        return {
+            "pipelines": pipelines,
+            "selected_pipeline_id": selected_pipeline_id,
+            "runs": ordered_runs,
+            "rows": rows,
+            "trend": trend,
+            "filters": {
+                "tenant_id": tenant_id,
+                "status": status,
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+        }
+
+    def _runtime_trend(self, runs: list[RunRecord]) -> list[dict[str, object]]:
+        """Build compact run-duration trend points for dashboard charts."""
+        return [
+            {
+                "run_id": run.run_id,
+                "pipeline_id": run.pipeline_id,
+                "status": run.status,
+                "duration_seconds": run.duration_seconds or 0,
+                "created_at": run.created_at,
+            }
+            for run in reversed(runs[-12:])
+        ]
+
     def dashboard(self) -> dict[str, object]:
         """Return the dashboard payload shared by the API and UI."""
         self.reconcile_runtime_health()
         pipelines = self.list_pipelines()
+        recent_runs = self.store.list_runs(limit=10)
+        trend_runs = self.store.list_runs(limit=12)
         stats = self.store.get_stats(
             scheduled_pipeline_count=sum(
                 1 for pipeline in pipelines if pipeline.schedule_text != "Manual only"
@@ -813,7 +1058,10 @@ class PipelineService:
             },
             "stats": stats,
             "pipelines": pipelines,
-            "recent_runs": self.store.list_runs(limit=10),
+            "recent_runs": recent_runs,
+            "recent_failures": self.store.list_runs(status="failed", limit=5),
+            "active_pipelines": [pipeline for pipeline in pipelines if pipeline.active_runs > 0],
+            "runtime_trend": self._runtime_trend(trend_runs),
             "scheduler": self.scheduler_snapshot(),
             "settings": {
                 "auth_enabled": self.settings.auth_enabled,

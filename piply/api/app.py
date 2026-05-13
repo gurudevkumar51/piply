@@ -17,7 +17,7 @@ from piply.core.scheduler import PipelineScheduler
 from piply.core.service import PipelineService
 from piply.settings import PiplySettings, load_settings
 
-from .routes import dashboard, pipelines, runs, ui
+from .routes import dashboard, execution, pipelines, runs, ui
 
 
 def _ui_directory() -> Path:
@@ -85,6 +85,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
     app.include_router(ui.router)
     app.include_router(dashboard.router)
+    app.include_router(execution.router)
     app.include_router(pipelines.router)
     app.include_router(runs.router)
     return app

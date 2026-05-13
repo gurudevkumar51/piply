@@ -258,6 +258,9 @@ function renderRunInspector(taskId) {
     }
     const dependencyText = task.depends_on && task.depends_on.length ? task.depends_on.join(", ") : "none";
     const canRetryFromTask = currentRun.status === "failed" && (task.status === "failed" || task.status === "skipped");
+    const outputBlock = task.output_preview
+        ? `<div class="inspector-section"><div class="small-kicker">Output preview</div><pre class="code-block inspector-code">${escapeHtml(task.output_preview)}</pre></div>`
+        : "";
     const errorBlock = task.error ? `<p class="footer-note">${escapeHtml(task.error)}</p>` : "";
     inspector.innerHTML = `
         <div class="detail-label">Task focus</div>
@@ -280,6 +283,7 @@ function renderRunInspector(taskId) {
             <div class="small-kicker">Command or target</div>
             <pre class="code-block inspector-code">${escapeHtml(task.command_preview)}</pre>
         </div>
+        ${outputBlock}
         ${errorBlock}
         <div class="card-actions" style="margin-top:16px;">
             <button class="button secondary" onclick="filterLogsToTask('${task.task_id}')">Filter logs</button>
@@ -329,7 +333,7 @@ function renderTaskRuns(taskRuns) {
             selectedNodeId: selectedRunTaskId,
             clickableStatuses: ["queued", "running", "success", "failed", "skipped", "cancelled"],
             onNodeClick: (node) => {
-                focusRunTask(node.task_id, true, false);
+                focusRunTask(node.task_id, false, false);
             },
             defaultLayout: "flow",
         },

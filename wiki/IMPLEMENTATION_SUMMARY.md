@@ -22,11 +22,15 @@ The active implementation is built around:
 - pipeline-level retry policy with `resume` or `startover`
 - manual targeted retry through `piply tasks retry`
 - pipeline-to-pipeline triggers on success
+- pipeline-to-pipeline output/context passing for JSON outputs
+- CLI wait-mode dispatches downstream pipeline triggers inline for deterministic chained runs
 - queue-backed schedule backfill for missed slots
 - run cancellation
 - run and pipeline deletion
 - stale run reconciliation with heartbeats
 - queue dispatch requeue for abandoned dispatches
+- per-task upstream failure behavior (`skip`, `fail`, `continue`)
+- persisted task output metadata (`task_outputs`)
 
 ## Implemented Operator Features
 
@@ -54,6 +58,7 @@ The active implementation is built around:
 - config strings can expand secrets and connection values from `.env`
 - runtime settings fall back to defaults when omitted
 - common settings now include scheduler and queue tuning controls
+- `piply init` now scaffolds a runnable context-passing pipeline chain plus disabled operator and sensor examples
 
 ## UI State
 
@@ -68,6 +73,9 @@ Current UI behavior includes:
 - log filtering by selected task
 - upcoming runs preview
 - task-scoped execution from the pipeline page
+- execution matrix grid view (`/execution-matrix`)
+- searchable logs page (`/logs`)
+- settings page (`/settings`)
 
 ## Active Runtime Modules
 
@@ -98,6 +106,7 @@ HTTP and UI:
 - `piply/api/routes/dashboard.py`
 - `piply/api/routes/pipelines.py`
 - `piply/api/routes/runs.py`
+- `piply/api/routes/execution.py`
 - `piply/api/routes/ui.py`
 - `piply/api/schemas.py`
 - `piply/ui/static/app.js`
@@ -124,6 +133,8 @@ Current verification expectations:
 - CLI validation passes
 - demo run flow works
 - API task-run route works
+- API task detail + output routes work
+- execution matrix routes work
 - queue-backed scheduler and sensors stay covered by tests
 
 ## Working Commands
@@ -152,3 +163,6 @@ Current verification expectations:
 - API polling and webhook-trigger sensors
 - reusable task templates
 - external secret backends
+- plugin hooks for custom operators
+- artifact retention policies for large outputs
+- optional distributed runner

@@ -13,7 +13,8 @@
         </p>
         <div class="hero-actions">
             <a class="button primary" href="/pipelines">Browse pipelines</a>
-            <a class="button secondary" href="/runs">Inspect run history</a>
+            <a class="button secondary" href="/execution-matrix">Open matrix</a>
+            <a class="button ghost" href="/logs">Search logs</a>
         </div>
         <div class="hero-meta" style="margin-top:18px;">
             <span class="meta-pill">config {{ project.config_path }}</span>
@@ -110,32 +111,89 @@
         <article class="panel">
             <div class="panel-header">
                 <div>
-                    <h2 class="panel-title">Runtime posture</h2>
-                    <p class="panel-copy">Small on dependencies, but rich enough to orchestrate task graphs and downstream triggers.</p>
+                    <h2 class="panel-title">Runtime trend</h2>
+                    <p class="panel-copy">Recent run duration by completion order.</p>
                 </div>
             </div>
 
             <div class="stack">
-                <div class="detail-card">
-                    <div class="detail-label">Config file</div>
-                    <div class="detail-value mono path-value">{{ project.config_path }}</div>
+                <div class="runtime-chart" aria-label="Run duration trend">
+                    {% set max_duration = runtime_trend | map(attribute='duration_seconds') | max if runtime_trend else 0 %}
+                    {% for point in runtime_trend %}
+                    {% set height = 10 + (point.duration_seconds / max_duration * 120 if max_duration else 0) %}
+                    <a class="runtime-bar {{ point.status }}" href="/runs/{{ point.run_id }}" style="height: {{ height }}px;" title="{{ point.pipeline_id }} · {{ '%.1fs'|format(point.duration_seconds) }}"></a>
+                    {% endfor %}
                 </div>
                 <div class="detail-card">
-                    <div class="detail-label">Workspace</div>
-                    <div class="detail-value mono path-value">{{ project.workspace }}</div>
+                    <div class="detail-label">Active pipelines</div>
+                    <div class="detail-value">{{ active_pipelines|length }}</div>
+                    {% if active_pipelines %}
+                    <div class="tag-row" style="margin-top:10px;">
+                        {% for pipeline in active_pipelines %}
+                        <a class="tag" href="/pipelines/{{ pipeline.pipeline_id }}">{{ pipeline.pipeline_id }}</a>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                 </div>
                 <div class="detail-card">
-                    <div class="detail-label">Scheduler heartbeat</div>
-                    <div class="detail-value">{{ scheduler.heartbeat or "Waiting for first scheduler loop" }}</div>
-                </div>
-                <div class="detail-card">
-                    <div class="detail-label">Persistence</div>
+                    <div class="detail-label">Runtime config</div>
                     <div class="detail-value mono path-value">{{ scheduler.database_path }}</div>
                 </div>
-                <div class="detail-card">
-                    <div class="detail-label">Queue depth</div>
-                    <div class="detail-value">{{ scheduler.queue_depth or "0" }}</div>
+            </div>
+        </article>
+    </section>
+
+    <section class="layout-two">
+        <article class="panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Recent failures</h2>
+                    <p class="panel-copy">Failed runs that need operator attention.</p>
                 </div>
+                <a class="button ghost" href="/logs">Open logs</a>
+            </div>
+            {% if recent_failures %}
+            <div class="run-list">
+                {% for run in recent_failures %}
+                <article class="run-card">
+                    <div class="run-card-header">
+                        <div>
+                            <a class="card-title" href="/runs/{{ run.run_id }}">{{ run.pipeline_title }}</a>
+                            <p class="mono">{{ run.run_id }}</p>
+                        </div>
+                        <span class="status-badge failed">failed</span>
+                    </div>
+                    {% if run.error %}
+                    <p class="footer-note">{{ run.error }}</p>
+                    {% endif %}
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state">No recent failures.</div>
+            {% endif %}
+        </article>
+
+        <article class="panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Control shortcuts</h2>
+                    <p class="panel-copy">Operator views for repeated daily work.</p>
+                </div>
+            </div>
+            <div class="shortcut-grid">
+                <a class="detail-card shortcut-card" href="/execution-matrix">
+                    <div class="detail-label">Execution Matrix</div>
+                    <div class="detail-value">Grid view by task and run</div>
+                </a>
+                <a class="detail-card shortcut-card" href="/logs">
+                    <div class="detail-label">Logs</div>
+                    <div class="detail-value">Search across run output</div>
+                </a>
+                <a class="detail-card shortcut-card" href="/settings">
+                    <div class="detail-label">Settings</div>
+                    <div class="detail-value">Schedules and engine config</div>
+                </a>
             </div>
         </article>
     </section>
