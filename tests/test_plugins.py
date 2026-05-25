@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -21,6 +22,16 @@ class TokenHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
+
+
+def _write_native_executable(path: Path, *, windows_body: str, posix_body: str) -> Path:
+    """Create a tiny executable script that matches the current platform."""
+    if os.name == "nt":
+        path.write_text(windows_body, encoding="utf-8")
+    else:
+        path.write_text(posix_body, encoding="utf-8")
+        path.chmod(0o755)
+    return path
 
 
 def test_api_operator_sends_bearer_token(tmp_path: Path) -> None:
@@ -70,10 +81,10 @@ def test_api_operator_sends_bearer_token(tmp_path: Path) -> None:
 def test_ssh_operator_executes_configured_binary(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    fake_ssh = workspace / "fake_ssh.cmd"
-    fake_ssh.write_text(
-        "@echo off\r\necho fake ssh %*\r\nexit /b 0\r\n",
-        encoding="utf-8",
+    fake_ssh = _write_native_executable(
+        workspace / ("fake_ssh.cmd" if os.name == "nt" else "fake_ssh.sh"),
+        windows_body="@echo off\r\necho fake ssh %*\r\nexit /b 0\r\n",
+        posix_body="#!/usr/bin/env sh\necho fake ssh \"$@\"\nexit 0\n",
     )
 
     config_path = tmp_path / "piply.yaml"
@@ -155,10 +166,11 @@ def test_python_operator_runs_module_function(tmp_path: Path) -> None:
 def test_cli_operator_executes_batch_path(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    batch_file = workspace / "job.cmd"
-    batch_file.write_text(
-        "@echo off\r\necho batch-path-ok\r\nexit /b 0\r\n",
-        encoding="utf-8",
+    script_name = "job.cmd" if os.name == "nt" else "job.sh"
+    _write_native_executable(
+        workspace / script_name,
+        windows_body="@echo off\r\necho batch-path-ok\r\nexit /b 0\r\n",
+        posix_body="#!/usr/bin/env sh\necho batch-path-ok\nexit 0\n",
     )
 
     config_path = tmp_path / "piply.yaml"
@@ -173,7 +185,7 @@ def test_cli_operator_executes_batch_path(tmp_path: Path) -> None:
                 "    tasks:",
                 "      batch_task:",
                 "        type: cli",
-                "        path: job.cmd",
+                f"        path: {script_name}",
             ]
         ),
         encoding="utf-8",
