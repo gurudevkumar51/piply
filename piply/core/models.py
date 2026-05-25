@@ -13,7 +13,7 @@ TaskStatus = Literal["queued", "running", "success", "failed", "skipped", "cance
 TriggerType = Literal["manual", "schedule", "api", "pipeline", "retry", "sensor", "task"]
 TaskType = Literal["python", "cli", "api", "ssh", "email", "webhook"]
 RetryMode = Literal["startover", "resume"]
-SensorType = Literal["file_sensor", "sql_sensor"]
+SensorType = Literal["file_sensor", "sql_sensor", "api_sensor"]
 QueueStatus = Literal["queued", "dispatching", "dispatched", "failed"]
 UpstreamFailureBehavior = Literal["skip", "fail", "continue"]
 
@@ -76,6 +76,13 @@ class SensorDefinition:
     where: str | None = None
     ignore_existing: bool = True
     task_id: str | None = None
+    url: str | None = None
+    method: str = "GET"
+    headers: dict[str, str] = field(default_factory=dict)
+    body: str | None = None
+    token: str | None = None
+    expected_status: tuple[int, ...] = (200, 201, 202, 204)
+    cursor_path: str | None = None
     ssh_host: str | None = None
     ssh_user: str | None = None
     ssh_port: int = 22
@@ -99,6 +106,8 @@ class SensorDefinition:
             else:
                 target = self.path_source or (str(self.path) if self.path is not None else "<missing path>")
             return f"file_sensor {target} [{self.pattern}]"
+        if self.sensor_type == "api_sensor":
+            return f"api_sensor {self.method.upper()} {self.url or '<missing url>'}"
         database = self.connection or (str(self.database) if self.database is not None else "<missing database>")
         table = self.table or "<missing table>"
         return f"sql_sensor {database}:{table}"

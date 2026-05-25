@@ -40,7 +40,9 @@ def test_init_scaffolds_multitask_project(tmp_path: Path) -> None:
     assert project.pipelines["report_flow"].tasks["build_report"].call is not None
     assert project.pipelines["operator_examples"].enabled is False
     assert project.pipelines["sensor_examples"].enabled is False
-    assert project.pipelines["sensor_examples"].sensor_count == 2
+    assert project.pipelines["sensor_examples"].sensor_count == 3
+    assert project.pipelines["sensor_examples"].sensors["inbound_rows"].connection is not None
+    assert project.pipelines["sensor_examples"].sensors["external_api"].sensor_type == "api_sensor"
 
 
 def test_tasks_retry_cli_retries_from_selected_failed_task(tmp_path: Path) -> None:

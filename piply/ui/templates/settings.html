@@ -27,8 +27,27 @@
             <div class="detail-value">default workers {{ settings.default_max_parallel_tasks }}</div>
         </article>
         <article class="detail-card">
+            <div class="detail-label">Queue</div>
+            <div class="detail-value">{{ runtime_metrics.queue.due|default(0) }} due / {{ runtime_metrics.queue.queued|default(0) }} queued</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Workers</div>
+            <div class="detail-value">{{ runtime_metrics.workers.running_tasks|default(0) }} running / {{ runtime_metrics.workers.configured_task_capacity|default(0) }} capacity</div>
+        </article>
+    </section>
+
+    <section class="detail-grid">
+        <article class="detail-card">
             <div class="detail-label">Heartbeat</div>
             <div class="detail-value">{{ settings.heartbeat_interval_seconds }}s, stale after {{ settings.stale_run_timeout_seconds }}s</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Dispatch queue</div>
+            <div class="detail-value">batch {{ settings.queue_dispatch_batch_size }}, stale {{ settings.queue_dispatch_stale_seconds }}s</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Queue status</div>
+            <div class="detail-value">dispatching {{ runtime_metrics.queue.dispatching|default(0) }}, failed {{ runtime_metrics.queue.failed|default(0) }}</div>
         </article>
         <article class="detail-card">
             <div class="detail-label">Notifications</div>

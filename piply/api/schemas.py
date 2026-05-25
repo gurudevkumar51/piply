@@ -340,6 +340,8 @@ class SchedulerResponse(BaseModel):
     database_path: str
     queue_depth: int | None = None
     sensor_count: int | None = None
+    queue_metrics: dict[str, object] = Field(default_factory=dict)
+    worker_metrics: dict[str, object] = Field(default_factory=dict)
 
 
 class UpcomingRunResponse(BaseModel):
@@ -359,6 +361,7 @@ class DashboardResponse(BaseModel):
     recent_failures: list[RunResponse] = Field(default_factory=list)
     active_pipelines: list[PipelineResponse] = Field(default_factory=list)
     runtime_trend: list[dict[str, object]] = Field(default_factory=list)
+    runtime_metrics: dict[str, object] = Field(default_factory=dict)
     scheduler: SchedulerResponse
 
 

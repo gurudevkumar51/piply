@@ -29,6 +29,7 @@ The active implementation is built around:
 - run and pipeline deletion
 - stale run reconciliation with heartbeats
 - queue dispatch requeue for abandoned dispatches
+- queue and local worker metrics through `/api/metrics`, Dashboard, and Settings
 - per-task upstream failure behavior (`skip`, `fail`, `continue`)
 - persisted task output metadata (`task_outputs`)
 
@@ -49,6 +50,9 @@ The active implementation is built around:
 - `file_sensor` for SFTP URIs polled over SSH
 - `sql_sensor` for local SQLite paths
 - `sql_sensor` for connection-string based polling
+- `sql_sensor` connection refs through top-level `connections`
+- optional Postgres, MySQL/MariaDB, and MSSQL/ODBC adapters when drivers are installed
+- `api_sensor` for lightweight HTTP polling
 - optional task targeting inside sensor-triggered pipelines
 - sensor cursor persistence in SQLite
 
@@ -56,6 +60,8 @@ The active implementation is built around:
 
 - `.env` files are loaded without adding a third-party dependency
 - config strings can expand secrets and connection values from `.env`
+- `secrets` supports explicit env and file-backed secret values with `${secret:NAME}` references
+- `connections` supports reusable SQL connection strings for sensors
 - runtime settings fall back to defaults when omitted
 - common settings now include scheduler and queue tuning controls
 - `piply init` now scaffolds a runnable context-passing pipeline chain plus disabled operator and sensor examples
@@ -76,6 +82,7 @@ Current UI behavior includes:
 - execution matrix grid view (`/execution-matrix`)
 - searchable logs page (`/logs`)
 - settings page (`/settings`)
+- runtime metrics API (`/api/metrics`)
 
 ## Active Runtime Modules
 
@@ -91,6 +98,8 @@ Core:
 - `piply/core/retry.py`
 - `piply/core/graph.py`
 - `piply/core/sensors.py`
+- `piply/core/secrets.py`
+- `piply/core/sql_adapters.py`
 
 Execution:
 
@@ -118,8 +127,8 @@ HTTP and UI:
 
 Recent cleanup focused on keeping the project lean:
 
-- removed unused `profiles.py`
-- removed duplicate imports
+- removed checked-in `dist/` package artifacts
+- removed duplicate imports and stale examples
 - normalized Python callable execution under `type: python`
 - kept sensors and scheduling centered on SQLite-backed state instead of adding heavier queue infrastructure
 - continued using small focused modules instead of pushing more logic into giant files
@@ -135,6 +144,7 @@ Current verification expectations:
 - API task-run route works
 - API task detail + output routes work
 - execution matrix routes work
+- runtime metrics route works
 - queue-backed scheduler and sensors stay covered by tests
 
 ## Working Commands
@@ -158,11 +168,8 @@ Current verification expectations:
 ## Upcoming Commands And Todos
 
 - `piply logs --follow`
-- richer queue metrics and worker introspection
-- more SQL sensor adapters
-- API polling and webhook-trigger sensors
 - reusable task templates
-- external secret backends
+- managed secret-manager plugins
 - plugin hooks for custom operators
 - artifact retention policies for large outputs
 - optional distributed runner

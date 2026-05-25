@@ -888,8 +888,8 @@ select {
 
 .log-line {
     display: grid;
-    grid-template-columns: 118px 96px minmax(0, 1fr);
-    gap: 12px;
+    grid-template-columns: minmax(92px, 118px) minmax(86px, 132px) minmax(0, 1fr);
+    gap: 10px;
     padding: 10px 12px;
     border-radius: 12px;
     margin-bottom: 8px;
@@ -911,9 +911,14 @@ select {
 .log-task {
     font-family: var(--mono);
     color: var(--accent);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .log-message {
+    min-width: 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-break: break-word;

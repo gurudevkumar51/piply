@@ -20,7 +20,7 @@ from .graph import upstream_closure
 from .loader import discover_config, load_project
 from .models import PipelineDefinition, PipelineSummary, ProjectDefinition, RetryMode, RetryPolicy, RunRecord
 from .retry import build_retry_plan
-from .sensors import poll_file_sensor, poll_sql_sensor
+from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor
 from .store import RunStore
 
 
@@ -324,8 +324,10 @@ class PipelineService:
                 state = self.store.get_sensor_state(sensor_key)
                 if sensor.sensor_type == "file_sensor":
                     next_state, event = poll_file_sensor(sensor, state)
-                else:
+                elif sensor.sensor_type == "sql_sensor":
                     next_state, event = poll_sql_sensor(sensor, state)
+                else:
+                    next_state, event = poll_api_sensor(sensor, state)
                 self.store.set_sensor_state(sensor_key, next_state)
                 if event is None:
                     continue
@@ -465,6 +467,14 @@ class PipelineService:
                             run.run_id,
                             (
                                 f"Detected new rows in {payload.get('table')} "
+                                f"from cursor {payload.get('cursor_from')} to {payload.get('cursor_to')}."
+                            ),
+                        )
+                    if payload.get("sensor_type") == "api_sensor":
+                        self.store.append_log(
+                            run.run_id,
+                            (
+                                f"Detected API sensor change at {payload.get('url')} "
                                 f"from cursor {payload.get('cursor_from')} to {payload.get('cursor_to')}."
                             ),
                         )
@@ -923,8 +933,25 @@ class PipelineService:
         self.store.delete_pipeline_runs(pipeline_id)
         self.reload_project(force=True)
 
-    def scheduler_snapshot(self) -> dict[str, str | bool | int | None]:
-        """Return scheduler heartbeat and database metadata for the UI."""
+    def runtime_metrics(self) -> dict[str, object]:
+        """Return queue and local worker metrics for API/UI surfaces."""
+        queue_metrics = self.store.queue_metrics()
+        worker_metrics = self.store.worker_metrics()
+        configured_capacity = sum(
+            pipeline.max_parallel_tasks
+            for pipeline in self.project.pipelines.values()
+            if pipeline.enabled
+        )
+        worker_metrics["configured_task_capacity"] = configured_capacity
+        worker_metrics["default_task_capacity"] = self.settings.default_max_parallel_tasks
+        return {
+            "queue": queue_metrics,
+            "workers": worker_metrics,
+        }
+
+    def scheduler_snapshot(self) -> dict[str, object]:
+        """Return scheduler heartbeat, database metadata, and runtime counters for the UI."""
+        metrics = self.runtime_metrics()
         return {
             "running": self.store.get_meta("scheduler_running") == "true",
             "heartbeat": self.store.get_meta("scheduler_heartbeat"),
@@ -932,6 +959,8 @@ class PipelineService:
             "database_path": str(self.database_path),
             "queue_depth": self.store.count_queue(),
             "sensor_count": sum(pipeline.sensor_count for pipeline in self.project.pipelines.values()),
+            "queue_metrics": metrics["queue"],
+            "worker_metrics": metrics["workers"],
         }
 
     def search_logs(
@@ -1044,6 +1073,11 @@ class PipelineService:
         pipelines = self.list_pipelines()
         recent_runs = self.store.list_runs(limit=10)
         trend_runs = self.store.list_runs(limit=12)
+        scheduler = self.scheduler_snapshot()
+        runtime_metrics = {
+            "queue": scheduler.get("queue_metrics", {}),
+            "workers": scheduler.get("worker_metrics", {}),
+        }
         stats = self.store.get_stats(
             scheduled_pipeline_count=sum(
                 1 for pipeline in pipelines if pipeline.schedule_text != "Manual only"
@@ -1062,7 +1096,8 @@ class PipelineService:
             "recent_failures": self.store.list_runs(status="failed", limit=5),
             "active_pipelines": [pipeline for pipeline in pipelines if pipeline.active_runs > 0],
             "runtime_trend": self._runtime_trend(trend_runs),
-            "scheduler": self.scheduler_snapshot(),
+            "scheduler": scheduler,
+            "runtime_metrics": runtime_metrics,
             "settings": {
                 "auth_enabled": self.settings.auth_enabled,
                 "default_max_parallel_tasks": self.settings.default_max_parallel_tasks,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -83,6 +83,13 @@ def _expand_part(part: str, minimum: int, maximum: int) -> set[int]:
 class CronSchedule:
     expression: str
     timezone_name: str = "UTC"
+    _parts: tuple[str, ...] = field(init=False, repr=False)
+    _timezone: ZoneInfo = field(init=False, repr=False)
+    _minutes: set[int] = field(init=False, repr=False)
+    _hours: set[int] = field(init=False, repr=False)
+    _days: set[int] = field(init=False, repr=False)
+    _months: set[int] = field(init=False, repr=False)
+    _weekdays: set[int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         parts = self.expression.split()

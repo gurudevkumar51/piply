@@ -24,6 +24,12 @@ def _get_service(request: Request):
     return request.app.state.service
 
 
+@router.get("/api/metrics", response_model=dict[str, object])
+def get_runtime_metrics(request: Request) -> dict[str, object]:
+    """Return queue and local worker metrics."""
+    return _get_service(request).runtime_metrics()
+
+
 @router.get("/api/execution-matrix", response_model=ExecutionMatrixResponse)
 def get_execution_matrix(
     request: Request,

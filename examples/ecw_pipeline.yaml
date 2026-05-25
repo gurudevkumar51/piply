@@ -1,67 +1,63 @@
-pipeline:
-  name: ecw_data_pipeline
-  description: "Example multi-tenant ETL pipeline for ECW"
-  schedule: "0 2 * * *"  # Run daily at 2 AM
-  retries: 1
-  timeout: 7200  # 2 hours max
-  variables:
-    environment: "production"
-    data_source: "ecw_api"
+version: "1"
+title: ECW Data Pipeline Example
+workspace: .
 
-  tenants:
-    - practice1
-    - practice2
-    - practice3
+secrets:
+  backend: env
+  prefix: PIPLY_SECRET_
 
-  steps:
-    - name: extract_appointments
-      type: python
-      function: "pipelines.extract_appointments.main"
-      retries: 3
-      retry_delay: 60
-      timeout: 1800
-      depends_on: []
+connections:
+  warehouse: ${secret:WAREHOUSE_DSN}
 
-    - name: extract_patients
-      type: python
-      function: "pipelines.extract_patients.main"
-      retries: 3
-      retry_delay: 60
-      timeout: 1800
-      depends_on: []
+pipelines:
+  ecw_data_pipeline:
+    title: ECW Data Pipeline
+    description: Multi-step ETL example with parallel extracts, validation, load, and notification.
+    schedule:
+      cron: "0 2 * * *"
+      timezone: UTC
+    retry:
+      attempts: 1
+      mode: resume
+      delay_seconds: 60
+    max_parallel_tasks: 3
+    tags: [ecw, etl]
+    sensors:
+      warehouse_rows:
+        type: sql_sensor
+        connection_ref: warehouse
+        table: inbound_events
+        cursor_column: id
+        ignore_existing: true
+    tasks:
+      extract_appointments:
+        type: python
+        module: pipelines.extract_appointments
+        function: main
 
-    - name: transform_data
-      type: shell
-      command: "python pipelines/transform.py"
-      retries: 2
-      retry_delay: 120
-      depends_on:
-        - extract_appointments
-        - extract_patients
+      extract_patients:
+        type: python
+        module: pipelines.extract_patients
+        function: main
 
-    - name: validate_data
-      type: dbt
-      command: "test"
-      select: "tag:validation"
-      retries: 1
-      depends_on:
-        - transform_data
+      transform_data:
+        type: cli
+        command: python pipelines/transform.py
+        depends_on: [extract_appointments, extract_patients]
 
-    - name: load_to_warehouse
-      type: dbt
-      command: "run"
-      models:
-        - "staging"
-        - "intermediate"
-        - "marts"
-      retries: 2
-      retry_delay: 120
-      depends_on:
-        - validate_data
+      validate_data:
+        type: cli
+        command: dbt test --select tag:validation
+        depends_on: [transform_data]
 
-    - name: send_report
-      type: python
-      function: "pipelines.report.send_completion_report"
-      retries: 1
-      depends_on:
-        - load_to_warehouse
+      load_to_warehouse:
+        type: cli
+        command: dbt run --select staging intermediate marts
+        depends_on: [validate_data]
+
+      send_report:
+        type: python
+        module: pipelines.report
+        function: send_completion_report
+        depends_on: [load_to_warehouse]
+        on_upstream_failure: fail

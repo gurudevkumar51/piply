@@ -36,6 +36,7 @@ def dashboard_page(request: Request) -> HTMLResponse:
             "recent_failures": payload["recent_failures"],
             "active_pipelines": payload["active_pipelines"],
             "runtime_trend": payload["runtime_trend"],
+            "runtime_metrics": payload["runtime_metrics"],
             "scheduler": payload["scheduler"],
             "page": "dashboard",
         },
@@ -299,6 +300,7 @@ def settings_page(request: Request) -> HTMLResponse:
             "pipelines": payload["pipelines"],
             "settings": payload["settings"],
             "scheduler": payload["scheduler"],
+            "runtime_metrics": payload["runtime_metrics"],
             "page": "settings",
         },
     )

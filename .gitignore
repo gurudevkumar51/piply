@@ -41,9 +41,14 @@ logs/
 
 # Testing
 .pytest_cache/
+.pytest_tmp/
+pytest_tmp*/
+pytest_basetemp*/
 .coverage
 htmlcov/
 .tox/
+dist/
+build/
 
 # Prefect
 .flow/

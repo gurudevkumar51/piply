@@ -1,18 +1,18 @@
-pipeline:
-  name: simple_test_pipeline
-  steps:
-    - name: step1
-      type: python
-      function: "pipelines.extract_appointments.main"
+version: "1"
+title: Simple Piply Example
+workspace: ../piply-demo
 
-    - name: step2
-      type: shell
-      command: "echo 'Step 2 completed'"
-      depends_on:
-        - step1
+pipelines:
+  simple_test_pipeline:
+    title: Simple Test Pipeline
+    description: Minimal two-step pipeline using current Piply YAML.
+    tasks:
+      step1:
+        type: python
+        path: pipelines/extract.py
+        function: extract_data
 
-    - name: step3
-      type: python
-      function: "pipelines.report.send_completion_report"
-      depends_on:
-        - step2
+      step2:
+        type: cli
+        command: python -c "print('Step 2 completed')"
+        depends_on: [step1]

@@ -10,8 +10,10 @@ Piply is a lightweight DAG runner for script-heavy teams. It keeps the runtime s
 - automatic schedule backfill through a durable internal queue
 - pipeline-to-pipeline triggers
 - pipeline-to-pipeline context passing (JSON outputs)
-- file and SQL sensors
+- file, SQL, and API sensors
+- reusable SQL connections and explicit secret references
 - retries, logs, and run history
+- queue and local worker metrics
 - packaged UI, API, and CLI
 
 ## Architecture
@@ -50,6 +52,8 @@ Top-level fields:
 - `workspace`
 - `timezone`
 - `defaults`
+- `secrets`
+- `connections`
 - `pipelines`
 
 Each pipeline can define:
@@ -153,21 +157,40 @@ Supports:
 
 - local SQLite file paths through `database`
 - connection-string driven behavior through `connection`
+- reusable top-level connection strings through `connection_ref`
+- SQLite, Postgres, MySQL/MariaDB, and MSSQL/ODBC schemes when the matching optional driver is installed
 
 Example:
 
 ```yaml
+connections:
+  warehouse: ${secret:WAREHOUSE_DSN}
+
 sensors:
   inbound_rows:
     type: sql_sensor
-    connection: ${APP_DB_URL}
+    connection_ref: warehouse
     table: inbound_events
     cursor_column: id
 ```
 
 SQLite works without any extra dependency. Other database backends can work when the matching driver is already installed in the project environment.
 
-## Secrets And `.env`
+### API Sensor
+
+API sensors poll an HTTP endpoint and trigger when a cursor path or response digest changes.
+
+```yaml
+sensors:
+  remote_events:
+    type: api_sensor
+    url: https://example.com/events
+    method: GET
+    cursor_path: version
+    expected_status: [200]
+```
+
+## Secrets, Connections, And `.env`
 
 Piply expands `.env` and process environment variables through the loader, so end users can keep values like these out of YAML:
 
@@ -184,6 +207,18 @@ APP_DB_URL=postgresql://app_user:secret@db-host:5432/app
 SMTP_PASSWORD=change-me
 SSH_KEY_PATH=C:/keys/demo_id_rsa
 SFTP_INBOX=sftp://demo@example.com/incoming
+```
+
+Root-level secret backends keep references explicit:
+
+```yaml
+secrets:
+  backend: env
+  prefix: PIPLY_SECRET_
+
+connections:
+  app_db: ${secret:APP_DB_URL}
+  local_sensor_db: sqlite:///sensor_demo.db
 ```
 
 ## Runtime Settings
@@ -213,6 +248,7 @@ Scheduler robustness comes from the internal queue:
 - dispatch is FIFO per pipeline
 - active runs act as backpressure
 - stale dispatches are re-queued
+- `/api/metrics`, Dashboard, and Settings expose queue depth, due items, dispatching items, failed queue items, running tasks, queued tasks, and configured task capacity
 
 ## UI Notes
 
@@ -231,7 +267,7 @@ Additional operator pages:
 
 - Execution Matrix (`/execution-matrix`): task rows x run columns grid with a run-duration trend header
 - Logs (`/logs`): search across recent runs
-- Settings (`/settings`): schedule pause/resume and runtime config visibility
+- Settings (`/settings`): schedule pause/resume, queue metrics, worker metrics, and runtime config visibility
 
 ## Working CLI Commands
 
@@ -258,16 +294,15 @@ Additional operator pages:
 - `extract_flow`: runnable scheduled pipeline with Python callable output passing, CLI tasks, retry policy, and a downstream trigger
 - `report_flow`: runnable downstream pipeline that can read upstream JSON outputs through `context`
 - `operator_examples`: disabled reference pipeline for `cli`, `api`, `webhook`, `email`, and `ssh`
-- `sensor_examples`: disabled reference pipeline for `file_sensor` and `sql_sensor`
+- `sensor_examples`: disabled reference pipeline for `file_sensor`, `sql_sensor`, and `api_sensor`
 - `pipelines/extract.py`, `pipelines/report.py`, and `sensor_inbox/`
 
 ## Roadmap Pointers
 
 - `piply logs --follow`
-- richer queue and worker metrics
-- more SQL adapters and sensor types
-- API polling and webhook-trigger sensors
 - reusable task templates
-- external secret backends
+- managed secret-manager plugins
 - plugin hooks for custom operators
 - optional distributed runner
+
+See `USAGE_GUIDE.md` for full YAML examples and every CLI command.

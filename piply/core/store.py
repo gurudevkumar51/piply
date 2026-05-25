@@ -1057,6 +1057,60 @@ class RunStore:
             ).fetchone()
         return int(row["count"] or 0)
 
+    def queue_metrics(self, *, now: datetime | None = None) -> dict[str, int | float | None]:
+        """Return queue status counts and lightweight latency metrics."""
+        current = now or datetime.now(timezone.utc)
+        current_iso = _to_iso(current)
+        metrics: dict[str, int | float | None] = {
+            "queued": 0,
+            "due": 0,
+            "dispatching": 0,
+            "dispatched": 0,
+            "failed": 0,
+            "oldest_queued_age_seconds": None,
+        }
+        with self._connect() as connection:
+            for row in connection.execute(
+                "SELECT status, COUNT(*) AS count FROM trigger_queue GROUP BY status"
+            ).fetchall():
+                metrics[str(row["status"])] = int(row["count"] or 0)
+            due_row = connection.execute(
+                """
+                SELECT COUNT(*) AS count, MIN(available_at) AS oldest_available_at
+                FROM trigger_queue
+                WHERE status = 'queued' AND available_at <= ?
+                """,
+                (current_iso,),
+            ).fetchone()
+
+        metrics["due"] = int(due_row["count"] or 0)
+        oldest = _from_iso(due_row["oldest_available_at"])
+        if oldest is not None:
+            metrics["oldest_queued_age_seconds"] = max(
+                0.0,
+                (current - oldest).total_seconds(),
+            )
+        return metrics
+
+    def worker_metrics(self) -> dict[str, int]:
+        """Return active run/task counts for the local worker engine."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM runs WHERE status = 'running') AS running_runs,
+                    (SELECT COUNT(*) FROM runs WHERE status = 'queued') AS queued_runs,
+                    (SELECT COUNT(*) FROM task_runs WHERE status = 'running') AS running_tasks,
+                    (SELECT COUNT(*) FROM task_runs WHERE status = 'queued') AS queued_tasks
+                """
+            ).fetchone()
+        return {
+            "running_runs": int(row["running_runs"] or 0),
+            "queued_runs": int(row["queued_runs"] or 0),
+            "running_tasks": int(row["running_tasks"] or 0),
+            "queued_tasks": int(row["queued_tasks"] or 0),
+        }
+
     def get_sensor_state(self, sensor_key: str) -> dict[str, object] | None:
         """Load one persisted sensor cursor or snapshot state."""
         with self._connect() as connection:

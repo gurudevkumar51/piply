@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
+import json
 import shlex
-import sqlite3
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from .models import SensorDefinition
+from .sql_adapters import connect_sql, mask_connection_secret
 
 
 @dataclass(slots=True)
@@ -29,20 +30,6 @@ def _hash_parts(parts: list[str]) -> str:
     digest = hashlib.sha1()
     digest.update("\n".join(parts).encode("utf-8"))
     return digest.hexdigest()
-
-
-def _mask_connection_secret(value: str | None) -> str | None:
-    """Redact passwords from connection strings before surfacing them in logs."""
-    if not value:
-        return value
-    parsed = urlparse(value)
-    if not parsed.scheme or parsed.password is None:
-        return value
-    username = parsed.username or ""
-    host = parsed.hostname or ""
-    port = f":{parsed.port}" if parsed.port else ""
-    auth = f"{username}:***@" if username else ""
-    return parsed._replace(netloc=f"{auth}{host}{port}").geturl()
 
 
 def _iter_local_sensor_files(sensor: SensorDefinition) -> list[str]:
@@ -150,55 +137,17 @@ def poll_file_sensor(
     )
 
 
-def _sqlite_path_from_connection(connection: str) -> Path | None:
-    """Resolve a sqlite:/// connection string into a filesystem path."""
-    parsed = urlparse(connection)
-    if parsed.scheme.lower() not in {"sqlite", "sqlite3", "sqlite+pysqlite"}:
-        return None
-    raw_path = unquote(parsed.path or "")
-    if parsed.netloc and not raw_path.startswith("/"):
-        raw_path = f"/{raw_path}"
-    if raw_path.startswith("/") and len(raw_path) > 2 and raw_path[2] == ":":
-        raw_path = raw_path[1:]
-    if not raw_path:
-        return None
-    return Path(raw_path)
-
-
-def _connect_sql_sensor(sensor: SensorDefinition):
-    """Open the lightest available DB-API connection for a SQL sensor."""
-    if sensor.connection:
-        parsed = urlparse(sensor.connection)
-        scheme = parsed.scheme.lower()
-        if scheme in {"sqlite", "sqlite3", "sqlite+pysqlite"}:
-            sqlite_path = _sqlite_path_from_connection(sensor.connection)
-            if sqlite_path is None:
-                raise RuntimeError("Invalid sqlite connection string")
-            return sqlite3.connect(sqlite_path)
-        if scheme in {"postgres", "postgresql"}:
-            try:
-                psycopg = importlib.import_module("psycopg")
-                return psycopg.connect(sensor.connection)
-            except ImportError:
-                psycopg2 = importlib.import_module("psycopg2")
-                return psycopg2.connect(sensor.connection)
-        if scheme in {"mysql", "mysql+pymysql", "mariadb"}:
-            pymysql = importlib.import_module("pymysql")
-            return pymysql.connect(
-                host=parsed.hostname or "localhost",
-                port=parsed.port or 3306,
-                user=parsed.username,
-                password=parsed.password,
-                database=parsed.path.lstrip("/") or None,
-            )
-        if scheme in {"mssql", "sqlserver"}:
-            pyodbc = importlib.import_module("pyodbc")
-            return pyodbc.connect(sensor.connection)
-        raise RuntimeError(f"Unsupported sql_sensor connection scheme '{scheme or '<none>'}'")
-
-    if sensor.database is None or not sensor.database.exists():
-        return None
-    return sqlite3.connect(sensor.database)
+def _is_sql_name_path(value: str) -> bool:
+    """Validate simple table and column identifiers before interpolating SQL."""
+    if not value:
+        return False
+    parts = value.split(".")
+    return all(
+        bool(part)
+        and part.replace("_", "").replace("$", "").isalnum()
+        and not part[0].isdigit()
+        for part in parts
+    )
 
 
 def _read_sql_cursor(sensor: SensorDefinition) -> tuple[int, int]:
@@ -206,7 +155,10 @@ def _read_sql_cursor(sensor: SensorDefinition) -> tuple[int, int]:
     if sensor.table is None:
         return 0, 0
 
-    connection = _connect_sql_sensor(sensor)
+    if not _is_sql_name_path(sensor.table) or not _is_sql_name_path(sensor.cursor_column):
+        raise RuntimeError("sql_sensor table and cursor_column must be simple identifiers")
+
+    connection = connect_sql(sensor.connection, database=sensor.database)
     if connection is None:
         return 0, 0
 
@@ -244,7 +196,7 @@ def poll_sql_sensor(
         return previous_state, None
 
     database_label = (
-        _mask_connection_secret(sensor.connection)
+        mask_connection_secret(sensor.connection)
         or (str(sensor.database) if sensor.database is not None else None)
     )
     return (
@@ -262,5 +214,118 @@ def poll_sql_sensor(
                 "cursor_to": current_cursor,
                 "row_count": row_count,
             },
+        ),
+    )
+
+
+def _mask_url_secret(value: str | None) -> str | None:
+    """Mask userinfo in API sensor URLs before recording payload metadata."""
+    if not value:
+        return value
+    parsed = urlparse(value)
+    if not parsed.scheme or parsed.password is None:
+        return value
+    username = parsed.username or ""
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    auth = f"{username}:***@" if username else ""
+    return parsed._replace(netloc=f"{auth}{host}{port}").geturl()
+
+
+def _extract_json_path(value: Any, path: str | None) -> Any:
+    """Extract a dotted JSON path from an API response body."""
+    if not path:
+        return None
+    current = value
+    for part in path.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit():
+            index = int(part)
+            current = current[index] if index < len(current) else None
+        else:
+            return None
+    return current
+
+
+def _response_cursor(response_text: str, cursor_path: str | None) -> tuple[str, Any | None]:
+    """Return a stable API cursor from a JSON path or response digest."""
+    parsed_json: Any | None = None
+    try:
+        parsed_json = json.loads(response_text)
+    except json.JSONDecodeError:
+        parsed_json = None
+
+    if cursor_path and parsed_json is not None:
+        cursor_value = _extract_json_path(parsed_json, cursor_path)
+        if cursor_value is not None:
+            return str(cursor_value), parsed_json
+
+    if isinstance(parsed_json, dict):
+        for candidate in ("cursor", "version", "updated_at", "last_modified", "id", "count"):
+            if parsed_json.get(candidate) is not None:
+                return str(parsed_json[candidate]), parsed_json
+    if isinstance(parsed_json, list):
+        return _hash_parts([json.dumps(parsed_json, sort_keys=True, default=str)]), parsed_json
+    return _hash_parts([response_text]), parsed_json
+
+
+def poll_api_sensor(
+    sensor: SensorDefinition,
+    state: dict[str, Any] | None,
+) -> tuple[dict[str, Any], SensorEvent | None]:
+    """Poll an HTTP endpoint and emit an event when its cursor or body digest changes."""
+    if not sensor.url:
+        return state or {"cursor": ""}, None
+
+    headers = dict(sensor.headers)
+    if sensor.token and "Authorization" not in headers:
+        headers["Authorization"] = f"Bearer {sensor.token}"
+
+    data = sensor.body.encode("utf-8") if sensor.body is not None else None
+    request = Request(sensor.url, data=data, headers=headers, method=sensor.method.upper())
+    try:
+        with urlopen(request, timeout=max(sensor.connect_timeout, 2)) as response:
+            status_code = int(response.status)
+            response_text = response.read(1_048_576).decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        if exc.code not in sensor.expected_status:
+            return state or {"cursor": ""}, None
+        status_code = int(exc.code)
+        response_text = exc.read(1_048_576).decode("utf-8", errors="replace")
+    except (OSError, URLError):
+        return state or {"cursor": ""}, None
+
+    if status_code not in sensor.expected_status:
+        return state or {"cursor": ""}, None
+
+    current_cursor, parsed_json = _response_cursor(response_text, sensor.cursor_path)
+    previous_cursor = str((state or {}).get("cursor") or "")
+    next_state = {"cursor": current_cursor, "status_code": status_code}
+    if not state and sensor.ignore_existing:
+        return next_state, None
+    if current_cursor == previous_cursor:
+        return next_state, None
+
+    payload: dict[str, Any] = {
+        "sensor_id": sensor.sensor_id,
+        "sensor_type": sensor.sensor_type,
+        "url": _mask_url_secret(sensor.url),
+        "method": sensor.method.upper(),
+        "status_code": status_code,
+        "cursor_from": previous_cursor,
+        "cursor_to": current_cursor,
+    }
+    if parsed_json is not None:
+        payload["json"] = parsed_json
+    else:
+        payload["response_preview"] = response_text[:500]
+
+    return (
+        next_state,
+        SensorEvent(
+            sensor_id=sensor.sensor_id,
+            source_key=current_cursor,
+            payload=payload,
         ),
     )

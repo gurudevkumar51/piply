@@ -22,6 +22,7 @@ from .models import (
     UpstreamFailureBehavior,
 )
 from .scheduling import CronSchedule, IntervalSchedule, ScheduleError, parse_interval
+from .secrets import load_secret_values, secret_env_aliases
 
 
 class ConfigError(ValueError):
@@ -265,6 +266,75 @@ def _parse_sftp_location(value: str) -> dict[str, object]:
     }
 
 
+def _resolve_connection_value(
+    raw_value: Any,
+    *,
+    env_values: dict[str, str],
+    connections: dict[str, str],
+) -> str | None:
+    """Resolve a SQL connection value from env, secrets, or global connections."""
+    if raw_value in (None, "", False):
+        return None
+    if isinstance(raw_value, dict):
+        for key in ("connection", "url", "database_url", "dsn"):
+            if raw_value.get(key) is not None:
+                return _expand_string(str(raw_value[key]), env_values)
+        if raw_value.get("env") is not None:
+            return env_values.get(str(raw_value["env"]))
+        if raw_value.get("secret") is not None:
+            secret_key = str(raw_value["secret"])
+            return env_values.get(f"secret:{secret_key}") or env_values.get(f"secret.{secret_key}")
+        if raw_value.get("ref") is not None:
+            return connections.get(str(raw_value["ref"]))
+        return None
+
+    value = _expand_string(str(raw_value), env_values)
+    if value.startswith("@"):
+        return connections.get(value[1:])
+    return value
+
+
+def _parse_connections(raw_value: Any, env_values: dict[str, str]) -> dict[str, str]:
+    """Parse root-level reusable connection strings."""
+    if raw_value in (None, "", False):
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ConfigError("connections must be a mapping")
+
+    connections: dict[str, str] = {}
+    for connection_id, raw_connection in raw_value.items():
+        connection_value = _resolve_connection_value(
+            raw_connection,
+            env_values=env_values,
+            connections=connections,
+        )
+        if connection_value:
+            connections[str(connection_id)] = connection_value
+    return connections
+
+
+def _normalize_sensor_connection(connection: str | None, workspace: Path) -> str | None:
+    """Resolve relative sqlite connection strings against the project workspace."""
+    if not connection:
+        return connection
+    parsed = urlparse(connection)
+    if parsed.scheme.lower() not in {"sqlite", "sqlite3", "sqlite+pysqlite"}:
+        return connection
+    raw_path = parsed.path or parsed.netloc
+    if not raw_path:
+        return connection
+    if raw_path in {":memory:", "/:memory:"}:
+        return f"{parsed.scheme}:///:memory:"
+    if raw_path.startswith("/") and not raw_path.startswith("//"):
+        raw_path = raw_path[1:]
+    if raw_path.startswith("//"):
+        raw_path = raw_path[1:]
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = (workspace / candidate).resolve()
+    return f"{parsed.scheme}:///{candidate.as_posix()}"
+
+
 def _parse_sensors(
     raw_value: Any,
     pipeline_id: str,
@@ -272,8 +342,9 @@ def _parse_sensors(
     workspace: Path,
     task_ids: set[str],
     env_values: dict[str, str],
+    connections: dict[str, str],
 ) -> dict[str, SensorDefinition]:
-    """Parse file and SQL sensor definitions for one pipeline."""
+    """Parse configured sensor definitions for one pipeline."""
     if raw_value in (None, "", False):
         return {}
 
@@ -300,7 +371,7 @@ def _parse_sensors(
             )
 
         sensor_type = str(raw_sensor.get("type") or "").strip().lower()
-        if sensor_type not in {"file_sensor", "sql_sensor"}:
+        if sensor_type not in {"file_sensor", "sql_sensor", "api_sensor"}:
             raise ConfigError(
                 f"Pipeline '{pipeline_id}' sensor '{sensor_id}' uses unsupported type '{sensor_type}'"
             )
@@ -362,10 +433,62 @@ def _parse_sensors(
                 )
             continue
 
+        if sensor_type == "api_sensor":
+            url = raw_sensor.get("url") or raw_sensor.get("endpoint")
+            if not url:
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' sensor '{sensor_id}' requires url for api_sensor"
+                )
+            raw_headers = _ensure_mapping(
+                raw_sensor.get("headers"),
+                f"Pipeline '{pipeline_id}' sensor '{sensor_id}' headers",
+            )
+            raw_expected = raw_sensor.get("expected_status", [200, 201, 202, 204])
+            expected_status = tuple(int(item) for item in _ensure_list(raw_expected, "expected_status"))
+            sensors[sensor_id] = SensorDefinition(
+                sensor_id=sensor_id,
+                sensor_type="api_sensor",
+                title=title,
+                enabled=enabled,
+                url=_expand_string(str(url), env_values),
+                method=_expand_string(str(raw_sensor.get("method") or "GET"), env_values).upper(),
+                headers={
+                    str(key): _expand_string(str(value), env_values)
+                    for key, value in raw_headers.items()
+                },
+                body=None if raw_sensor.get("body") is None else _expand_string(str(raw_sensor["body"]), env_values),
+                token=None if raw_sensor.get("token") is None else _expand_string(str(raw_sensor["token"]), env_values),
+                expected_status=expected_status,
+                cursor_path=None
+                if raw_sensor.get("cursor_path") is None
+                else _expand_string(str(raw_sensor["cursor_path"]), env_values),
+                ignore_existing=ignore_existing,
+                task_id=None if task_id is None else str(task_id),
+            )
+            continue
+
         connection_value = raw_sensor.get("connection") or raw_sensor.get("database_url") or raw_sensor.get("dsn")
+        connection_ref = (
+            raw_sensor.get("connection_ref")
+            or raw_sensor.get("connection_name")
+            or raw_sensor.get("connection_id")
+        )
+        if connection_value is not None and str(connection_value).startswith("@"):
+            connection_ref = str(connection_value)[1:]
+            connection_value = None
+        if connection_value is None and connection_ref is not None:
+            connection_value = connections.get(str(connection_ref))
+            if connection_value is None:
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' sensor '{sensor_id}' references unknown connection '{connection_ref}'"
+                )
         connection_env = raw_sensor.get("connection_env")
         if connection_value is None and connection_env is not None:
             connection_value = env_values.get(str(connection_env))
+        connection_value = _normalize_sensor_connection(
+            None if connection_value is None else _expand_string(str(connection_value), env_values),
+            workspace,
+        )
         database_value = raw_sensor.get("database") or raw_sensor.get("path")
         table = raw_sensor.get("table")
         if (not connection_value and not database_value) or not table:
@@ -381,7 +504,7 @@ def _parse_sensors(
             title=title,
             enabled=enabled,
             database=database_path,
-            connection=None if connection_value is None else _expand_string(str(connection_value), env_values),
+            connection=connection_value,
             table=_expand_string(str(table), env_values),
             cursor_column=_expand_string(str(raw_sensor.get("cursor_column") or "rowid"), env_values),
             where=None if raw_sensor.get("where") is None else _expand_string(str(raw_sensor.get("where")), env_values),
@@ -764,6 +887,13 @@ def load_project(
     if not workspace.exists():
         raise ConfigError(f"Configured workspace does not exist: {workspace}")
 
+    secret_values = load_secret_values(raw_data.get("secrets"), workspace=workspace, env_values=env_values)
+    if secret_values:
+        env_values = dict(env_values)
+        env_values.update(secret_env_aliases(secret_values))
+
+    connections = _parse_connections(raw_data.get("connections"), env_values)
+
     default_python = _expand_string(str(defaults.get("python") or sys.executable), env_values)
     default_env = {
         str(key): _expand_string(str(value), env_values)
@@ -849,6 +979,7 @@ def load_project(
             workspace=workspace,
             task_ids=set(tasks),
             env_values=env_values,
+            connections=connections,
         )
 
         triggers_on_success = tuple(

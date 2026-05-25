@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from piply.core.loader import load_project
+from piply.core.scheduling import CronSchedule
 
 
 def test_load_project_parses_multitask_pipeline_and_trigger(tmp_path: Path) -> None:
@@ -223,4 +224,58 @@ def test_load_project_expands_dotenv_for_sql_connection_and_sftp_sensor(tmp_path
     assert pipeline.sensors["landing_files"].ssh_host == "example.com"
     assert pipeline.sensors["landing_files"].ssh_user == "demo"
     assert pipeline.sensors["landing_files"].remote_path == "/inbox"
-    assert pipeline.sensors["inbound_rows"].connection == "sqlite:///sensor.db"
+    assert pipeline.sensors["inbound_rows"].connection is not None
+    assert pipeline.sensors["inbound_rows"].connection.endswith("/workspace/sensor.db")
+
+
+def test_load_project_resolves_secret_backed_connections_and_api_sensor(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Connection Workspace",
+                "workspace: workspace",
+                "secrets:",
+                "  values:",
+                "    APP_DB: sqlite:///sensor.db",
+                "connections:",
+                "  app_db: ${secret:APP_DB}",
+                "pipelines:",
+                "  watch_flow:",
+                "    sensors:",
+                "      inbound_rows:",
+                "        type: sql_sensor",
+                "        connection_ref: app_db",
+                "        table: inbound_events",
+                "      external_events:",
+                "        type: api_sensor",
+                "        url: https://example.com/events",
+                "        cursor_path: version",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["watch_flow"]
+
+    assert pipeline.sensor_count == 2
+    assert pipeline.sensors["inbound_rows"].connection is not None
+    assert pipeline.sensors["inbound_rows"].connection.endswith("/workspace/sensor.db")
+    assert pipeline.sensors["external_events"].sensor_type == "api_sensor"
+    assert pipeline.sensors["external_events"].cursor_path == "version"
+
+
+def test_cron_schedule_can_be_constructed_with_slots() -> None:
+    schedule = CronSchedule("0 2 * * *", timezone_name="UTC")
+
+    assert schedule.describe() == "Cron 0 2 * * * (UTC)"

@@ -109,7 +109,24 @@ Returns:
 - recent failures
 - active pipelines
 - runtime trend
-- scheduler snapshot
+- scheduler snapshot with queue and worker metrics
+
+### Metrics
+
+- `GET /api/metrics`
+
+Returns lightweight runtime counters:
+
+- queue counts by status
+- due queue items
+- oldest due queue age
+- running and queued runs
+- running and queued tasks
+- configured local task capacity
+
+```bash
+curl http://127.0.0.1:8000/api/metrics
+```
 
 ### Pipelines
 
@@ -248,6 +265,8 @@ The dashboard snapshot includes:
 - database path
 - queue depth
 - sensor count
+- `queue_metrics`
+- `worker_metrics`
 
 ## Storage
 
@@ -270,9 +289,6 @@ Important tables:
 ## Current Gaps And Planned Additions
 
 - `piply logs --follow`
-- richer worker metrics
-- more database adapters for SQL sensors
-- more sensor types beyond file and SQL
 - plugin hooks for custom operators
 - artifact retention policies for large task outputs
 - optional distributed runner while local mode remains the default

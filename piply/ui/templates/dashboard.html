@@ -136,6 +136,16 @@
                     {% endif %}
                 </div>
                 <div class="detail-card">
+                    <div class="detail-label">Queue</div>
+                    <div class="detail-value">{{ runtime_metrics.queue.due|default(0) }} due / {{ runtime_metrics.queue.queued|default(0) }} queued</div>
+                    <div class="footer-note">dispatching {{ runtime_metrics.queue.dispatching|default(0) }}, failed {{ runtime_metrics.queue.failed|default(0) }}</div>
+                </div>
+                <div class="detail-card">
+                    <div class="detail-label">Workers</div>
+                    <div class="detail-value">{{ runtime_metrics.workers.running_tasks|default(0) }} running tasks</div>
+                    <div class="footer-note">capacity {{ runtime_metrics.workers.configured_task_capacity|default(0) }}, queued tasks {{ runtime_metrics.workers.queued_tasks|default(0) }}</div>
+                </div>
+                <div class="detail-card">
                     <div class="detail-label">Runtime config</div>
                     <div class="detail-value mono path-value">{{ scheduler.database_path }}</div>
                 </div>

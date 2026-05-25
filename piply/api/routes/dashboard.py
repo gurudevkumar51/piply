@@ -32,5 +32,6 @@ def get_dashboard(request: Request) -> DashboardResponse:
         recent_failures=[RunResponse.from_record(item) for item in payload["recent_failures"]],
         active_pipelines=[PipelineResponse.from_summary(item) for item in payload["active_pipelines"]],
         runtime_trend=payload["runtime_trend"],
+        runtime_metrics=payload["runtime_metrics"],
         scheduler=SchedulerResponse(**payload["scheduler"]),
     )

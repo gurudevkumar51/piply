@@ -20,8 +20,10 @@ It is intentionally small:
 - Pipeline-to-pipeline JSON output passing
 - Per-task upstream failure behavior: `skip`, `fail`, or `continue`
 - Schedule backfill through an internal SQLite queue
-- File and SQL sensors
+- File, SQL, and API sensors
+- Reusable SQL connections and explicit secret references
 - Retries, resume-from-failure, cancellation, and logs
+- Queue and local worker metrics
 - Dashboard, Pipelines, Execution Matrix, Logs, Settings, and run detail pages
 
 ## Quick Start
@@ -52,6 +54,13 @@ version: "1"
 title: Piply Workspace
 workspace: .
 
+secrets:
+  backend: env
+  prefix: PIPLY_SECRET_
+
+connections:
+  app_db: sqlite:///sensor_demo.db
+
 pipelines:
   extract_flow:
     schedule:
@@ -63,6 +72,12 @@ pipelines:
     max_parallel_tasks: 2
     triggers_on_success:
       - report_flow
+    sensors:
+      inbound_rows:
+        type: sql_sensor
+        connection_ref: app_db
+        table: inbound_events
+        cursor_column: id
     tasks:
       extract:
         type: python
@@ -138,6 +153,7 @@ piply stop --config piply-demo/piply.yaml
 - `GET /api/runs/{run_id}/tasks/{task_id}/output`
 - `POST /api/runs/{run_id}/retry`
 - `POST /api/runs/{run_id}/tasks/{task_id}/retry`
+- `GET /api/metrics`
 - `GET /api/execution-matrix`
 - `GET /api/logs`
 
@@ -150,21 +166,15 @@ Piply runs locally and keeps state in SQLite. The scheduler materializes due sch
 Planned features:
 
 - `piply logs --follow`
-- richer queue and worker metrics
-- more SQL adapters and sensor types
-- API polling and webhook-trigger sensors
 - reusable task templates / profiles
-- external secret backends
 - plugin hooks for custom operators
 - UI controls for editing pipeline definitions safely
 - artifact retention policies for large outputs
 - optional distributed runner while keeping local mode as the default
-- For SQL sensor : As of now yaml is accepting "database: sensor_demo.db" which is not required. add an option to provide connection string or connection string variable with db type like postgres,sqlite,mysql etc and then provide a table name where if new records come then start the pipeline, 
-
-- And update all docs accordingly. Create a proper detailed piply usages document with all kind of examples of available feature, covering all the use cases and functionality, Additionaly list down all the piply command with features explained.
 
 ## More Docs
 
+- `wiki/USAGE_GUIDE.md`
 - `wiki/README.md`
 - `wiki/UI_API_GUIDE.md`
 - `wiki/IMPLEMENTATION_SUMMARY.md`
