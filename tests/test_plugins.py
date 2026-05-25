@@ -84,7 +84,7 @@ def test_ssh_operator_executes_configured_binary(tmp_path: Path) -> None:
     fake_ssh = _write_native_executable(
         workspace / ("fake_ssh.cmd" if os.name == "nt" else "fake_ssh.sh"),
         windows_body="@echo off\r\necho fake ssh %*\r\nexit /b 0\r\n",
-        posix_body="#!/usr/bin/env sh\necho fake ssh \"$@\"\nexit 0\n",
+        posix_body='#!/usr/bin/env sh\necho fake ssh "$@"\nexit 0\n',
     )
 
     config_path = tmp_path / "piply.yaml"
