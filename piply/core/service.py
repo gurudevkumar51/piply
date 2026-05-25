@@ -832,7 +832,7 @@ class PipelineService:
 
         self.store.append_log(
             run.run_id,
-            (f"Automatic retry {retry_depth + 1}/{retry_policy.attempts} queued " f"using {retry_policy.mode} mode."),
+            (f"Automatic retry {retry_depth + 1}/{retry_policy.attempts} queued using {retry_policy.mode} mode."),
         )
 
         self.enqueue_pipeline_trigger(
