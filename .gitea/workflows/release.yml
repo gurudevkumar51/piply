@@ -67,6 +67,18 @@ jobs:
           pytest
 
       # -------------------------
+      # Clean old artifacts
+      # -------------------------
+
+      - name: Clean old build artifacts
+        run: |
+          set -e
+
+          rm -rf dist/
+          rm -rf build/
+          find . -type d -name "*.egg-info" -exec rm -rf {} +
+
+      # -------------------------
       # Build package
       # -------------------------
 
