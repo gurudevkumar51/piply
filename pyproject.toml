@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "piply"
-version = "0.2.1"
+version = "0.0.1"
 description = "Lightweight Python script orchestration with a modular scheduler and polished UI"
 readme = "README.md"
 requires-python = ">=3.10"
