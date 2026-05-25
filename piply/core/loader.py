@@ -132,7 +132,8 @@ def _parse_schedule(raw_value: Any, timezone_name: str):
             timezone_name=str(raw_value.get("timezone", timezone_name)),
         )
 
-    raise ConfigError("schedule mappings must define one of: cron, every, interval_seconds")
+    raise ConfigError(
+        "schedule mappings must define one of: cron, every, interval_seconds")
 
 
 def _parse_execution(
@@ -163,7 +164,8 @@ def _parse_execution(
                 f"Pipeline '{pipeline_id}' execution must be a worker count, 'sequential', 'parallel', or a mapping"
             )
     elif isinstance(raw_value, dict):
-        mode = None if raw_value.get("mode") is None else str(raw_value.get("mode")).strip().lower()
+        mode = None if raw_value.get("mode") is None else str(
+            raw_value.get("mode")).strip().lower()
         max_parallel_tasks = int(
             raw_value.get(
                 "max_parallel_tasks",
@@ -171,12 +173,15 @@ def _parse_execution(
             )
         )
     else:
-        raise ConfigError(f"Pipeline '{pipeline_id}' execution must be an int, string, or mapping")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' execution must be an int, string, or mapping")
 
     if mode not in {None, "sequential", "parallel"}:
-        raise ConfigError(f"Pipeline '{pipeline_id}' execution mode must be 'sequential' or 'parallel'")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' execution mode must be 'sequential' or 'parallel'")
     if max_parallel_tasks < 1:
-        raise ConfigError(f"Pipeline '{pipeline_id}' max_parallel_tasks must be greater than zero")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' max_parallel_tasks must be greater than zero")
     if mode == "sequential":
         return 1
     return max_parallel_tasks
@@ -202,13 +207,17 @@ def _parse_retry_policy(raw_value: Any, pipeline_id: str) -> RetryPolicy:
 
     attempts = int(raw_value.get("attempts", raw_value.get("count", 0)))
     mode = str(raw_value.get("mode", "startover")).strip().lower()
-    delay_seconds = int(raw_value.get("delay_seconds", raw_value.get("delay", 0)))
+    delay_seconds = int(raw_value.get(
+        "delay_seconds", raw_value.get("delay", 0)))
     if attempts < 0:
-        raise ConfigError(f"Pipeline '{pipeline_id}' retry attempts must be zero or greater")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' retry attempts must be zero or greater")
     if mode not in {"resume", "startover"}:
-        raise ConfigError(f"Pipeline '{pipeline_id}' retry mode must be 'resume' or 'startover'")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' retry mode must be 'resume' or 'startover'")
     if delay_seconds < 0:
-        raise ConfigError(f"Pipeline '{pipeline_id}' retry delay_seconds must be zero or greater")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' retry delay_seconds must be zero or greater")
     return RetryPolicy(attempts=attempts, mode=mode, delay_seconds=delay_seconds)
 
 
@@ -217,7 +226,8 @@ def _parse_depends_on(raw_value: Any, label: str) -> tuple[str, ...]:
     depends_on = tuple(str(item) for item in _ensure_list(raw_value, label))
     for dependency in depends_on:
         if not TASK_ID_PATTERN.match(dependency):
-            raise ConfigError(f"{label} contains an invalid task id '{dependency}'")
+            raise ConfigError(
+                f"{label} contains an invalid task id '{dependency}'")
     return depends_on
 
 
@@ -226,7 +236,8 @@ def _parse_upstream_failure_behavior(raw_task: dict[str, Any], label: str) -> Up
     fail_flag = bool(raw_task.get("fail_if_upstream_failed", False))
     continue_flag = bool(raw_task.get("continue_if_upstream_failed", False))
     if fail_flag and continue_flag:
-        raise ConfigError(f"{label} cannot set both fail_if_upstream_failed and continue_if_upstream_failed")
+        raise ConfigError(
+            f"{label} cannot set both fail_if_upstream_failed and continue_if_upstream_failed")
     if fail_flag:
         return "fail"
     if continue_flag:
@@ -237,7 +248,8 @@ def _parse_upstream_failure_behavior(raw_task: dict[str, Any], label: str) -> Up
         return "skip"
     behavior = str(raw_value).strip().lower()
     if behavior not in {"skip", "fail", "continue"}:
-        raise ConfigError(f"{label} on_upstream_failure must be one of: skip, fail, continue")
+        raise ConfigError(
+            f"{label} on_upstream_failure must be one of: skip, fail, continue")
     return behavior  # type: ignore[return-value]
 
 
@@ -252,7 +264,8 @@ def _parse_sftp_location(value: str) -> dict[str, object]:
     if parsed.scheme.lower() != "sftp":
         raise ConfigError(f"Unsupported remote file sensor path '{value}'")
     if not parsed.hostname or not parsed.path:
-        raise ConfigError(f"SFTP sensor path '{value}' must include both host and remote path")
+        raise ConfigError(
+            f"SFTP sensor path '{value}' must include both host and remote path")
     return {
         "ssh_host": parsed.hostname,
         "ssh_user": parsed.username,
@@ -350,16 +363,20 @@ def _parse_sensors(
         raw_sensors = {}
         for index, item in enumerate(raw_value, start=1):
             if not isinstance(item, dict):
-                raise ConfigError(f"Pipeline '{pipeline_id}' sensors must contain mappings")
-            sensor_id = str(item.get("id") or item.get("name") or f"sensor_{index}")
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' sensors must contain mappings")
+            sensor_id = str(item.get("id") or item.get(
+                "name") or f"sensor_{index}")
             raw_sensors[sensor_id] = item
     else:
-        raise ConfigError(f"Pipeline '{pipeline_id}' sensors must be a mapping or list")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' sensors must be a mapping or list")
 
     sensors: dict[str, SensorDefinition] = {}
     for sensor_id, raw_sensor in raw_sensors.items():
         if not isinstance(raw_sensor, dict):
-            raise ConfigError(f"Pipeline '{pipeline_id}' sensor '{sensor_id}' must be a mapping")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' sensor '{sensor_id}' must be a mapping")
         if not TASK_ID_PATTERN.match(sensor_id):
             raise ConfigError(
                 f"Pipeline '{pipeline_id}' contains invalid sensor id '{sensor_id}'. Use letters, numbers, _ or -."
@@ -367,26 +384,32 @@ def _parse_sensors(
 
         sensor_type = str(raw_sensor.get("type") or "").strip().lower()
         if sensor_type not in {"file_sensor", "sql_sensor", "api_sensor"}:
-            raise ConfigError(f"Pipeline '{pipeline_id}' sensor '{sensor_id}' uses unsupported type '{sensor_type}'")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' sensor '{sensor_id}' uses unsupported type '{sensor_type}'")
 
         task_id = raw_sensor.get("task_id")
         if task_id is not None and str(task_id) not in task_ids:
-            raise ConfigError(f"Pipeline '{pipeline_id}' sensor '{sensor_id}' points to unknown task '{task_id}'")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' sensor '{sensor_id}' points to unknown task '{task_id}'")
 
-        title = str(raw_sensor.get("title") or raw_sensor.get("name") or sensor_id.replace("_", " ").title())
+        title = str(raw_sensor.get("title") or raw_sensor.get(
+            "name") or sensor_id.replace("_", " ").title())
         enabled = bool(raw_sensor.get("enabled", True))
         ignore_existing = bool(raw_sensor.get("ignore_existing", True))
 
         if sensor_type == "file_sensor":
             path_value = raw_sensor.get("path")
             if not path_value:
-                raise ConfigError(f"Pipeline '{pipeline_id}' sensor '{sensor_id}' requires path for file_sensor")
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' sensor '{sensor_id}' requires path for file_sensor")
             expanded_path = _expand_string(str(path_value), env_values)
             ssh_host = (
-                None if raw_sensor.get("host") is None else _expand_string(str(raw_sensor.get("host")), env_values)
+                None if raw_sensor.get("host") is None else _expand_string(
+                    str(raw_sensor.get("host")), env_values)
             )
             ssh_user = (
-                None if raw_sensor.get("user") is None else _expand_string(str(raw_sensor.get("user")), env_values)
+                None if raw_sensor.get("user") is None else _expand_string(
+                    str(raw_sensor.get("user")), env_values)
             )
             ssh_port = int(raw_sensor.get("port", 22))
             base_kwargs = {
@@ -405,7 +428,8 @@ def _parse_sensors(
                 "ssh_user": ssh_user,
                 "ssh_port": ssh_port,
                 "ssh_key_file": _resolve_path(
-                    None if raw_sensor.get("key_file") is None else str(raw_sensor.get("key_file")),
+                    None if raw_sensor.get("key_file") is None else str(
+                        raw_sensor.get("key_file")),
                     workspace,
                     env_values,
                 ),
@@ -418,7 +442,8 @@ def _parse_sensors(
                     base_kwargs["ssh_user"] = sftp_location["ssh_user"]
                 if raw_sensor.get("port") is None:
                     base_kwargs["ssh_port"] = sftp_location["ssh_port"]
-                sensors[sensor_id] = SensorDefinition(**base_kwargs, remote_path=sftp_location["remote_path"])
+                sensors[sensor_id] = SensorDefinition(
+                    **base_kwargs, remote_path=sftp_location["remote_path"])
             else:
                 sensors[sensor_id] = SensorDefinition(
                     **base_kwargs,
@@ -429,23 +454,30 @@ def _parse_sensors(
         if sensor_type == "api_sensor":
             url = raw_sensor.get("url") or raw_sensor.get("endpoint")
             if not url:
-                raise ConfigError(f"Pipeline '{pipeline_id}' sensor '{sensor_id}' requires url for api_sensor")
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' sensor '{sensor_id}' requires url for api_sensor")
             raw_headers = _ensure_mapping(
                 raw_sensor.get("headers"),
                 f"Pipeline '{pipeline_id}' sensor '{sensor_id}' headers",
             )
-            raw_expected = raw_sensor.get("expected_status", [200, 201, 202, 204])
-            expected_status = tuple(int(item) for item in _ensure_list(raw_expected, "expected_status"))
+            raw_expected = raw_sensor.get(
+                "expected_status", [200, 201, 202, 204])
+            expected_status = tuple(int(item) for item in _ensure_list(
+                raw_expected, "expected_status"))
             sensors[sensor_id] = SensorDefinition(
                 sensor_id=sensor_id,
                 sensor_type="api_sensor",
                 title=title,
                 enabled=enabled,
                 url=_expand_string(str(url), env_values),
-                method=_expand_string(str(raw_sensor.get("method") or "GET"), env_values).upper(),
-                headers={str(key): _expand_string(str(value), env_values) for key, value in raw_headers.items()},
-                body=None if raw_sensor.get("body") is None else _expand_string(str(raw_sensor["body"]), env_values),
-                token=None if raw_sensor.get("token") is None else _expand_string(str(raw_sensor["token"]), env_values),
+                method=_expand_string(
+                    str(raw_sensor.get("method") or "GET"), env_values).upper(),
+                headers={str(key): _expand_string(str(value), env_values)
+                         for key, value in raw_headers.items()},
+                body=None if raw_sensor.get("body") is None else _expand_string(
+                    str(raw_sensor["body"]), env_values),
+                token=None if raw_sensor.get("token") is None else _expand_string(
+                    str(raw_sensor["token"]), env_values),
                 expected_status=expected_status,
                 cursor_path=None
                 if raw_sensor.get("cursor_path") is None
@@ -455,9 +487,11 @@ def _parse_sensors(
             )
             continue
 
-        connection_value = raw_sensor.get("connection") or raw_sensor.get("database_url") or raw_sensor.get("dsn")
+        connection_value = raw_sensor.get("connection") or raw_sensor.get(
+            "database_url") or raw_sensor.get("dsn")
         connection_ref = (
-            raw_sensor.get("connection_ref") or raw_sensor.get("connection_name") or raw_sensor.get("connection_id")
+            raw_sensor.get("connection_ref") or raw_sensor.get(
+                "connection_name") or raw_sensor.get("connection_id")
         )
         if connection_value is not None and str(connection_value).startswith("@"):
             connection_ref = str(connection_value)[1:]
@@ -472,7 +506,8 @@ def _parse_sensors(
         if connection_value is None and connection_env is not None:
             connection_value = env_values.get(str(connection_env))
         connection_value = _normalize_sensor_connection(
-            None if connection_value is None else _expand_string(str(connection_value), env_values),
+            None if connection_value is None else _expand_string(
+                str(connection_value), env_values),
             workspace,
         )
         database_value = raw_sensor.get("database") or raw_sensor.get("path")
@@ -483,7 +518,8 @@ def _parse_sensors(
             )
         database_path = None
         if database_value is not None:
-            database_path = _resolve_path(str(database_value), workspace, env_values)
+            database_path = _resolve_path(
+                str(database_value), workspace, env_values)
         sensors[sensor_id] = SensorDefinition(
             sensor_id=sensor_id,
             sensor_type="sql_sensor",
@@ -492,8 +528,10 @@ def _parse_sensors(
             database=database_path,
             connection=connection_value,
             table=_expand_string(str(table), env_values),
-            cursor_column=_expand_string(str(raw_sensor.get("cursor_column") or "rowid"), env_values),
-            where=None if raw_sensor.get("where") is None else _expand_string(str(raw_sensor.get("where")), env_values),
+            cursor_column=_expand_string(
+                str(raw_sensor.get("cursor_column") or "rowid"), env_values),
+            where=None if raw_sensor.get("where") is None else _expand_string(
+                str(raw_sensor.get("where")), env_values),
             ignore_existing=ignore_existing,
             task_id=None if task_id is None else str(task_id),
         )
@@ -517,7 +555,8 @@ def _validate_task_graph(pipeline_id: str, tasks: dict[str, TaskDefinition]) -> 
         if task_id in visited:
             return
         if task_id in visiting:
-            raise ConfigError(f"Pipeline '{pipeline_id}' contains a cycle at task '{task_id}'")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' contains a cycle at task '{task_id}'")
         visiting.add(task_id)
         for dependency in tasks[task_id].depends_on:
             visit(dependency)
@@ -530,8 +569,10 @@ def _validate_task_graph(pipeline_id: str, tasks: dict[str, TaskDefinition]) -> 
 
 def _detect_parallelism(tasks: dict[str, TaskDefinition]) -> bool:
     """Return whether the DAG can execute more than one task at the same time."""
-    remaining_dependencies = {task_id: set(task.depends_on) for task_id, task in tasks.items()}
-    ready = sorted(task_id for task_id, dependencies in remaining_dependencies.items() if not dependencies)
+    remaining_dependencies = {task_id: set(
+        task.depends_on) for task_id, task in tasks.items()}
+    ready = sorted(task_id for task_id,
+                   dependencies in remaining_dependencies.items() if not dependencies)
     processed: set[str] = set()
 
     while ready:
@@ -555,7 +596,8 @@ def _validate_pipeline_trigger_graph(pipelines: dict[str, PipelineDefinition]) -
     for pipeline in pipelines.values():
         for target in pipeline.triggers_on_success:
             if target not in pipelines:
-                raise ConfigError(f"Pipeline '{pipeline.pipeline_id}' triggers unknown pipeline '{target}'")
+                raise ConfigError(
+                    f"Pipeline '{pipeline.pipeline_id}' triggers unknown pipeline '{target}'")
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -564,7 +606,8 @@ def _validate_pipeline_trigger_graph(pipelines: dict[str, PipelineDefinition]) -
         if pipeline_id in visited:
             return
         if pipeline_id in visiting:
-            raise ConfigError(f"Pipeline trigger cycle detected at '{pipeline_id}'")
+            raise ConfigError(
+                f"Pipeline trigger cycle detected at '{pipeline_id}'")
         visiting.add(pipeline_id)
         for target in pipelines[pipeline_id].triggers_on_success:
             visit(target)
@@ -578,7 +621,8 @@ def _validate_pipeline_trigger_graph(pipelines: dict[str, PipelineDefinition]) -
 def _build_single_task_pipeline(raw_pipeline: dict[str, Any]) -> dict[str, Any]:
     """Build a backwards-compatible single-task pipeline definition."""
     if "entrypoint" in raw_pipeline or "script" in raw_pipeline:
-        entrypoint = _ensure_mapping(raw_pipeline.get("entrypoint"), "entrypoint")
+        entrypoint = _ensure_mapping(
+            raw_pipeline.get("entrypoint"), "entrypoint")
         return {
             "main": {
                 "type": "python",
@@ -589,7 +633,8 @@ def _build_single_task_pipeline(raw_pipeline: dict[str, Any]) -> dict[str, Any]:
                 "env": entrypoint.get("env", {}),
             }
         }
-    raise ConfigError("Pipeline must define either 'tasks' or an entrypoint/script")
+    raise ConfigError(
+        "Pipeline must define either 'tasks' or an entrypoint/script")
 
 
 def _parse_task(
@@ -611,13 +656,16 @@ def _parse_task(
     raw_task_type = str(raw_task.get("type") or "python").lower()
     task_type = "python" if raw_task_type == "python_call" else raw_task_type
     if task_type not in {"python", "cli", "api", "ssh", "email", "webhook"}:
-        raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' uses unsupported type '{raw_task_type}'")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' task '{task_id}' uses unsupported type '{raw_task_type}'")
 
     title = _expand_string(
-        str(raw_task.get("title") or raw_task.get("name") or task_id.replace("_", " ").title()),
+        str(raw_task.get("title") or raw_task.get("name")
+            or task_id.replace("_", " ").title()),
         env_values,
     )
-    description = _expand_string(str(raw_task.get("description") or ""), env_values)
+    description = _expand_string(
+        str(raw_task.get("description") or ""), env_values)
     depends_on = _parse_depends_on(
         raw_task.get("depends_on"),
         f"Pipeline '{pipeline_id}' task '{task_id}' depends_on",
@@ -664,9 +712,11 @@ def _parse_task(
             callable_text = _expand_string(str(callable_ref), env_values)
             if "::" in callable_text:
                 raw_path, callable_name = callable_text.split("::", 1)
-                resolved_callable_path = _resolve_path(raw_path, workspace, env_values)
+                resolved_callable_path = _resolve_path(
+                    raw_path, workspace, env_values)
                 if resolved_callable_path is None:
-                    raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' callable path could not be resolved")
+                    raise ConfigError(
+                        f"Pipeline '{pipeline_id}' task '{task_id}' callable path could not be resolved")
                 callable_text = f"{resolved_callable_path}::{callable_name}"
             raw_args = _expand_value(raw_task.get("args", []), env_values)
             raw_kwargs = _expand_value(
@@ -677,7 +727,8 @@ def _parse_task(
                 env_values,
             )
             if not isinstance(raw_args, list):
-                raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list")
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list")
             return TaskDefinition(
                 task_id=task_id,
                 title=title,
@@ -689,7 +740,8 @@ def _parse_task(
                 call=callable_text,
                 args=tuple(raw_args),
                 kwargs={str(key): value for key, value in raw_kwargs.items()},
-                cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values) or workspace,
+                cwd=_resolve_path(raw_task.get("cwd"),
+                                  workspace, env_values) or workspace,
                 env=task_env,
             )
         path_value = raw_task.get("path") or raw_task.get("script")
@@ -699,10 +751,12 @@ def _parse_task(
             )
         path = _resolve_path(str(path_value), workspace, env_values)
         if path is None or not path.exists():
-            raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' points to a missing script: {path_value}")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' task '{task_id}' points to a missing script: {path_value}")
         raw_args = _expand_value(raw_task.get("args", []), env_values)
         if not isinstance(raw_args, list):
-            raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list")
         return TaskDefinition(
             task_id=task_id,
             title=title,
@@ -712,7 +766,8 @@ def _parse_task(
             on_upstream_failure=on_upstream_failure,
             enabled=enabled,
             path=path,
-            python=_expand_string(str(raw_task.get("python") or default_python), env_values),
+            python=_expand_string(
+                str(raw_task.get("python") or default_python), env_values),
             args=tuple(raw_args),
             cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values),
             env=task_env,
@@ -723,12 +778,16 @@ def _parse_task(
         path_value = raw_task.get("path") or raw_task.get("script")
         raw_args = _expand_value(raw_task.get("args", []), env_values)
         if not isinstance(raw_args, list):
-            raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list")
         if not command and not path_value:
-            raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' requires command or path for cli tasks")
-        resolved_path = _resolve_path(str(path_value), workspace, env_values) if path_value else None
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' task '{task_id}' requires command or path for cli tasks")
+        resolved_path = _resolve_path(
+            str(path_value), workspace, env_values) if path_value else None
         if path_value and (resolved_path is None or not resolved_path.exists()):
-            raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' points to a missing cli path: {path_value}")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' task '{task_id}' points to a missing cli path: {path_value}")
         return TaskDefinition(
             task_id=task_id,
             title=title,
@@ -738,7 +797,8 @@ def _parse_task(
             on_upstream_failure=on_upstream_failure,
             enabled=enabled,
             path=resolved_path,
-            command=None if command is None else _expand_string(str(command), env_values),
+            command=None if command is None else _expand_string(
+                str(command), env_values),
             args=tuple(raw_args),
             cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values),
             env=task_env,
@@ -747,7 +807,8 @@ def _parse_task(
     if task_type == "api" or task_type == "webhook":
         url = raw_task.get("url")
         if not url:
-            raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' requires url for {task_type} tasks")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' task '{task_id}' requires url for {task_type} tasks")
         headers = {
             str(key): _expand_string(str(value), env_values)
             for key, value in _ensure_mapping(
@@ -757,7 +818,8 @@ def _parse_task(
         }
         token = raw_task.get("token")
 
-        method = str(raw_task.get("method", "POST" if task_type == "webhook" else "GET")).upper()
+        method = str(raw_task.get("method", "POST" if task_type ==
+                     "webhook" else "GET")).upper()
 
         return TaskDefinition(
             task_id=task_id,
@@ -770,8 +832,10 @@ def _parse_task(
             url=_expand_string(str(url), env_values),
             method=method,
             headers=headers,
-            body=None if raw_task.get("body") is None else _expand_string(str(raw_task.get("body")), env_values),
-            token=_expand_string(str(token), env_values) if token is not None else None,
+            body=None if raw_task.get("body") is None else _expand_string(
+                str(raw_task.get("body")), env_values),
+            token=_expand_string(
+                str(token), env_values) if token is not None else None,
             expected_status=_normalize_expected_status(
                 raw_task.get("expected_status"),
                 f"Pipeline '{pipeline_id}' task '{task_id}' expected_status",
@@ -788,19 +852,26 @@ def _parse_task(
             depends_on=depends_on,
             on_upstream_failure=on_upstream_failure,
             enabled=enabled,
-            smtp_host=_expand_string(str(raw_task.get("smtp_host") or "localhost"), env_values),
+            smtp_host=_expand_string(
+                str(raw_task.get("smtp_host") or "localhost"), env_values),
             smtp_port=int(raw_task.get("smtp_port") or 587),
-            smtp_user=_expand_string(str(raw_task.get("smtp_user", "")), env_values) or None,
-            smtp_password=_expand_string(str(raw_task.get("smtp_password", "")), env_values) or None,
-            email_to=tuple(str(item) for item in _expand_value(list(raw_task.get("to") or []), env_values)),
-            email_subject=_expand_string(str(raw_task.get("subject") or "Piply Notification"), env_values),
-            email_body=_expand_string(str(raw_task.get("body") or ""), env_values),
+            smtp_user=_expand_string(
+                str(raw_task.get("smtp_user", "")), env_values) or None,
+            smtp_password=_expand_string(
+                str(raw_task.get("smtp_password", "")), env_values) or None,
+            email_to=tuple(str(item) for item in _expand_value(
+                list(raw_task.get("to") or []), env_values)),
+            email_subject=_expand_string(
+                str(raw_task.get("subject") or "Piply Notification"), env_values),
+            email_body=_expand_string(
+                str(raw_task.get("body") or ""), env_values),
             env=task_env,
         )
 
     host = raw_task.get("host")
     if not host:
-        raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' requires host for ssh tasks")
+        raise ConfigError(
+            f"Pipeline '{pipeline_id}' task '{task_id}' requires host for ssh tasks")
 
     return TaskDefinition(
         task_id=task_id,
@@ -811,11 +882,15 @@ def _parse_task(
         on_upstream_failure=on_upstream_failure,
         enabled=enabled,
         host=_expand_string(str(host), env_values),
-        user=None if raw_task.get("user") is None else _expand_string(str(raw_task.get("user")), env_values),
+        user=None if raw_task.get("user") is None else _expand_string(
+            str(raw_task.get("user")), env_values),
         port=int(raw_task.get("port", 22)),
-        key_file=_resolve_path(raw_task.get("key_file"), workspace, env_values),
-        command=None if raw_task.get("command") is None else _expand_string(str(raw_task.get("command")), env_values),
-        ssh_binary=_expand_string(str(raw_task.get("ssh_binary") or "ssh"), env_values),
+        key_file=_resolve_path(raw_task.get("key_file"),
+                               workspace, env_values),
+        command=None if raw_task.get("command") is None else _expand_string(
+            str(raw_task.get("command")), env_values),
+        ssh_binary=_expand_string(
+            str(raw_task.get("ssh_binary") or "ssh"), env_values),
         connect_timeout=int(raw_task.get("connect_timeout", 8)),
         env=task_env,
     )
@@ -844,25 +919,30 @@ def load_project(
     effective_default_max_parallel_tasks = default_max_parallel_tasks or settings.default_max_parallel_tasks
 
     defaults = _ensure_mapping(raw_data.get("defaults"), "defaults")
-    timezone_name = _expand_string(str(raw_data.get("timezone") or defaults.get("timezone") or "UTC"), env_values)
-    workspace = _resolve_path(str(raw_data.get("workspace", ".")), path.parent, env_values) or path.parent
+    timezone_name = _expand_string(
+        str(raw_data.get("timezone") or defaults.get("timezone") or "UTC"), env_values)
+    workspace = _resolve_path(
+        str(raw_data.get("workspace", ".")), path.parent, env_values) or path.parent
     if not workspace.exists():
         raise ConfigError(f"Configured workspace does not exist: {workspace}")
 
-    secret_values = load_secret_values(raw_data.get("secrets"), workspace=workspace, env_values=env_values)
+    secret_values = load_secret_values(raw_data.get(
+        "secrets"), workspace=workspace, env_values=env_values)
     if secret_values:
         env_values = dict(env_values)
         env_values.update(secret_env_aliases(secret_values))
 
     connections = _parse_connections(raw_data.get("connections"), env_values)
 
-    default_python = _expand_string(str(defaults.get("python") or sys.executable), env_values)
+    default_python = _expand_string(
+        str(defaults.get("python") or sys.executable), env_values)
     default_env = {
         str(key): _expand_string(str(value), env_values)
         for key, value in _ensure_mapping(defaults.get("env"), "defaults.env").items()
     }
 
-    raw_pipelines = raw_data["pipelines"] if "pipelines" in raw_data else raw_data.get("jobs")
+    raw_pipelines = raw_data["pipelines"] if "pipelines" in raw_data else raw_data.get(
+        "jobs")
     if raw_pipelines is None:
         raise ConfigError("Config must define a 'pipelines' mapping")
     if not isinstance(raw_pipelines, dict):
@@ -873,11 +953,14 @@ def load_project(
         if not isinstance(raw_pipeline, dict):
             raise ConfigError(f"Pipeline '{pipeline_id}' must be a mapping")
 
-        schedule_timezone = _expand_string(str(raw_pipeline.get("timezone") or timezone_name), env_values)
+        schedule_timezone = _expand_string(
+            str(raw_pipeline.get("timezone") or timezone_name), env_values)
         try:
-            schedule = _parse_schedule(raw_pipeline.get("schedule"), schedule_timezone)
+            schedule = _parse_schedule(
+                raw_pipeline.get("schedule"), schedule_timezone)
         except ScheduleError as exc:
-            raise ConfigError(f"Pipeline '{pipeline_id}' has an invalid schedule: {exc}") from exc
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' has an invalid schedule: {exc}") from exc
 
         max_parallel_tasks = _parse_execution(
             raw_pipeline.get("execution"),
@@ -885,13 +968,16 @@ def load_project(
             default_max_parallel_tasks=effective_default_max_parallel_tasks,
             explicit_max_parallel_tasks=raw_pipeline.get("max_parallel_tasks"),
         )
-        retry_policy = _parse_retry_policy(raw_pipeline.get("retry"), pipeline_id)
+        retry_policy = _parse_retry_policy(
+            raw_pipeline.get("retry"), pipeline_id)
 
         title = _expand_string(
-            str(raw_pipeline.get("title") or raw_pipeline.get("name") or pipeline_id),
+            str(raw_pipeline.get("title")
+                or raw_pipeline.get("name") or pipeline_id),
             env_values,
         )
-        description = _expand_string(str(raw_pipeline.get("description") or ""), env_values)
+        description = _expand_string(
+            str(raw_pipeline.get("description") or ""), env_values)
         tags = tuple(
             _expand_string(str(tag), env_values)
             for tag in _ensure_list(raw_pipeline.get("tags"), f"Pipeline '{pipeline_id}' tags")
@@ -899,7 +985,8 @@ def load_project(
         enabled = bool(raw_pipeline.get("enabled", True))
         max_concurrent_runs = int(raw_pipeline.get("max_concurrent_runs", 1))
         if max_concurrent_runs < 1:
-            raise ConfigError(f"Pipeline '{pipeline_id}' must have max_concurrent_runs greater than zero")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' must have max_concurrent_runs greater than zero")
 
         pipeline_env = dict(default_env)
         pipeline_env.update(
@@ -916,12 +1003,14 @@ def load_project(
         if raw_tasks is None:
             raw_tasks = _build_single_task_pipeline(raw_pipeline)
         if not isinstance(raw_tasks, dict) or not raw_tasks:
-            raise ConfigError(f"Pipeline '{pipeline_id}' must define a non-empty tasks mapping")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' must define a non-empty tasks mapping")
 
         tasks: dict[str, TaskDefinition] = {}
         for task_id, raw_task in raw_tasks.items():
             if not isinstance(raw_task, dict):
-                raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' must be a mapping")
+                raise ConfigError(
+                    f"Pipeline '{pipeline_id}' task '{task_id}' must be a mapping")
             tasks[task_id] = _parse_task(
                 pipeline_id,
                 task_id,
@@ -951,7 +1040,8 @@ def load_project(
             )
         )
         if pipeline_id in triggers_on_success:
-            raise ConfigError(f"Pipeline '{pipeline_id}' cannot trigger itself on success")
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' cannot trigger itself on success")
 
         pipelines[pipeline_id] = PipelineDefinition(
             pipeline_id=pipeline_id,
