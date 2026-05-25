@@ -46,12 +46,12 @@ def _build_service(
 
 def create_app(config_path: str | None = None) -> FastAPI:
     """Create the Piply FastAPI app with routes, templates, and scheduler."""
-    settings = load_settings(config_path or os.getenv("PIPLY_CONFIG"))
-    service = _build_service(config_path, settings)
-    scheduler = PipelineScheduler(service)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        settings = load_settings(config_path or os.getenv("PIPLY_CONFIG"))
+        service = _build_service(config_path, settings)
+        scheduler = PipelineScheduler(service)
         app.state.service = service
         app.state.scheduler = scheduler
         app.state.settings = settings
