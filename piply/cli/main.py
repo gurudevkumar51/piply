@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -17,6 +18,16 @@ from piply.settings import load_settings
 app = typer.Typer(help="Piply: lightweight orchestration for task-based Python workflows.")
 tasks_app = typer.Typer(help="Inspect pipeline tasks.")
 app.add_typer(tasks_app, name="tasks")
+RUN_PARAM_OPTION = typer.Option(
+    None,
+    "--param",
+    help="Run parameter as KEY=VALUE. Repeat for multiple params; JSON values are accepted.",
+)
+TASK_PARAM_OPTION = typer.Option(
+    None,
+    "--param",
+    help="Run parameter as KEY=VALUE. Repeat for multiple params; JSON values are accepted.",
+)
 
 
 def _resolve_config(config: str | None) -> Path:
@@ -43,6 +54,23 @@ def _server_command(host: str, port: int, reload: bool) -> list[str]:
     return command
 
 
+def _parse_params(param_items: list[str] | None) -> dict[str, object]:
+    """Parse repeated KEY=VALUE CLI params, preserving JSON scalars when supplied."""
+    parsed: dict[str, object] = {}
+    for item in param_items or []:
+        if "=" not in item:
+            raise typer.BadParameter("--param must use KEY=VALUE.")
+        key, raw_value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise typer.BadParameter("--param keys cannot be empty.")
+        try:
+            parsed[key] = json.loads(raw_value)
+        except json.JSONDecodeError:
+            parsed[key] = raw_value
+    return parsed
+
+
 @app.command()
 def init(
     directory: str = typer.Argument(".", help="Directory to scaffold the project in."),
@@ -56,6 +84,7 @@ def init(
     sensor_inbox_dir = target_dir / "sensor_inbox"
     extract_path = pipelines_dir / "extract.py"
     report_path = pipelines_dir / "report.py"
+    validate_path = pipelines_dir / "validate_cli.py"
 
     if config_path.exists() and not force:
         raise typer.BadParameter(f"{config_path} already exists. Use --force to overwrite it.")
@@ -68,6 +97,10 @@ def init(
                 'version: "1"',
                 "title: Piply Workspace",
                 "workspace: .",
+                "variables:",
+                "  scripts_dir: pipelines",
+                "  batch_id: demo-batch",
+                "  conda_env: py312_extract",
                 "defaults:",
                 "  python: python",
                 "  env:",
@@ -109,7 +142,8 @@ def init(
                 "        depends_on: [extract]",
                 "      validate:",
                 "        type: cli",
-                "        command: python -c \"print('Validating extracted payload...')\"",
+                "        command: python {scripts_dir}/validate_cli.py {batch_id}",
+                "        cwd: .",
                 "        depends_on: [transform]",
                 "      publish_manifest:",
                 "        type: cli",
@@ -134,6 +168,12 @@ def init(
                 "      cli_example:",
                 "        type: cli",
                 "        command: python -c \"print('cli operator ok')\"",
+                "      bash_env_example:",
+                "        type: cli",
+                "        shell: bash",
+                "        command: set -a && source .env && set +a && conda run -n {conda_env} python {scripts_dir}/validate_cli.py ${APP_BATCH_ID}",
+                "        cwd: .",
+                "        depends_on: [cli_example]",
                 "      api_example:",
                 "        type: api",
                 "        url: https://example.com/api/ping",
@@ -266,9 +306,31 @@ def init(
         encoding="utf-8",
     )
 
+    validate_path.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import sys",
+                "",
+                "",
+                "def main() -> None:",
+                "    batch_id = sys.argv[1] if len(sys.argv) > 1 else 'manual'",
+                "    print(f'Validating batch {batch_id}')",
+                "    print('Validation complete')",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    main()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
     typer.echo(f"Created {config_path}")
     typer.echo(f"Created {extract_path}")
     typer.echo(f"Created {report_path}")
+    typer.echo(f"Created {validate_path}")
     typer.echo(f"Created {sensor_inbox_dir}")
     typer.echo("Run `piply validate` and `piply start` to launch the UI.")
 
@@ -324,6 +386,8 @@ def list_tasks(
 def run(
     pipeline_id: str = typer.Argument(..., help="Pipeline identifier to run."),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    tenant: str | None = typer.Option(None, "--tenant", help="Tenant id to attach to this run."),
+    param: list[str] | None = RUN_PARAM_OPTION,
     wait: bool = typer.Option(
         True,
         "--wait/--detach",
@@ -332,11 +396,15 @@ def run(
 ) -> None:
     service = PipelineService(config_path=_resolve_config(config))
     try:
+        params = _parse_params(param)
+        initial_context = {"params": params} if params else {}
         run_record = service.trigger_pipeline(
             pipeline_id,
             trigger="manual",
             wait=wait,
             on_log=typer.echo if wait else None,
+            tenant_id=tenant,
+            initial_context=initial_context,
         )
     except KeyError as exc:
         typer.echo(str(exc))
@@ -417,16 +485,22 @@ def run_task(
     pipeline_id: str = typer.Argument(..., help="Pipeline identifier."),
     task_id: str = typer.Argument(..., help="Task identifier."),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    tenant: str | None = typer.Option(None, "--tenant", help="Tenant id to attach to this task-scoped run."),
+    param: list[str] | None = TASK_PARAM_OPTION,
     wait: bool = typer.Option(True, "--wait/--detach", help="Wait and stream logs in the terminal."),
 ) -> None:
     service = PipelineService(config_path=_resolve_config(config))
     try:
+        params = _parse_params(param)
+        initial_context = {"params": params} if params else {}
         run_record = service.trigger_task(
             pipeline_id,
             task_id,
             trigger="task",
             wait=wait,
             on_log=typer.echo if wait else None,
+            tenant_id=tenant,
+            initial_context=initial_context,
         )
     except KeyError as exc:
         typer.echo(str(exc))

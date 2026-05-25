@@ -31,6 +31,7 @@ class ConfigError(ValueError):
 
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 ENV_TOKEN_PATTERN = re.compile(r"\$(\w+)|\$\{([^}]+)\}|%([^%]+)%")
+BRACE_TOKEN_PATTERN = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
 
 
 def discover_config(start_dir: Path | None = None) -> Path:
@@ -53,15 +54,20 @@ def discover_config(start_dir: Path | None = None) -> Path:
 
 
 def _expand_string(value: str, env_values: dict[str, str] | None = None) -> str:
-    """Expand environment variables and user-home markers in strings."""
+    """Expand environment variables, config variables, and user-home markers."""
     merged_env = dict(os.environ)
     merged_env.update(env_values or {})
 
-    def replace(match: re.Match[str]) -> str:
+    def replace_env(match: re.Match[str]) -> str:
         name = match.group(1) or match.group(2) or match.group(3) or ""
         return merged_env.get(name, match.group(0))
 
-    return ENV_TOKEN_PATTERN.sub(replace, os.path.expanduser(value))
+    def replace_brace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        return merged_env.get(name, match.group(0))
+
+    expanded = ENV_TOKEN_PATTERN.sub(replace_env, os.path.expanduser(value))
+    return BRACE_TOKEN_PATTERN.sub(replace_brace, expanded)
 
 
 def _expand_value(value: Any, env_values: dict[str, str] | None = None) -> Any:
@@ -91,6 +97,17 @@ def _ensure_list(value: Any, label: str) -> list[Any]:
     if not isinstance(value, list):
         raise ConfigError(f"{label} must be a list")
     return value
+
+
+def _parse_variables(raw_value: Any, label: str, env_values: dict[str, str]) -> dict[str, str]:
+    """Parse reusable config variables and allow earlier variables in later values."""
+    raw_variables = _ensure_mapping(raw_value, label)
+    variables: dict[str, str] = {}
+    scoped_values = dict(env_values)
+    for raw_key, raw_variable in raw_variables.items():
+        key = str(raw_key)
+        variables[key] = _expand_string(str(raw_variable), scoped_values | variables)
+    return variables
 
 
 def _resolve_path(
@@ -722,6 +739,8 @@ def _parse_task(
         command = raw_task.get("command")
         path_value = raw_task.get("path") or raw_task.get("script")
         raw_args = _expand_value(raw_task.get("args", []), env_values)
+        raw_shell = raw_task.get("shell")
+        shell_name = None if raw_shell in (None, "", False, True) else _expand_string(str(raw_shell), env_values)
         if not isinstance(raw_args, list):
             raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' args must be a list")
         if not command and not path_value:
@@ -739,6 +758,7 @@ def _parse_task(
             enabled=enabled,
             path=resolved_path,
             command=None if command is None else _expand_string(str(command), env_values),
+            shell=shell_name,
             args=tuple(raw_args),
             cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values),
             env=task_env,
@@ -854,11 +874,15 @@ def load_project(
         env_values = dict(env_values)
         env_values.update(secret_env_aliases(secret_values))
 
-    connections = _parse_connections(raw_data.get("connections"), env_values)
+    root_variables = _parse_variables(defaults.get("variables"), "defaults.variables", env_values)
+    root_variables.update(_parse_variables(raw_data.get("variables"), "variables", env_values | root_variables))
+    root_values = env_values | root_variables
 
-    default_python = _expand_string(str(defaults.get("python") or sys.executable), env_values)
+    connections = _parse_connections(raw_data.get("connections"), root_values)
+
+    default_python = _expand_string(str(defaults.get("python") or sys.executable), root_values)
     default_env = {
-        str(key): _expand_string(str(value), env_values)
+        str(key): _expand_string(str(value), root_values)
         for key, value in _ensure_mapping(defaults.get("env"), "defaults.env").items()
     }
 
@@ -873,7 +897,17 @@ def load_project(
         if not isinstance(raw_pipeline, dict):
             raise ConfigError(f"Pipeline '{pipeline_id}' must be a mapping")
 
-        schedule_timezone = _expand_string(str(raw_pipeline.get("timezone") or timezone_name), env_values)
+        pipeline_variables = dict(root_variables)
+        pipeline_variables.update(
+            _parse_variables(
+                raw_pipeline.get("variables"),
+                f"Pipeline '{pipeline_id}' variables",
+                root_values | pipeline_variables,
+            )
+        )
+        pipeline_values = root_values | pipeline_variables
+
+        schedule_timezone = _expand_string(str(raw_pipeline.get("timezone") or timezone_name), pipeline_values)
         try:
             schedule = _parse_schedule(raw_pipeline.get("schedule"), schedule_timezone)
         except ScheduleError as exc:
@@ -889,11 +923,11 @@ def load_project(
 
         title = _expand_string(
             str(raw_pipeline.get("title") or raw_pipeline.get("name") or pipeline_id),
-            env_values,
+            pipeline_values,
         )
-        description = _expand_string(str(raw_pipeline.get("description") or ""), env_values)
+        description = _expand_string(str(raw_pipeline.get("description") or ""), pipeline_values)
         tags = tuple(
-            _expand_string(str(tag), env_values)
+            _expand_string(str(tag), pipeline_values)
             for tag in _ensure_list(raw_pipeline.get("tags"), f"Pipeline '{pipeline_id}' tags")
         )
         enabled = bool(raw_pipeline.get("enabled", True))
@@ -904,7 +938,7 @@ def load_project(
         pipeline_env = dict(default_env)
         pipeline_env.update(
             {
-                str(key): _expand_string(str(value), env_values)
+                str(key): _expand_string(str(value), pipeline_values)
                 for key, value in _ensure_mapping(
                     raw_pipeline.get("env"),
                     f"Pipeline '{pipeline_id}' env",
@@ -929,7 +963,7 @@ def load_project(
                 workspace=workspace,
                 default_python=default_python,
                 inherited_env=pipeline_env,
-                env_values=env_values,
+                env_values=pipeline_values,
             )
 
         _validate_task_graph(pipeline_id, tasks)
@@ -939,12 +973,12 @@ def load_project(
             pipeline_id,
             workspace=workspace,
             task_ids=set(tasks),
-            env_values=env_values,
+            env_values=pipeline_values,
             connections=connections,
         )
 
         triggers_on_success = tuple(
-            _expand_string(str(item), env_values)
+            _expand_string(str(item), pipeline_values)
             for item in _ensure_list(
                 raw_pipeline.get("triggers_on_success"),
                 f"Pipeline '{pipeline_id}' triggers_on_success",
@@ -973,7 +1007,7 @@ def load_project(
 
     return ProjectDefinition(
         version=str(raw_data.get("version", "1")),
-        title=str(raw_data.get("title") or path.parent.name),
+        title=_expand_string(str(raw_data.get("title") or path.parent.name), root_values),
         config_path=path,
         workspace=workspace,
         default_python=default_python,

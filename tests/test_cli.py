@@ -4,9 +4,15 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from piply.cli.main import app
+from piply.cli.main import _parse_params, app
 from piply.core.loader import load_project
 from piply.core.service import PipelineService
+
+
+def test_parse_cli_params_preserves_json_scalars() -> None:
+    params = _parse_params(["count=25", "enabled=true", "name=acme"])
+
+    assert params == {"count": 25, "enabled": True, "name": "acme"}
 
 
 def test_init_scaffolds_multitask_project(tmp_path: Path) -> None:

@@ -39,6 +39,7 @@ SQLite state + local processes
 - keep SQLite as the default state store
 - keep the queue internal instead of requiring Redis
 - keep Python callable execution under `type: python`
+- keep reusable YAML values lightweight with `variables` and `{name}` interpolation
 - keep secrets out of YAML by expanding `.env` and environment variables
 - keep concurrency inferred from `depends_on`
 - keep modules small enough to evolve without a large rewrite
@@ -51,6 +52,7 @@ Top-level fields:
 - `title`
 - `workspace`
 - `timezone`
+- `variables`
 - `defaults`
 - `secrets`
 - `connections`
@@ -67,10 +69,31 @@ Each pipeline can define:
 - `triggers_on_success`
 - `sensors`
 - `tasks`
+- `variables`
 
 Each task can also define:
 
 - `on_upstream_failure` (`skip`, `fail`, `continue`)
+- `shell` for CLI command tasks that need `bash`, `cmd`, `powershell`, or `pwsh`
+
+## Variables And Shell Commands
+
+Top-level variables can be reused anywhere in task, sensor, connection, or pipeline strings:
+
+```yaml
+variables:
+  scripts_dir: pipelines
+  conda_env: py312_extract
+
+tasks:
+  validate:
+    type: cli
+    shell: bash
+    command: set -a && source .env && set +a && conda run -n {conda_env} python {scripts_dir}/validate.py
+    cwd: .
+```
+
+Pipeline-level variables override top-level values for one pipeline. If a scalar starts with `{name}`, quote it, for example `path: "{scripts_dir}/extract.py"`.
 
 ## Python Task Model
 
@@ -128,6 +151,8 @@ Pipeline-to-pipeline passing:
 
 - When `triggers_on_success` launches a downstream pipeline, JSON outputs from the upstream run are attached to the downstream run context.
 - Downstream callable tasks can read them via `context["task_id"]` and `context["upstream"]["task_id"]`.
+- Tenant context is preserved as `context["tenant_id"]`.
+- CLI/API run params are available as `context["params"]`.
 - CLI runs with `--wait` also finish downstream pipeline triggers inline, which keeps local smoke tests deterministic.
 
 ## Sensors
@@ -209,6 +234,19 @@ SSH_KEY_PATH=C:/keys/demo_id_rsa
 SFTP_INBOX=sftp://demo@example.com/incoming
 ```
 
+Then reference those values in YAML:
+
+```yaml
+variables:
+  batch_id: ${APP_BATCH_ID}
+
+tasks:
+  notify:
+    type: api
+    url: https://example.com/hook
+    token: ${secret:API_TOKEN}
+```
+
 Root-level secret backends keep references explicit:
 
 ```yaml
@@ -262,6 +300,8 @@ Current DAG pages support:
 - task selection side panels
 - task actions from the selected node
 - log filtering by selected task on the run page
+- rerun from completed run detail pages
+- long task output previews in a side drawer so run pages stay compact
 
 Additional operator pages:
 

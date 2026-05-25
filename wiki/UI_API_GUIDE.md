@@ -90,9 +90,10 @@ Run detail page actions:
 
 - cancel active run
 - delete finished run
+- rerun any finished run
 - retry from selected failed or skipped task
-- start over the full run
 - filter logs by selected task
+- open long task output previews in a side drawer
 
 ## API Routes
 
@@ -160,6 +161,14 @@ Trigger a task scope:
 curl -X POST http://127.0.0.1:8000/api/pipelines/extract_flow/tasks/publish_manifest/run
 ```
 
+Trigger a selected task with tenant params:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/pipelines/extract_flow/tasks/publish_manifest/run \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":"demo-tenant","params":{"batch":"nightly"}}'
+```
+
 Chain one pipeline into another (explicit run, independent of YAML triggers):
 
 ```bash
@@ -194,6 +203,14 @@ Retry a failed run:
 curl -X POST http://127.0.0.1:8000/api/runs/<run_id>/retry \
   -H "Content-Type: application/json" \
   -d '{"mode": "resume", "task_id": "flaky_step"}'
+```
+
+Rerun a finished run from the beginning:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/runs/<run_id>/retry \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "startover"}'
 ```
 
 Cancel a queued or running run:

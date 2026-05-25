@@ -53,6 +53,50 @@ def test_load_project_parses_multitask_pipeline_and_trigger(tmp_path: Path) -> N
     assert pipeline.tasks["extract"].command_preview.endswith("extract.py")
 
 
+def test_load_project_expands_reusable_variables_without_breaking_json_body(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Variable Workspace",
+                "workspace: workspace",
+                "variables:",
+                "  scripts_dir: scripts",
+                "  env_name: py312_extract",
+                "pipelines:",
+                "  tenant_flow:",
+                "    variables:",
+                "      batch_id: tenant-a",
+                "    tasks:",
+                "      run_cli:",
+                "        type: cli",
+                "        shell: bash",
+                "        command: conda run -n {env_name} python {scripts_dir}/test_cli.py {batch_id} ${LATE_PARAM}",
+                "        cwd: .",
+                "      notify:",
+                "        type: webhook",
+                "        url: https://example.com/webhook",
+                '        body: \'{"event":"piply-demo"}\'',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["tenant_flow"]
+
+    assert pipeline.tasks["run_cli"].command == (
+        "conda run -n py312_extract python scripts/test_cli.py tenant-a ${LATE_PARAM}"
+    )
+    assert pipeline.tasks["run_cli"].shell == "bash"
+    assert pipeline.tasks["run_cli"].cwd == workspace.resolve()
+    assert pipeline.tasks["notify"].body == '{"event":"piply-demo"}'
+
+
 def test_load_project_detects_parallelizable_graph_and_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

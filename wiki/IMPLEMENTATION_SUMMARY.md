@@ -23,6 +23,7 @@ The active implementation is built around:
 - manual targeted retry through `piply tasks retry`
 - pipeline-to-pipeline triggers on success
 - pipeline-to-pipeline output/context passing for JSON outputs
+- tenant and params context propagation for pipeline and task-scoped runs
 - CLI wait-mode dispatches downstream pipeline triggers inline for deterministic chained runs
 - queue-backed schedule backfill for missed slots
 - run cancellation
@@ -38,6 +39,7 @@ The active implementation is built around:
 - `python` for script execution
 - `python` for callable execution through `path/module/call + function`
 - `cli` for shell commands
+- explicit `shell` selection for CLI commands (`bash`, `sh`, `zsh`, `cmd`, `powershell`, `pwsh`)
 - `cli` path execution for `.cmd`, `.bat`, `.ps1`, and direct executables
 - `api` with bearer token support
 - `webhook`
@@ -59,6 +61,7 @@ The active implementation is built around:
 ## Config And Secret Handling
 
 - `.env` files are loaded without adding a third-party dependency
+- reusable YAML `variables` expand with `{name}` inside config strings
 - config strings can expand secrets and connection values from `.env`
 - `secrets` supports explicit env and file-backed secret values with `${secret:NAME}` references
 - `connections` supports reusable SQL connection strings for sensors
@@ -75,6 +78,8 @@ Current UI behavior includes:
 - pipeline DAG with flow, stage, and focus modes
 - task selection panel on pipeline detail
 - task-run action panel on run detail
+- rerun action on completed run detail pages
+- side drawer for long task output previews
 - live task duration labels on graph nodes
 - log filtering by selected task
 - upcoming runs preview

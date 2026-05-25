@@ -79,12 +79,13 @@ class TaskRunner:
         if task.task_type == "cli":
             if task.command is None and task.path is not None:
                 return self._run_cli_path_task(task)
+            command, use_shell = self._build_cli_command(task)
             return self._run_subprocess(
-                command=task.command or "",
+                command=command,
                 cwd=task.working_directory,
                 env=task.env,
                 task_id=task.task_id,
-                shell=True,
+                shell=use_shell,
             )
 
         if task.task_type == "api" or task.task_type == "webhook":
@@ -172,6 +173,22 @@ class TaskRunner:
         finally:
             if "process" in locals() and self.unregister_process is not None:
                 self.unregister_process(process)
+
+    def _build_cli_command(self, task: TaskDefinition) -> tuple[list[str] | str, bool]:
+        """Build a CLI command, optionally using a named shell instead of the platform default."""
+        command = task.command or ""
+        if not task.shell:
+            return command, True
+
+        shell_name = task.shell.strip()
+        shell_binary = Path(shell_name).name.lower()
+        if shell_binary in {"bash", "bash.exe", "sh", "sh.exe", "zsh", "zsh.exe"}:
+            return [shell_name, "-lc", command], False
+        if shell_binary in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+            return [shell_name, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], False
+        if shell_binary in {"cmd", "cmd.exe"}:
+            return ["cmd.exe", "/d", "/s", "/c", command], False
+        return [shell_name, "-lc", command], False
 
     def _run_cli_path_task(self, task: TaskDefinition) -> TaskExecutionResult:
         """Run a configured CLI path, including Windows batch files."""

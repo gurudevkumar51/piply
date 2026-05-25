@@ -81,12 +81,17 @@ def trigger_pipeline_task(
     """Trigger one task and its upstream dependencies as a focused manual run."""
     service = _get_service(request)
     try:
+        initial_context = {}
+        if payload is not None and payload.params:
+            initial_context["params"] = payload.params
         run = service.trigger_task(
             pipeline_id,
             task_id,
             trigger="task",
             wait=False,
             command_overrides=(payload.command_overrides if payload is not None else None),
+            tenant_id=(payload.tenant_id if payload is not None else None),
+            initial_context=initial_context,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

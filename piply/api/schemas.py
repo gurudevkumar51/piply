@@ -110,6 +110,7 @@ class TaskResponse(BaseModel):
     enabled: bool
     command_preview: str
     on_upstream_failure: str
+    shell: str | None = None
 
     @classmethod
     def from_definition(cls, definition: TaskDefinition) -> TaskResponse:
@@ -123,6 +124,7 @@ class TaskResponse(BaseModel):
             enabled=definition.enabled,
             command_preview=definition.command_preview,
             on_upstream_failure=definition.on_upstream_failure,
+            shell=definition.shell,
         )
 
 

@@ -126,6 +126,7 @@ class TaskDefinition:
     args: tuple[object, ...] = ()
     kwargs: dict[str, object] = field(default_factory=dict)
     command: str | None = None
+    shell: str | None = None
     cwd: Path | None = None
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None

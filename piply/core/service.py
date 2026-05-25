@@ -684,6 +684,8 @@ class PipelineService:
         wait: bool = False,
         on_log: Callable[[str], None] | None = None,
         command_overrides: dict[str, str] | None = None,
+        tenant_id: str | None = None,
+        initial_context: dict[str, object] | None = None,
     ) -> RunRecord:
         """Create and dispatch one run scoped to a selected task and its dependencies."""
         self.reconcile_runtime_health()
@@ -693,7 +695,11 @@ class PipelineService:
             pipeline,
             trigger=trigger,
             retry_task_id=task_id,
+            tenant_id=tenant_id,
         )
+        dispatch_context = dict(initial_context or {})
+        if tenant_id is not None:
+            dispatch_context.setdefault("tenant_id", tenant_id)
         self._dispatch_engine(
             pipeline,
             run,
@@ -701,7 +707,7 @@ class PipelineService:
             on_log=on_log,
             initial_task_statuses={},
             retry_source_run_id=None,
-            initial_context={},
+            initial_context=dispatch_context,
         )
         return self.store.get_run(run.run_id) or run
 

@@ -7,7 +7,7 @@
     <section class="compact-header">
         <div>
             <div class="eyebrow">Dag run</div>
-            <h1 class="panel-title" style="font-size:1.9rem; margin:0;">{{ run.pipeline_title }}</h1>
+            <h1 class="panel-title" style="font-size:1.55rem; margin:0;">{{ run.pipeline_title }}</h1>
             <p class="page-header-copy" style="margin:8px 0 0;">
                 Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>.
                 Select a task in the graph to inspect it, filter logs, or retry from the failing point.
@@ -26,6 +26,7 @@
             {% if run.status in ['queued', 'running'] %}
             <button class="button warn" onclick="cancelRun('{{ run.run_id }}')">Cancel run</button>
             {% else %}
+            <button class="button primary" onclick="retryRun('{{ run.run_id }}', 'startover')">Rerun</button>
             <button class="button ghost" onclick="deleteRun('{{ run.run_id }}')">Delete run</button>
             {% endif %}
         </div>
@@ -164,6 +165,19 @@
     </section>
     {% endif %}
 </div>
+
+<div class="drawer-backdrop" id="output-preview-backdrop" hidden onclick="closeOutputPreview()"></div>
+<aside class="side-drawer" id="output-preview-drawer" aria-hidden="true" aria-labelledby="output-preview-title">
+    <div class="drawer-header">
+        <div>
+            <div class="detail-label">Output preview</div>
+            <h2 class="panel-title" id="output-preview-title">Task output</h2>
+            <p class="panel-copy" id="output-preview-meta"></p>
+        </div>
+        <button class="button ghost" type="button" onclick="closeOutputPreview()">Close</button>
+    </div>
+    <pre class="code-block drawer-code" id="output-preview-content"></pre>
+</aside>
 {% endblock %}
 
 {% block scripts %}
@@ -258,8 +272,15 @@ function renderRunInspector(taskId) {
     }
     const dependencyText = task.depends_on && task.depends_on.length ? task.depends_on.join(", ") : "none";
     const canRetryFromTask = currentRun.status === "failed" && (task.status === "failed" || task.status === "skipped");
+    const canRerun = currentRun.status !== "queued" && currentRun.status !== "running";
     const outputBlock = task.output_preview
-        ? `<div class="inspector-section"><div class="small-kicker">Output preview</div><pre class="code-block inspector-code">${escapeHtml(task.output_preview)}</pre></div>`
+        ? `<div class="inspector-section">
+            <div class="output-preview-header">
+                <div class="small-kicker">Output preview</div>
+                <button class="button ghost tiny-button" type="button" onclick="openOutputPreview('${task.task_id}')">Open</button>
+            </div>
+            <pre class="code-block inspector-code output-preview-clamp">${escapeHtml(task.output_preview)}</pre>
+        </div>`
         : "";
     const errorBlock = task.error ? `<p class="footer-note">${escapeHtml(task.error)}</p>` : "";
     inspector.innerHTML = `
@@ -289,9 +310,30 @@ function renderRunInspector(taskId) {
             <button class="button secondary" onclick="filterLogsToTask('${task.task_id}')">Filter logs</button>
             <button class="button ghost" onclick="copySelectedTaskCommand()">Copy command</button>
             ${canRetryFromTask ? `<button class="button primary" onclick="retryRun(runId, 'resume', '${task.task_id}')">Resume from here</button>` : ""}
-            ${currentRun.status === "failed" ? `<button class="button ghost" onclick="retryRun(runId, 'startover')">Start over</button>` : ""}
+            ${canRerun ? `<button class="button ghost" onclick="retryRun(runId, 'startover')">Rerun run</button>` : ""}
         </div>
     `;
+}
+
+function openOutputPreview(taskId) {
+    const task = currentTaskRuns.find((item) => item.task_id === taskId);
+    if (!task || !task.output_preview) {
+        return;
+    }
+    document.getElementById("output-preview-title").textContent = task.title || task.task_id;
+    document.getElementById("output-preview-meta").textContent = `${task.task_id} | ${task.output_type || "captured output"}`;
+    document.getElementById("output-preview-content").textContent = task.output_preview;
+    document.getElementById("output-preview-backdrop").hidden = false;
+    document.getElementById("output-preview-drawer").classList.add("open");
+    document.getElementById("output-preview-drawer").setAttribute("aria-hidden", "false");
+    document.body.classList.add("drawer-open");
+}
+
+function closeOutputPreview() {
+    document.getElementById("output-preview-backdrop").hidden = true;
+    document.getElementById("output-preview-drawer").classList.remove("open");
+    document.getElementById("output-preview-drawer").setAttribute("aria-hidden", "true");
+    document.body.classList.remove("drawer-open");
 }
 
 function renderTaskRuns(taskRuns) {
@@ -429,6 +471,12 @@ document.addEventListener("DOMContentLoaded", () => {
     startDurationTicker();
     if (active) {
         setInterval(refreshRun, 3000);
+    }
+});
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        closeOutputPreview();
     }
 });
 </script>

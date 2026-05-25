@@ -28,6 +28,11 @@ title: Piply Workspace
 workspace: .
 timezone: UTC
 
+variables:
+  scripts_dir: pipelines
+  batch_id: demo-batch
+  conda_env: py312_extract
+
 defaults:
   python: python
   env:
@@ -59,6 +64,29 @@ pipelines:
 ```
 
 Backward-compatible `jobs:` roots and older single-task style configs still load, but new projects should use `pipelines:`.
+
+### Reusable YAML Variables
+
+Use `variables` when paths, environment names, tenant labels, or command fragments repeat. Piply expands `{name}` inside any string field after loading `.env`, environment values, and secrets.
+
+```yaml
+variables:
+  scripts_dir: pipelines
+  raw_dir: data/raw
+  conda_env: py312_extract
+
+pipelines:
+  ingest_flow:
+    variables:
+      tenant_code: acme
+    tasks:
+      validate:
+        type: cli
+        command: conda run -n {conda_env} python {scripts_dir}/test_cli.py {tenant_code} {raw_dir}
+        cwd: .
+```
+
+Pipeline-level `variables` override top-level variables only for that pipeline. If a YAML value begins with `{name}`, quote it, for example `path: "{scripts_dir}/extract.py"`.
 
 ## 3. Python Tasks
 
@@ -118,6 +146,19 @@ tasks:
 ```
 
 Piply supports direct executable paths, `.cmd`, `.bat`, and `.ps1` path execution.
+
+For Bash-only syntax such as `set -a`, `source .env`, and `&&` chains that should run in Bash even on a machine whose default shell is not Bash, set `shell: bash`:
+
+```yaml
+tasks:
+  run_conda_job:
+    type: cli
+    shell: bash
+    command: set -a && source .env && set +a && conda run -n {conda_env} python {scripts_dir}/test_cli.py
+    cwd: .
+```
+
+Supported explicit shells include `bash`, `sh`, `zsh`, `cmd`, `powershell`, and `pwsh`. If `shell` is omitted, Piply keeps the old behavior and uses the platform default shell for `command` tasks.
 
 ## 5. API, Webhook, Email, And SSH Tasks
 
@@ -246,7 +287,26 @@ def build_report(context):
 
 CLI `--wait` runs finish downstream pipeline triggers inline, which makes local chain smoke tests deterministic.
 
-## 9. Schedules
+## 9. Multi-Tenant Runs And Params
+
+The same pipeline can run for different tenants without duplicating YAML. Pass tenant and params from the CLI or API; Python callable tasks receive them in `context`.
+
+```bash
+piply run extract_flow --tenant acme --param batch=2026-05-26 --param region=west --config piply-demo/piply.yaml
+piply tasks run extract_flow validate --tenant beta --param batch=nightly --config piply-demo/piply.yaml
+```
+
+```python
+def extract_data(context):
+    tenant_id = context.get("tenant_id")
+    params = context.get("params", {})
+    batch = params.get("batch")
+    return {"tenant": tenant_id, "batch": batch, "records": 120}
+```
+
+When a pipeline triggers another pipeline, Piply preserves the `tenant_id` and passes JSON-safe upstream outputs in the downstream context.
+
+## 10. Schedules
 
 Interval schedule:
 
@@ -270,7 +330,7 @@ piply pause extract_flow --config piply-demo/piply.yaml
 piply resume extract_flow --config piply-demo/piply.yaml
 ```
 
-## 10. Retries
+## 11. Retries
 
 ```yaml
 retry:
@@ -290,7 +350,7 @@ Manual retry:
 piply tasks retry <run_id> transform --mode resume --config piply-demo/piply.yaml
 ```
 
-## 11. Sensors
+## 12. Sensors
 
 Sensors poll external state and enqueue a pipeline or one task when something changes.
 
@@ -387,7 +447,27 @@ sensors:
 
 If `cursor_path` is omitted, Piply hashes the response body and triggers when it changes.
 
-## 12. Secrets And Connections
+## 13. Secrets And Connections
+
+Piply automatically reads `.env` files from the current directory and from the directory that contains your `piply.yaml`. A `.env` file is just a text file with one `KEY=value` per line:
+
+```env
+APP_BATCH_ID=demo-batch
+PIPLY_SECRET_API_TOKEN=replace-me
+PIPLY_SECRET_WAREHOUSE_DSN=postgresql://user:password@db.example.com:5432/app
+SMTP_PASSWORD=change-me
+```
+
+Use normal environment values directly:
+
+```yaml
+tasks:
+  validate:
+    type: cli
+    command: python pipelines/validate.py ${APP_BATCH_ID}
+```
+
+Use secret values explicitly with `${secret:NAME}`. With `prefix: PIPLY_SECRET_`, `${secret:API_TOKEN}` reads `PIPLY_SECRET_API_TOKEN`.
 
 Environment-backed secrets:
 
@@ -432,7 +512,7 @@ tasks:
     token: ${secret:API_TOKEN}
 ```
 
-## 13. Runtime Metrics
+## 14. Runtime Metrics
 
 Metrics are exposed in Dashboard, Settings, and the API:
 
@@ -449,7 +529,7 @@ Current counters include:
 - running and queued tasks
 - configured task capacity
 
-## 14. CLI Reference
+## 15. CLI Reference
 
 ### `piply init`
 
@@ -483,7 +563,10 @@ Trigger one pipeline.
 ```bash
 piply run extract_flow --config piply-demo/piply.yaml
 piply run extract_flow --config piply-demo/piply.yaml --wait
+piply run extract_flow --tenant acme --param batch=2026-05-26 --param count=25 --config piply-demo/piply.yaml
 ```
+
+`--tenant` is stored as `context["tenant_id"]`. Each `--param KEY=VALUE` is available under `context["params"][KEY]`; JSON values such as `--param count=25` become numbers.
 
 ### `piply tasks list`
 
@@ -499,6 +582,7 @@ Run one selected task and its required upstream dependencies.
 
 ```bash
 piply tasks run extract_flow publish_manifest --config piply-demo/piply.yaml
+piply tasks run extract_flow publish_manifest --tenant acme --param batch=nightly --config piply-demo/piply.yaml
 ```
 
 ### `piply tasks retry`
@@ -561,7 +645,7 @@ Compatibility alias for `piply start`.
 piply ui --config piply-demo/piply.yaml
 ```
 
-## 15. API Reference Highlights
+## 16. API Reference Highlights
 
 ```text
 GET  /api/dashboard
@@ -586,11 +670,12 @@ GET  /api/execution-matrix
 GET  /api/logs
 ```
 
-## 16. UI Pages
+## 17. UI Pages
 
 - Dashboard: run summary, runtime trend, active pipelines, failures, queue/worker metrics.
 - Pipelines: pipeline cards, trigger actions, schedule state.
 - Pipeline detail: DAG, selected-node details, retry/run task actions.
 - Execution Matrix: task rows by run columns.
+- Run detail: selected-task drawer, log filtering, rerun, retry-from-task, and long output preview drawer.
 - Logs: cross-run log search.
 - Settings: schedules, runtime settings, queue metrics, worker metrics.
