@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "piply"
-version = "0.0.8"
+version = "0.0.9"
 description = "Lightweight Python workflow orchestration platform"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
@@ -62,13 +62,15 @@ Issues = "https://github.com/gurudevkumar51/piply/issues"
 piply = "piply.cli.main:app"
 
 
-[tool.setuptools.packages.find]
-include = ["piply*"]
+[tool.setuptools]
+package-dir = { "" = "." }
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["piply*"]
 
 [tool.setuptools.package-data]
 piply = ["ui/templates/**/*.html", "ui/static/**/*"]
-
 
 # -------------------------
 # Ruff
