@@ -93,13 +93,15 @@ def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
     terminal_nodes = [task.task_id for task in detail["pipeline"].tasks.values() if task.task_id not in all_deps]
 
     for target in detail["pipeline"].triggers_on_success:
-        dag_tasks.append({
-            "task_id": f"trigger_{target}",
-            "title": f"Trigger: {target}",
-            "task_type": "pipeline",
-            "depends_on": terminal_nodes,
-            "command_preview": f"Triggers pipeline '{target}'",
-        })
+        dag_tasks.append(
+            {
+                "task_id": f"trigger_{target}",
+                "title": f"Trigger: {target}",
+                "task_type": "pipeline",
+                "depends_on": terminal_nodes,
+                "command_preview": f"Triggers pipeline '{target}'",
+            }
+        )
     task_state_map = dict(detail["summary"].latest_task_states)
     task_run_map = {task.task_id: task for task in detail["latest_task_runs"]}
     latest_task_run_payloads = [

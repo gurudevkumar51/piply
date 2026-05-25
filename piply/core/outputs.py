@@ -6,7 +6,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-
 MAX_OUTPUT_PREVIEW_CHARS = 2_000
 MAX_STORED_JSON_CHARS = 64_000
 

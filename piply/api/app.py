@@ -33,7 +33,9 @@ def _build_service(
     current_settings = settings or load_settings(config_path or os.getenv("PIPLY_CONFIG"))
     env_config = config_path or (str(current_settings.config_path) if current_settings.config_path else None)
     env_database = (
-        str(current_settings.database_path) if current_settings.database_path is not None else os.getenv("PIPLY_DATABASE")
+        str(current_settings.database_path)
+        if current_settings.database_path is not None
+        else os.getenv("PIPLY_DATABASE")
     )
     return PipelineService(
         config_path=env_config,
@@ -55,22 +57,22 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.templates = Jinja2Templates(directory=str(_ui_directory() / "templates"))
         scheduler.start()
-        
+
         async def _shutdown_watcher():
             while True:
                 if service.store.get_meta("shutdown_requested") == "true":
                     service.store.set_meta("shutdown_requested", "false")
-                    if os.name == 'nt':
+                    if os.name == "nt":
                         os.kill(os.getpid(), signal.CTRL_C_EVENT)
                     else:
                         os.kill(os.getpid(), signal.SIGINT)
                     break
                 await asyncio.sleep(2)
-        
+
         watcher_task = asyncio.create_task(_shutdown_watcher())
-        
+
         yield
-        
+
         watcher_task.cancel()
         scheduler.stop()
 

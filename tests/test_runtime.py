@@ -13,7 +13,7 @@ from piply.core.service import PipelineService
 
 
 def _basic_auth_header(username: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
     return {"Authorization": f"Basic {token}"}
 
 
@@ -62,7 +62,9 @@ def test_service_reconciles_stale_running_runs(tmp_path: Path) -> None:
     assert any("heartbeat timeout" in line.message for line in logs)
 
 
-def test_auth_middleware_supports_basic_for_ui_and_bearer_for_api(tmp_path: Path) -> None:
+def test_auth_middleware_supports_basic_for_ui_and_bearer_for_api(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "job.py").write_text("print('job')", encoding="utf-8")
@@ -127,7 +129,9 @@ def test_auth_middleware_supports_basic_for_ui_and_bearer_for_api(tmp_path: Path
     assert api_bearer.status_code == 200
 
 
-def test_run_api_includes_upcoming_runs_and_pipeline_run_overrides(tmp_path: Path) -> None:
+def test_run_api_includes_upcoming_runs_and_pipeline_run_overrides(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 

@@ -68,7 +68,7 @@ class RunResponse(BaseModel):
     tenant_id: str | None = None
 
     @classmethod
-    def from_record(cls, record: RunRecord) -> "RunResponse":
+    def from_record(cls, record: RunRecord) -> RunResponse:
         """Convert one RunRecord to an API response."""
         return cls(
             id=record.run_id,
@@ -112,7 +112,7 @@ class TaskResponse(BaseModel):
     on_upstream_failure: str
 
     @classmethod
-    def from_definition(cls, definition: TaskDefinition) -> "TaskResponse":
+    def from_definition(cls, definition: TaskDefinition) -> TaskResponse:
         """Convert a TaskDefinition to an API response."""
         return cls(
             task_id=definition.task_id,
@@ -148,7 +148,7 @@ class TaskRunResponse(BaseModel):
     output_is_json: bool = False
 
     @classmethod
-    def from_record(cls, record: TaskRunRecord) -> "TaskRunResponse":
+    def from_record(cls, record: TaskRunRecord) -> TaskRunResponse:
         """Convert one TaskRunRecord to an API response."""
         return cls(
             run_id=record.run_id,
@@ -185,7 +185,7 @@ class TaskOutputResponse(BaseModel):
     created_at: datetime | None = None
 
     @classmethod
-    def from_record(cls, record: TaskOutputRecord) -> "TaskOutputResponse":
+    def from_record(cls, record: TaskOutputRecord) -> TaskOutputResponse:
         """Convert one TaskOutputRecord to an API response."""
         import json
 
@@ -216,7 +216,7 @@ class LogResponse(BaseModel):
     message: str
 
     @classmethod
-    def from_record(cls, record: LogRecord) -> "LogResponse":
+    def from_record(cls, record: LogRecord) -> LogResponse:
         """Convert one LogRecord to an API response."""
         return cls(
             run_id=record.run_id,
@@ -254,7 +254,7 @@ class PipelineResponse(BaseModel):
     last_run: RunResponse | None = None
 
     @classmethod
-    def from_summary(cls, summary: PipelineSummary) -> "PipelineResponse":
+    def from_summary(cls, summary: PipelineSummary) -> PipelineResponse:
         """Convert one PipelineSummary to an API response."""
         return cls(
             pipeline_id=summary.pipeline_id,
@@ -290,7 +290,7 @@ class PipelineDetailResponse(BaseModel):
     recent_runs: list[RunResponse]
 
     @classmethod
-    def from_payload(cls, payload: dict[str, object]) -> "PipelineDetailResponse":
+    def from_payload(cls, payload: dict[str, object]) -> PipelineDetailResponse:
         """Convert the service-layer pipeline detail payload to an API response."""
         pipeline = payload["pipeline"]
         summary = payload["summary"]
@@ -318,7 +318,7 @@ class DashboardStatsResponse(BaseModel):
     success_rate: float
 
     @classmethod
-    def from_stats(cls, stats: DashboardStats) -> "DashboardStatsResponse":
+    def from_stats(cls, stats: DashboardStats) -> DashboardStatsResponse:
         """Convert DashboardStats to an API response."""
         return cls(
             total_pipelines=stats.total_pipelines,

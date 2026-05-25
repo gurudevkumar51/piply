@@ -121,7 +121,10 @@ def test_run_api_returns_newest_logs_first_with_time_label(tmp_path: Path) -> No
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["logs"][0]["message"] == "Run completed successfully." or payload["logs"][0]["message"] == "Pipeline completed successfully."
+    assert (
+        payload["logs"][0]["message"] == "Run completed successfully."
+        or payload["logs"][0]["message"] == "Pipeline completed successfully."
+    )
     assert re.match(r"^\d{2}:\d{2}:\d{2}\.\d{3}$", payload["logs"][0]["time_label"])
 
 

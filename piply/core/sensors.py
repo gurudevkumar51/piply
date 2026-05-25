@@ -60,9 +60,7 @@ def _iter_remote_sensor_files(sensor: SensorDefinition) -> list[str]:
     max_depth = "" if sensor.recursive else "-maxdepth 1"
     pattern = shlex.quote(sensor.pattern or "*")
     remote_path = shlex.quote(sensor.remote_path)
-    remote_command = (
-        f"find {remote_path} {max_depth} -type f -name {pattern} -print 2>/dev/null || true"
-    ).strip()
+    remote_command = (f"find {remote_path} {max_depth} -type f -name {pattern} -print 2>/dev/null || true").strip()
     target = "@".join(part for part in [sensor.ssh_user, sensor.ssh_host] if part) or sensor.ssh_host
 
     command = [
@@ -143,10 +141,7 @@ def _is_sql_name_path(value: str) -> bool:
         return False
     parts = value.split(".")
     return all(
-        bool(part)
-        and part.replace("_", "").replace("$", "").isalnum()
-        and not part[0].isdigit()
-        for part in parts
+        bool(part) and part.replace("_", "").replace("$", "").isalnum() and not part[0].isdigit() for part in parts
     )
 
 
@@ -195,9 +190,8 @@ def poll_sql_sensor(
     if current_cursor <= previous_cursor:
         return previous_state, None
 
-    database_label = (
-        mask_connection_secret(sensor.connection)
-        or (str(sensor.database) if sensor.database is not None else None)
+    database_label = mask_connection_secret(sensor.connection) or (
+        str(sensor.database) if sensor.database is not None else None
     )
     return (
         previous_state,
@@ -262,11 +256,21 @@ def _response_cursor(response_text: str, cursor_path: str | None) -> tuple[str, 
             return str(cursor_value), parsed_json
 
     if isinstance(parsed_json, dict):
-        for candidate in ("cursor", "version", "updated_at", "last_modified", "id", "count"):
+        for candidate in (
+            "cursor",
+            "version",
+            "updated_at",
+            "last_modified",
+            "id",
+            "count",
+        ):
             if parsed_json.get(candidate) is not None:
                 return str(parsed_json[candidate]), parsed_json
     if isinstance(parsed_json, list):
-        return _hash_parts([json.dumps(parsed_json, sort_keys=True, default=str)]), parsed_json
+        return (
+            _hash_parts([json.dumps(parsed_json, sort_keys=True, default=str)]),
+            parsed_json,
+        )
     return _hash_parts([response_text]), parsed_json
 
 

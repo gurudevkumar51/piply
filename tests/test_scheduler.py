@@ -34,7 +34,11 @@ class ImmediateEngine(BaseEngine):
                 store.mark_task_reused(run.run_id, task.task_id, "seed")
                 continue
             store.mark_task_running(run.run_id, task.task_id)
-            store.append_log(run.run_id, f"ImmediateEngine executed {task.task_id}", task_id=task.task_id)
+            store.append_log(
+                run.run_id,
+                f"ImmediateEngine executed {task.task_id}",
+                task_id=task.task_id,
+            )
             store.finish_task_run(run.run_id, task.task_id, status="success", exit_code=0)
         store.finish_run(run.run_id, status="success", exit_code=0)
         final_run = store.get_run(run.run_id)

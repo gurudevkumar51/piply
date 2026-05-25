@@ -177,7 +177,9 @@ def test_load_project_parses_file_and_sql_sensors(tmp_path: Path) -> None:
     assert pipeline.sensors["inbound_rows"].table == "inbound_events"
 
 
-def test_load_project_expands_dotenv_for_sql_connection_and_sftp_sensor(tmp_path: Path) -> None:
+def test_load_project_expands_dotenv_for_sql_connection_and_sftp_sensor(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "job.py").write_text("print('job')", encoding="utf-8")
@@ -228,7 +230,9 @@ def test_load_project_expands_dotenv_for_sql_connection_and_sftp_sensor(tmp_path
     assert pipeline.sensors["inbound_rows"].connection.endswith("/workspace/sensor.db")
 
 
-def test_load_project_resolves_secret_backed_connections_and_api_sensor(tmp_path: Path) -> None:
+def test_load_project_resolves_secret_backed_connections_and_api_sensor(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "job.py").write_text("print('job')", encoding="utf-8")

@@ -17,8 +17,8 @@ from .models import (
     RetryMode,
     RunRecord,
     TaskOutputRecord,
-    TriggerQueueRecord,
     TaskRunRecord,
+    TriggerQueueRecord,
 )
 from .outputs import load_json_output, serialize_task_output
 
@@ -62,14 +62,8 @@ class RunStore:
 
     def _refresh_schema_info(self, connection: sqlite3.Connection) -> None:
         """Cache schema metadata used for compatibility-aware inserts."""
-        self._run_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(runs)").fetchall()
-        }
-        self._log_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(logs)").fetchall()
-        }
+        self._run_columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+        self._log_columns = {row["name"] for row in connection.execute("PRAGMA table_info(logs)").fetchall()}
 
     def _initialize(self) -> None:
         """Create or migrate the runtime schema in place."""
@@ -194,9 +188,7 @@ class RunStore:
 
             if "primary_entry" not in self._run_columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN primary_entry TEXT")
-                connection.execute(
-                    "UPDATE runs SET primary_entry = COALESCE(script_path, working_dir, command, '')"
-                )
+                connection.execute("UPDATE runs SET primary_entry = COALESCE(script_path, working_dir, command, '')")
 
             if "retry_of" not in self._run_columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN retry_of TEXT")
@@ -1193,9 +1185,7 @@ class RunStore:
     def list_paused_pipeline_ids(self) -> set[str]:
         """Return the set of paused pipeline ids."""
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT pipeline_id FROM pipeline_overrides WHERE paused = 1"
-            ).fetchall()
+            rows = connection.execute("SELECT pipeline_id FROM pipeline_overrides WHERE paused = 1").fetchall()
         return {row["pipeline_id"] for row in rows}
 
     def set_meta(self, key: str, value: str) -> None:

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 import threading
-import inspect
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -54,10 +54,7 @@ class PipelineService:
         self.database_path = (
             Path(database_path).resolve()
             if database_path
-            else (
-                self.settings.database_path
-                or (self.config_path.parent / ".piply" / "piply.db").resolve()
-            )
+            else (self.settings.database_path or (self.config_path.parent / ".piply" / "piply.db").resolve())
         )
         self.store = RunStore(self.database_path)
         self.engine = engine or LocalEngine(heartbeat_interval_seconds=self.settings.heartbeat_interval_seconds)
@@ -75,12 +72,8 @@ class PipelineService:
             signature = inspect.signature(self.engine.dispatch)
         except (TypeError, ValueError):
             return False
-        return (
-            "initial_context" in signature.parameters
-            or any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD
-                for parameter in signature.parameters.values()
-            )
+        return "initial_context" in signature.parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
         )
 
     def _should_wait_for_pipeline_triggers(self) -> bool:
@@ -152,9 +145,7 @@ class PipelineService:
                     description=pipeline.description,
                     enabled=pipeline.enabled,
                     paused=pipeline.pipeline_id in paused_ids,
-                    schedule_text=(
-                        pipeline.schedule.describe() if pipeline.schedule else "Manual only"
-                    ),
+                    schedule_text=(pipeline.schedule.describe() if pipeline.schedule else "Manual only"),
                     next_run_at=next_run_at,
                     next_run_label=self._format_next_run_label(next_run_at, now=now),
                     tags=pipeline.tags,
@@ -406,20 +397,14 @@ class PipelineService:
                     )
                 else:
                     parent_run_id = (
-                        str(payload["source_run_id"])
-                        if isinstance(payload.get("source_run_id"), str)
-                        else None
+                        str(payload["source_run_id"]) if isinstance(payload.get("source_run_id"), str) else None
                     )
                     parent_pipeline_id = (
                         str(payload["source_pipeline_id"])
                         if isinstance(payload.get("source_pipeline_id"), str)
                         else None
                     )
-                    tenant_id = (
-                        str(payload["tenant_id"])
-                        if isinstance(payload.get("tenant_id"), str)
-                        else None
-                    )
+                    tenant_id = str(payload["tenant_id"]) if isinstance(payload.get("tenant_id"), str) else None
                     initial_context: dict[str, object] = {}
                     if isinstance(payload.get("context"), dict):
                         initial_context.update(payload["context"])  # type: ignore[arg-type]
@@ -847,10 +832,7 @@ class PipelineService:
 
         self.store.append_log(
             run.run_id,
-            (
-                f"Automatic retry {retry_depth + 1}/{retry_policy.attempts} queued "
-                f"using {retry_policy.mode} mode."
-            ),
+            (f"Automatic retry {retry_depth + 1}/{retry_policy.attempts} queued " f"using {retry_policy.mode} mode."),
         )
 
         self.enqueue_pipeline_trigger(
@@ -922,9 +904,7 @@ class PipelineService:
                 continue
             triggers = candidate.get("triggers_on_success")
             if isinstance(triggers, list):
-                candidate["triggers_on_success"] = [
-                    item for item in triggers if str(item) != pipeline_id
-                ]
+                candidate["triggers_on_success"] = [item for item in triggers if str(item) != pipeline_id]
 
         self.config_path.write_text(
             yaml.safe_dump(raw_data, sort_keys=False, allow_unicode=False),
@@ -938,9 +918,7 @@ class PipelineService:
         queue_metrics = self.store.queue_metrics()
         worker_metrics = self.store.worker_metrics()
         configured_capacity = sum(
-            pipeline.max_parallel_tasks
-            for pipeline in self.project.pipelines.values()
-            if pipeline.enabled
+            pipeline.max_parallel_tasks for pipeline in self.project.pipelines.values() if pipeline.enabled
         )
         worker_metrics["configured_task_capacity"] = configured_capacity
         worker_metrics["default_task_capacity"] = self.settings.default_max_parallel_tasks
@@ -997,7 +975,13 @@ class PipelineService:
         if selected_pipeline_id is None:
             selected_pipeline_id = pipelines[0].pipeline_id if pipelines else None
         if selected_pipeline_id is None:
-            return {"pipelines": [], "selected_pipeline_id": None, "runs": [], "rows": [], "trend": []}
+            return {
+                "pipelines": [],
+                "selected_pipeline_id": None,
+                "runs": [],
+                "rows": [],
+                "trend": [],
+            }
 
         pipeline = self.get_pipeline(selected_pipeline_id)
         runs = self.list_runs(
@@ -1010,8 +994,7 @@ class PipelineService:
         )
         ordered_runs = list(reversed(runs))
         task_runs_by_run = {
-            run.run_id: {task.task_id: task for task in self.store.list_task_runs(run.run_id)}
-            for run in ordered_runs
+            run.run_id: {task.task_id: task for task in self.store.list_task_runs(run.run_id)} for run in ordered_runs
         }
         rows: list[dict[str, object]] = []
         for task in pipeline.tasks.values():
@@ -1079,9 +1062,7 @@ class PipelineService:
             "workers": scheduler.get("worker_metrics", {}),
         }
         stats = self.store.get_stats(
-            scheduled_pipeline_count=sum(
-                1 for pipeline in pipelines if pipeline.schedule_text != "Manual only"
-            ),
+            scheduled_pipeline_count=sum(1 for pipeline in pipelines if pipeline.schedule_text != "Manual only"),
             total_pipeline_count=len(pipelines),
         )
         return {

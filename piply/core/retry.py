@@ -45,9 +45,7 @@ def build_retry_plan(
         )
 
     unresolved = {
-        task.task_id
-        for task in previous_task_runs
-        if task.status in {"failed", "skipped", "queued", "running"}
+        task.task_id for task in previous_task_runs if task.status in {"failed", "skipped", "queued", "running"}
     }
     if not unresolved:
         raise ValueError("This run does not have failed or skipped tasks to resume.")

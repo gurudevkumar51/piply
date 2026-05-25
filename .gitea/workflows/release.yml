@@ -1,55 +1,111 @@
-name: PIPLY CI/CD (Python → Build → PyPI)
+name: Piply Release
 
 on:
   push:
     tags:
       - "v*"
 
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - ".gitignore"
 
 jobs:
+
   build-and-publish:
     runs-on: linux_amd64
 
+    permissions:
+      contents: read
+
     steps:
+
+      # -------------------------
+      # Checkout
+      # -------------------------
+
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+
+      # -------------------------
+      # Python Setup
+      # -------------------------
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+
+
+      # -------------------------
+      # Upgrade pip
+      # -------------------------
 
       - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip
 
+
+      # -------------------------
+      # Install package
+      # -------------------------
+
       - name: Install dependencies
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,test,build]"
+
+
+      # -------------------------
+      # Lint
+      # -------------------------
 
       - name: Run lint
         run: |
-          black --check .
-          isort --check-only .
           ruff check .
+          ruff format --check .
+
+
+      # -------------------------
+      # Run tests
+      # -------------------------
 
       - name: Run tests
         run: |
           pytest
 
-      - name: Install build tools
-        run: |
-          pip install build twine
 
-      - name: Build Python package
+      # -------------------------
+      # Build package
+      # -------------------------
+
+      - name: Build package
         run: |
           python -m build
-      
-      - name: Publish to Public PyPI
+
+
+      # -------------------------
+      # Validate package
+      # -------------------------
+
+      - name: Validate package
+        run: |
+          twine check dist/*
+
+
+      # -------------------------
+      # Upload artifacts
+      # -------------------------
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: piply-dist
+          path: dist/
+
+
+      # -------------------------
+      # Publish to PyPI
+      # -------------------------
+
+      - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

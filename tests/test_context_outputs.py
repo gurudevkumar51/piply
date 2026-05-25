@@ -7,7 +7,9 @@ from piply.core.loader import load_project
 from piply.core.service import PipelineService
 
 
-def test_python_task_outputs_are_passed_through_context_and_persisted(tmp_path: Path) -> None:
+def test_python_task_outputs_are_passed_through_context_and_persisted(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "ops.py").write_text(
@@ -75,7 +77,7 @@ def test_task_upstream_failure_behavior_can_fail_or_continue(tmp_path: Path) -> 
                 "    tasks:",
                 "      extract:",
                 "        type: cli",
-                "        command: python -c \"raise SystemExit(1)\"",
+                '        command: python -c "raise SystemExit(1)"',
                 "      transform:",
                 "        type: cli",
                 "        command: python -c \"print('still-runs')\"",
@@ -101,7 +103,11 @@ def test_task_upstream_failure_behavior_can_fail_or_continue(tmp_path: Path) -> 
     status_by_task = {task.task_id: task.status for task in task_runs}
 
     assert stored_run.status == "failed"
-    assert status_by_task == {"extract": "failed", "transform": "success", "load": "failed"}
+    assert status_by_task == {
+        "extract": "failed",
+        "transform": "success",
+        "load": "failed",
+    }
     assert any("still-runs" in line.message for line in logs)
 
 

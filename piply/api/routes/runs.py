@@ -49,9 +49,7 @@ def get_run(request: Request, run_id: str) -> RunDetailResponse:
         run=RunResponse.from_record(payload["run"]),
         task_runs=[TaskRunResponse.from_record(item) for item in payload["task_runs"]],
         logs=[LogResponse.from_record(item) for item in payload["logs"]],
-        upcoming_runs=[
-            UpcomingRunResponse(**item) for item in payload["upcoming_runs"]
-        ],
+        upcoming_runs=[UpcomingRunResponse(**item) for item in payload["upcoming_runs"]],
     )
 
 

@@ -30,9 +30,7 @@ def parse_interval(value: str) -> int:
     multiplier_map = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     unit = value[-1]
     if unit not in multiplier_map:
-        raise ScheduleError(
-            "Interval values must end with s, m, h, or d (for example: 30s, 15m, 2h)"
-        )
+        raise ScheduleError("Interval values must end with s, m, h, or d (for example: 30s, 15m, 2h)")
 
     try:
         quantity = int(value[:-1])
@@ -94,9 +92,7 @@ class CronSchedule:
     def __post_init__(self) -> None:
         parts = self.expression.split()
         if len(parts) != 5:
-            raise ScheduleError(
-                "Cron expressions must have 5 fields: minute hour day month weekday"
-            )
+            raise ScheduleError("Cron expressions must have 5 fields: minute hour day month weekday")
         object.__setattr__(self, "_parts", tuple(parts))
         object.__setattr__(self, "_timezone", parse_timezone(self.timezone_name))
         object.__setattr__(self, "_minutes", _expand_part(parts[0], 0, 59))

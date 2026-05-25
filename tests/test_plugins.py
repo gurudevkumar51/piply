@@ -46,7 +46,7 @@ def test_api_operator_sends_bearer_token(tmp_path: Path) -> None:
                 f"        url: http://127.0.0.1:{server.server_port}/hook",
                 "        method: POST",
                 "        token: demo-token",
-                "        body: '{\"hello\": \"world\"}'",
+                '        body: \'{"hello": "world"}\'',
                 "        expected_status: 201",
             ]
         ),

@@ -10,7 +10,6 @@ from typing import Any
 
 import yaml
 
-
 ENV_TOKEN_PATTERN = re.compile(r"\$(\w+)|\$\{([^}]+)\}|%([^%]+)%")
 
 

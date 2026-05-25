@@ -64,7 +64,11 @@ class TaskRunner:
             if task.call:
                 return self._run_python_call_task(task)
 
-            command = [task.python or "python", str(task.path), *(str(item) for item in task.args)]
+            command = [
+                task.python or "python",
+                str(task.path),
+                *(str(item) for item in task.args),
+            ]
             return self._run_subprocess(
                 command=command,
                 cwd=task.working_directory,
@@ -174,7 +178,12 @@ class TaskRunner:
         assert task.path is not None
         suffix = task.path.suffix.lower()
         if suffix in {".bat", ".cmd"}:
-            command = ["cmd.exe", "/c", str(task.path), *(str(item) for item in task.args)]
+            command = [
+                "cmd.exe",
+                "/c",
+                str(task.path),
+                *(str(item) for item in task.args),
+            ]
             return self._run_subprocess(
                 command=command,
                 cwd=task.working_directory,
@@ -245,7 +254,10 @@ class TaskRunner:
             with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
                 result = self._invoke_callable(callable_object, task)
         except Exception as exc:
-            stdio_output = [stdout_buffer.getvalue().rstrip(), stderr_buffer.getvalue().rstrip()]
+            stdio_output = [
+                stdout_buffer.getvalue().rstrip(),
+                stderr_buffer.getvalue().rstrip(),
+            ]
             for output in stdio_output:
                 if output:
                     for line in output.splitlines():
@@ -254,7 +266,10 @@ class TaskRunner:
             self.emit(message, task_id=task.task_id)
             return TaskExecutionResult(status="failed", error=message)
 
-        for output in [stdout_buffer.getvalue().rstrip(), stderr_buffer.getvalue().rstrip()]:
+        for output in [
+            stdout_buffer.getvalue().rstrip(),
+            stderr_buffer.getvalue().rstrip(),
+        ]:
             if output:
                 for line in output.splitlines():
                     self.emit(line, task_id=task.task_id)
@@ -264,7 +279,8 @@ class TaskRunner:
             return TaskExecutionResult(status="cancelled")
 
         if result is not None:
-            if isinstance(result, (dict, list, tuple, int, float, bool)):
+            # if isinstance(result, (dict, list, tuple, int, float, bool)):
+            if isinstance(result, dict | list | tuple | int | float | bool):
                 rendered = json.dumps(result, default=str)
             else:
                 rendered = str(result)
@@ -338,18 +354,18 @@ class TaskRunner:
     def _run_email_task(self, task: TaskDefinition) -> TaskExecutionResult:
         import smtplib
         from email.message import EmailMessage
-        
+
         if not task.email_to:
             message = "No recipients specified for email task."
             self.emit(message, task_id=task.task_id)
             return TaskExecutionResult(status="failed", error=message)
-            
+
         msg = EmailMessage()
         msg.set_content(task.email_body or "")
         msg["Subject"] = task.email_subject or "Piply Notification"
         msg["From"] = task.smtp_user or "piply@localhost"
         msg["To"] = ", ".join(task.email_to)
-        
+
         try:
             with smtplib.SMTP(task.smtp_host or "localhost", task.smtp_port) as server:
                 if task.smtp_user and task.smtp_password:

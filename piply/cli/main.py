@@ -83,8 +83,8 @@ def init(
                 "",
                 "pipelines:",
                 "  extract_flow:",
-                '    title: Extract Flow',
-                '    description: Multi-task starter pipeline with context passing and a downstream trigger.',
+                "    title: Extract Flow",
+                "    description: Multi-task starter pipeline with context passing and a downstream trigger.",
                 "    schedule:",
                 "      every: 15m",
                 "    retry:",
@@ -116,8 +116,8 @@ def init(
                 "        command: python -c \"print('Publishing manifest for downstream flow...')\"",
                 "        depends_on: [transform]",
                 "  report_flow:",
-                '    title: Report Flow',
-                '    description: Triggered automatically after extract_flow succeeds.',
+                "    title: Report Flow",
+                "    description: Triggered automatically after extract_flow succeeds.",
                 "    tasks:",
                 "      build_report:",
                 "        type: python",
@@ -127,8 +127,8 @@ def init(
                 "          report_name: starter-report",
                 "",
                 "  operator_examples:",
-                '    title: Operator Examples',
-                '    description: Disabled reference pipeline showing every built-in operator type.',
+                "    title: Operator Examples",
+                "    description: Disabled reference pipeline showing every built-in operator type.",
                 "    enabled: false",
                 "    tasks:",
                 "      cli_example:",
@@ -143,7 +143,7 @@ def init(
                 "        type: webhook",
                 "        url: https://example.com/webhook",
                 "        method: POST",
-                "        body: '{\"event\":\"piply-demo\"}'",
+                '        body: \'{"event":"piply-demo"}\'',
                 "        depends_on: [cli_example]",
                 "        on_upstream_failure: continue",
                 "      email_example:",
@@ -165,8 +165,8 @@ def init(
                 "        on_upstream_failure: fail",
                 "",
                 "  sensor_examples:",
-                '    title: Sensor Examples',
-                '    description: Disabled reference pipeline showing file, SQL, and API sensors.',
+                "    title: Sensor Examples",
+                "    description: Disabled reference pipeline showing file, SQL, and API sensors.",
                 "    enabled: false",
                 "    sensors:",
                 "      inbox_files:",
@@ -226,7 +226,7 @@ def init(
                 "        extracted = {}",
                 "    records = int(extracted.get('records') or 0)",
                 "    transformed = {'records': records + 1, 'source': 'extract_flow'}",
-                "    print(f\"Transformed payload: {transformed}\")",
+                '    print(f"Transformed payload: {transformed}")',
                 "    return transformed",
                 "",
                 "",
@@ -409,7 +409,7 @@ def logs(
             typer.echo(f"[{log.created_at.strftime('%H:%M:%S.%f')[:-3]}] [{log.task_id or 'pipeline'}] {log.message}")
     except KeyError as exc:
         typer.echo(str(exc))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
 
 @tasks_app.command("run")
@@ -430,7 +430,7 @@ def run_task(
         )
     except KeyError as exc:
         typer.echo(str(exc))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
     typer.echo(f"Run ID: {run_record.run_id}")
     if wait:
@@ -452,7 +452,7 @@ def pause(
         typer.echo(f"Pipeline '{pipeline_id}' scheduled runs paused.")
     except KeyError as exc:
         typer.echo(str(exc))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()
@@ -466,7 +466,7 @@ def resume(
         typer.echo(f"Pipeline '{pipeline_id}' scheduled runs resumed.")
     except KeyError as exc:
         typer.echo(str(exc))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()

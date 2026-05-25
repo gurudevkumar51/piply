@@ -7,7 +7,6 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-
 SUPPORTED_SQL_SCHEMES = {
     "sqlite",
     "sqlite3",

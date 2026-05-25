@@ -8,7 +8,6 @@ from collections.abc import Callable
 from piply.core.models import PipelineDefinition, RunRecord
 from piply.core.store import RunStore
 
-
 LogCallback = Callable[[str], None]
 CompletionCallback = Callable[[PipelineDefinition, RunRecord], None]
 

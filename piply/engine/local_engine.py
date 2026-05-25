@@ -142,12 +142,15 @@ class LocalEngine(BaseEngine):
                     cancel_event,
                 )
 
-            failed_tasks = [
-                task_id for task_id, status in task_statuses.items() if status == "failed"
-            ]
+            failed_tasks = [task_id for task_id, status in task_statuses.items() if status == "failed"]
             if cancel_event.is_set():
                 self._mark_pending_tasks_cancelled(pipeline, run_id, store, runner, task_statuses)
-                store.finish_run(run_id, status="cancelled", exit_code=None, error="Run cancelled by user.")
+                store.finish_run(
+                    run_id,
+                    status="cancelled",
+                    exit_code=None,
+                    error="Run cancelled by user.",
+                )
             elif failed_tasks:
                 store.finish_run(run_id, status="failed", exit_code=1, error=first_error)
                 final_run = store.get_run(run_id)

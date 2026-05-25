@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-
 RunStatus = Literal["queued", "running", "success", "failed", "cancelled"]
 TaskStatus = Literal["queued", "running", "success", "failed", "skipped", "cancelled"]
 TriggerType = Literal["manual", "schedule", "api", "pipeline", "retry", "sensor", "task"]
@@ -23,14 +22,11 @@ class SchedulePlan(Protocol):
 
     timezone_name: str
 
-    def describe(self) -> str:
-        ...
+    def describe(self) -> str: ...
 
-    def current_slot(self, now_utc: datetime) -> datetime | None:
-        ...
+    def current_slot(self, now_utc: datetime) -> datetime | None: ...
 
-    def next_after(self, now_utc: datetime) -> datetime | None:
-        ...
+    def next_after(self, now_utc: datetime) -> datetime | None: ...
 
 
 @dataclass(slots=True, frozen=True)
@@ -174,9 +170,7 @@ class TaskDefinition:
         if self.task_type == "python":
             if self.call:
                 rendered_args = ", ".join(str(item) for item in self.args)
-                rendered_kwargs = ", ".join(
-                    f"{key}={value}" for key, value in self.kwargs.items()
-                )
+                rendered_kwargs = ", ".join(f"{key}={value}" for key, value in self.kwargs.items())
                 signature = ", ".join(item for item in [rendered_args, rendered_kwargs] if item)
                 target = self.call or "<missing callable>"
                 return f"python {target}({signature})" if signature else f"python {target}()"

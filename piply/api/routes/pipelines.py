@@ -4,13 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from piply.api.schemas import (
-    PipelineDetailResponse,
-    PipelineResponse,
-    RunResponse,
-    TaskResponse,
-    TriggerRunRequest,
-)
+from piply.api.schemas import PipelineDetailResponse, PipelineResponse, RunResponse, TaskResponse, TriggerRunRequest
 
 router = APIRouter(prefix="/api/pipelines", tags=["pipelines"])
 
