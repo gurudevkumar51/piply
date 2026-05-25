@@ -62,8 +62,7 @@ class PipelineService:
             else (self.settings.database_path or (self.config_path.parent / ".piply" / "piply.db").resolve())
         )
         self.store = RunStore(self.database_path)
-        self.engine = engine or LocalEngine(
-            heartbeat_interval_seconds=self.settings.heartbeat_interval_seconds)
+        self.engine = engine or LocalEngine(heartbeat_interval_seconds=self.settings.heartbeat_interval_seconds)
         self._engine_accepts_initial_context = self._detect_engine_initial_context_support()
         self._dispatch_context = threading.local()
         self._project: ProjectDefinition | None = None
@@ -141,12 +140,9 @@ class PipelineService:
         now = datetime.now(timezone.utc)
         summaries: list[PipelineSummary] = []
         for pipeline in project.pipelines.values():
-            last_run = self.store.get_latest_run_for_pipeline(
-                pipeline.pipeline_id)
-            next_run_at = pipeline.schedule.next_after(
-                now) if pipeline.schedule else None
-            latest_task_states = self.store.get_latest_task_states_for_pipeline(
-                pipeline.pipeline_id)
+            last_run = self.store.get_latest_run_for_pipeline(pipeline.pipeline_id)
+            next_run_at = pipeline.schedule.next_after(now) if pipeline.schedule else None
+            latest_task_states = self.store.get_latest_task_states_for_pipeline(pipeline.pipeline_id)
             summaries.append(
                 PipelineSummary(
                     pipeline_id=pipeline.pipeline_id,
@@ -154,11 +150,9 @@ class PipelineService:
                     description=pipeline.description,
                     enabled=pipeline.enabled,
                     paused=pipeline.pipeline_id in paused_ids,
-                    schedule_text=(pipeline.schedule.describe()
-                                   if pipeline.schedule else "Manual only"),
+                    schedule_text=(pipeline.schedule.describe() if pipeline.schedule else "Manual only"),
                     next_run_at=next_run_at,
-                    next_run_label=self._format_next_run_label(
-                        next_run_at, now=now),
+                    next_run_label=self._format_next_run_label(next_run_at, now=now),
                     tags=pipeline.tags,
                     primary_entry=pipeline.primary_entry,
                     command_preview=pipeline.command_preview,
@@ -169,8 +163,7 @@ class PipelineService:
                     trigger_targets=pipeline.triggers_on_success,
                     latest_task_states=latest_task_states,
                     last_run=last_run,
-                    active_runs=self.store.count_running_runs(
-                        pipeline.pipeline_id),
+                    active_runs=self.store.count_running_runs(pipeline.pipeline_id),
                     retry_summary=pipeline.retry_policy.summary,
                 )
             )
@@ -197,8 +190,7 @@ class PipelineService:
         summary = self.get_pipeline_summary(pipeline_id)
         latest_task_runs = []
         if summary.last_run is not None:
-            latest_task_runs = self.store.list_task_runs(
-                summary.last_run.run_id)
+            latest_task_runs = self.store.list_task_runs(summary.last_run.run_id)
         return {
             "pipeline": pipeline,
             "summary": summary,
@@ -250,8 +242,7 @@ class PipelineService:
         if current_slot is None:
             return []
 
-        latest_slot = self.store.get_latest_materialized_slot(
-            pipeline.pipeline_id)
+        latest_slot = self.store.get_latest_materialized_slot(pipeline.pipeline_id)
         if latest_slot is None:
             return [current_slot]
 
@@ -325,8 +316,7 @@ class PipelineService:
             for sensor in pipeline.sensors.values():
                 if not sensor.enabled:
                     continue
-                sensor_key = self._sensor_state_key(
-                    pipeline.pipeline_id, sensor.sensor_id)
+                sensor_key = self._sensor_state_key(pipeline.pipeline_id, sensor.sensor_id)
                 state = self.store.get_sensor_state(sensor_key)
                 if sensor.sensor_type == "file_sensor":
                     next_state, event = poll_file_sensor(sensor, state)
@@ -363,10 +353,8 @@ class PipelineService:
     ) -> list[str]:
         """Dispatch due queue items while keeping per-pipeline order intact."""
         self.reconcile_runtime_health()
-        effective_limit = max(
-            1, min(limit, self.settings.queue_dispatch_batch_size))
-        self.store.requeue_stale_dispatches(
-            self.settings.queue_dispatch_stale_seconds)
+        effective_limit = max(1, min(limit, self.settings.queue_dispatch_batch_size))
+        self.store.requeue_stale_dispatches(self.settings.queue_dispatch_stale_seconds)
         current = now or datetime.now(timezone.utc)
         dispatched_run_ids: list[str] = []
         blocked_pipelines: set[str] = set()
@@ -396,11 +384,9 @@ class PipelineService:
                 if item.trigger == "retry":
                     retry_of = payload.get("retry_of")
                     if not isinstance(retry_of, str) or not retry_of:
-                        raise ValueError(
-                            "Retry queue item is missing retry_of.")
+                        raise ValueError("Retry queue item is missing retry_of.")
                     mode = str(payload.get("mode") or "resume")
-                    task_id = None if payload.get(
-                        "task_id") is None else str(payload.get("task_id"))
+                    task_id = None if payload.get("task_id") is None else str(payload.get("task_id"))
                     run = self.retry_run(
                         retry_of,
                         mode=mode,  # type: ignore[arg-type]
@@ -416,23 +402,20 @@ class PipelineService:
                     )
                 else:
                     parent_run_id = (
-                        str(payload["source_run_id"]) if isinstance(
-                            payload.get("source_run_id"), str) else None
+                        str(payload["source_run_id"]) if isinstance(payload.get("source_run_id"), str) else None
                     )
                     parent_pipeline_id = (
                         str(payload["source_pipeline_id"])
                         if isinstance(payload.get("source_pipeline_id"), str)
                         else None
                     )
-                    tenant_id = str(payload["tenant_id"]) if isinstance(
-                        payload.get("tenant_id"), str) else None
+                    tenant_id = str(payload["tenant_id"]) if isinstance(payload.get("tenant_id"), str) else None
                     initial_context: dict[str, object] = {}
                     if isinstance(payload.get("context"), dict):
                         # type: ignore[arg-type]
                         initial_context.update(payload["context"])
                     if isinstance(payload.get("upstream"), dict):
-                        initial_context.setdefault(
-                            "upstream", payload["upstream"])
+                        initial_context.setdefault("upstream", payload["upstream"])
                     if parent_run_id is not None:
                         initial_context.setdefault(
                             "parent",
@@ -541,8 +524,7 @@ class PipelineService:
     def get_task_detail(self, run_id: str, task_id: str) -> dict[str, object]:
         """Return one task run with logs and output metadata."""
         run, task_runs, _ = self.get_run(run_id)
-        task = next(
-            (item for item in task_runs if item.task_id == task_id), None)
+        task = next((item for item in task_runs if item.task_id == task_id), None)
         if task is None:
             raise KeyError(f"Unknown task '{task_id}' in run '{run_id}'")
         logs = self.store.list_logs(run_id, limit=500, task_id=task_id)
@@ -558,8 +540,7 @@ class PipelineService:
         self.get_task_detail(run_id, task_id)
         output = self.store.get_task_output(run_id, task_id)
         if output is None:
-            raise KeyError(
-                f"No output captured for task '{task_id}' in run '{run_id}'")
+            raise KeyError(f"No output captured for task '{task_id}' in run '{run_id}'")
         return output
 
     def _clone_pipeline_with_command_overrides(
@@ -578,12 +559,10 @@ class PipelineService:
                 updated_tasks[task_id] = task
                 continue
             if task.task_type != "cli":
-                raise ValueError(
-                    f"Task '{task_id}' does not support command overrides.")
+                raise ValueError(f"Task '{task_id}' does not support command overrides.")
             stripped = override.strip()
             if not stripped:
-                raise ValueError(
-                    f"Task '{task_id}' command override cannot be empty.")
+                raise ValueError(f"Task '{task_id}' command override cannot be empty.")
             updated_tasks[task_id] = replace(task, command=stripped, path=None)
 
         return replace(pipeline, tasks=updated_tasks)
@@ -591,8 +570,7 @@ class PipelineService:
     def _clone_pipeline_for_task(self, pipeline: PipelineDefinition, task_id: str) -> PipelineDefinition:
         """Build a task-focused pipeline that includes the selected task and its dependencies."""
         if task_id not in pipeline.tasks:
-            raise KeyError(
-                f"Unknown task '{task_id}' in pipeline '{pipeline.pipeline_id}'")
+            raise KeyError(f"Unknown task '{task_id}' in pipeline '{pipeline.pipeline_id}'")
         required_ids = upstream_closure(pipeline, {task_id})
         scoped_tasks = {
             current_task_id: current_task
@@ -691,8 +669,7 @@ class PipelineService:
             )
         except sqlite3.IntegrityError:
             if scheduled_for is not None:
-                existing = self.store.get_run_for_slot(
-                    pipeline_id, scheduled_for)
+                existing = self.store.get_run_for_slot(pipeline_id, scheduled_for)
                 if existing is not None:
                     return existing
             raise
@@ -710,10 +687,8 @@ class PipelineService:
     ) -> RunRecord:
         """Create and dispatch one run scoped to a selected task and its dependencies."""
         self.reconcile_runtime_health()
-        pipeline = self._clone_pipeline_for_task(
-            self.get_pipeline(pipeline_id), task_id)
-        pipeline = self._clone_pipeline_with_command_overrides(
-            pipeline, command_overrides)
+        pipeline = self._clone_pipeline_for_task(self.get_pipeline(pipeline_id), task_id)
+        pipeline = self._clone_pipeline_with_command_overrides(pipeline, command_overrides)
         run = self.store.create_run(
             pipeline,
             trigger=trigger,
@@ -743,8 +718,7 @@ class PipelineService:
         self.reconcile_runtime_health()
         previous_run, previous_task_runs, _ = self.get_run(run_id)
         if previous_run.status in {"queued", "running"}:
-            raise ValueError(
-                "Retry is only available after a run has finished.")
+            raise ValueError("Retry is only available after a run has finished.")
 
         pipeline = self.get_pipeline(previous_run.pipeline_id)
         retry_plan = build_retry_plan(
@@ -754,8 +728,7 @@ class PipelineService:
             task_id=task_id,
         )
 
-        reused_task_statuses = {
-            task_id: "success" for task_id in retry_plan.reuse_task_ids}
+        reused_task_statuses = {task_id: "success" for task_id in retry_plan.reuse_task_ids}
         retry_run = self.store.create_run(
             pipeline,
             trigger="retry",
@@ -778,8 +751,7 @@ class PipelineService:
                     f"Retry was requested from selected task '{task_id}'.",
                 )
             for reused_task_id in retry_plan.reuse_task_ids:
-                self.store.mark_task_reused(
-                    retry_run.run_id, reused_task_id, previous_run.run_id)
+                self.store.mark_task_reused(retry_run.run_id, reused_task_id, previous_run.run_id)
         else:
             self.store.append_log(
                 retry_run.run_id,
@@ -790,8 +762,7 @@ class PipelineService:
         if previous_run.tenant_id is not None:
             retry_context["tenant_id"] = previous_run.tenant_id
         if mode == "resume":
-            retry_context.update(
-                self.store.output_context_for_run(previous_run.run_id))
+            retry_context.update(self.store.output_context_for_run(previous_run.run_id))
 
         self._dispatch_engine(
             pipeline,
@@ -873,8 +844,7 @@ class PipelineService:
         self.enqueue_pipeline_trigger(
             run.pipeline_id,
             trigger="retry",
-            available_at=datetime.now(
-                timezone.utc) + timedelta(seconds=retry_policy.delay_seconds),
+            available_at=datetime.now(timezone.utc) + timedelta(seconds=retry_policy.delay_seconds),
             payload={
                 "retry_of": run.run_id,
                 "mode": retry_policy.mode,
@@ -884,8 +854,7 @@ class PipelineService:
         )
 
         if retry_policy.delay_seconds > 0:
-            timer = threading.Timer(
-                retry_policy.delay_seconds, lambda: self.drain_trigger_queue(limit=20))
+            timer = threading.Timer(retry_policy.delay_seconds, lambda: self.drain_trigger_queue(limit=20))
             timer.daemon = True
             timer.start()
             return
@@ -908,8 +877,7 @@ class PipelineService:
         if run.status not in {"queued", "running"}:
             raise ValueError("Only queued or running runs can be cancelled.")
 
-        self.store.append_log(
-            run_id, "Cancellation requested by user.", stream="stderr")
+        self.store.append_log(run_id, "Cancellation requested by user.", stream="stderr")
         cancelled = self.engine.cancel(run_id)
         if run.status == "queued" or not cancelled:
             self.store.cancel_run(run_id)
@@ -928,11 +896,9 @@ class PipelineService:
     def delete_pipeline(self, pipeline_id: str) -> None:
         """Delete one pipeline from the config and remove its stored history."""
         if self.store.count_running_runs(pipeline_id) > 0:
-            raise ValueError(
-                "Cancel active runs before deleting this pipeline.")
+            raise ValueError("Cancel active runs before deleting this pipeline.")
 
-        raw_data = yaml.safe_load(
-            self.config_path.read_text(encoding="utf-8")) or {}
+        raw_data = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
         root_key = "pipelines" if "pipelines" in raw_data else "jobs"
         pipelines = raw_data.get(root_key)
         if not isinstance(pipelines, dict) or pipeline_id not in pipelines:
@@ -944,8 +910,7 @@ class PipelineService:
                 continue
             triggers = candidate.get("triggers_on_success")
             if isinstance(triggers, list):
-                candidate["triggers_on_success"] = [
-                    item for item in triggers if str(item) != pipeline_id]
+                candidate["triggers_on_success"] = [item for item in triggers if str(item) != pipeline_id]
 
         self.config_path.write_text(
             yaml.safe_dump(raw_data, sort_keys=False, allow_unicode=False),
@@ -1041,8 +1006,7 @@ class PipelineService:
         for task in pipeline.tasks.values():
             cells = []
             for run in ordered_runs:
-                task_run = task_runs_by_run.get(
-                    run.run_id, {}).get(task.task_id)
+                task_run = task_runs_by_run.get(run.run_id, {}).get(task.task_id)
                 cells.append(
                     {
                         "run_id": run.run_id,
@@ -1104,8 +1068,7 @@ class PipelineService:
             "workers": scheduler.get("worker_metrics", {}),
         }
         stats = self.store.get_stats(
-            scheduled_pipeline_count=sum(
-                1 for pipeline in pipelines if pipeline.schedule_text != "Manual only"),
+            scheduled_pipeline_count=sum(1 for pipeline in pipelines if pipeline.schedule_text != "Manual only"),
             total_pipeline_count=len(pipelines),
         )
         return {

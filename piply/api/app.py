@@ -30,10 +30,8 @@ def _build_service(
     settings: PiplySettings | None = None,
 ) -> PipelineService:
     """Build the shared service instance from config and environment overrides."""
-    current_settings = settings or load_settings(
-        config_path or os.getenv("PIPLY_CONFIG"))
-    env_config = config_path or (
-        str(current_settings.config_path) if current_settings.config_path else None)
+    current_settings = settings or load_settings(config_path or os.getenv("PIPLY_CONFIG"))
+    env_config = config_path or (str(current_settings.config_path) if current_settings.config_path else None)
     env_database = (
         str(current_settings.database_path)
         if current_settings.database_path is not None
@@ -57,8 +55,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.service = service
         app.state.scheduler = scheduler
         app.state.settings = settings
-        app.state.templates = Jinja2Templates(
-            directory=str(_ui_directory() / "templates"))
+        app.state.templates = Jinja2Templates(directory=str(_ui_directory() / "templates"))
         scheduler.start()
 
         async def _shutdown_watcher():
@@ -87,8 +84,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     )
 
     app.add_middleware(AuthMiddleware)
-    app.mount(
-        "/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
+    app.mount("/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
     app.include_router(ui.router)
     app.include_router(dashboard.router)
     app.include_router(execution.router)
