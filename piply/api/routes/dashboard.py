@@ -35,3 +35,9 @@ def get_dashboard(request: Request) -> DashboardResponse:
         runtime_metrics=payload["runtime_metrics"],
         scheduler=SchedulerResponse(**payload["scheduler"]),
     )
+
+
+@router.get("/scheduler", response_model=SchedulerResponse)
+def get_scheduler_snapshot(request: Request) -> SchedulerResponse:
+    """Return lightweight scheduler status for nav and live UI polling."""
+    return SchedulerResponse(**_get_service(request).scheduler_snapshot())

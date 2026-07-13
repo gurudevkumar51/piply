@@ -34,7 +34,7 @@ def build_retry_plan(
         if previous_task is None:
             raise ValueError(f"Unknown task '{task_id}' for retry selection.")
         if previous_task.status == "success":
-            raise ValueError("Select a failed or skipped task to retry from the UI.")
+            raise ValueError("Select a failed, interrupted, or skipped task to retry from the UI.")
 
     if mode == "startover":
         return RetryPlan(
@@ -45,10 +45,12 @@ def build_retry_plan(
         )
 
     unresolved = {
-        task.task_id for task in previous_task_runs if task.status in {"failed", "skipped", "queued", "running"}
+        task.task_id
+        for task in previous_task_runs
+        if task.status in {"failed", "interrupted", "skipped", "queued", "running"}
     }
     if not unresolved:
-        raise ValueError("This run does not have failed or skipped tasks to resume.")
+        raise ValueError("This run does not have failed, interrupted, or skipped tasks to resume.")
 
     rerun = downstream_closure(pipeline, unresolved)
     reuse = tuple(

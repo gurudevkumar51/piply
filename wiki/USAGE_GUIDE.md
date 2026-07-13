@@ -12,6 +12,13 @@ piply start --config piply-demo/piply.yaml
 
 Open `http://127.0.0.1:8000`.
 
+If port `8000` is already busy, choose another port:
+
+```bash
+piply start --config piply-demo/piply.yaml --port 8080
+piply start --config piply-demo/piply.yaml --host 0.0.0.0 --port 8080
+```
+
 Create a starter workspace:
 
 ```bash
@@ -32,6 +39,11 @@ variables:
   scripts_dir: pipelines
   batch_id: demo-batch
   conda_env: py312_extract
+
+entities:
+  report:
+    - payment
+    - adjustment
 
 defaults:
   python: python
@@ -63,7 +75,7 @@ pipelines:
         path: pipelines/extract.py
 ```
 
-Backward-compatible `jobs:` roots and older single-task style configs still load, but new projects should use `pipelines:`.
+Backward-compatible `jobs:` roots and older single-task style configs still load, but new projects should use `pipelines:`. Advanced projects may also define `pipeline_templates:` plus `pipeline_deployments:`; each deployment becomes a normal runnable pipeline id.
 
 ### Reusable YAML Variables
 
@@ -87,6 +99,161 @@ pipelines:
 ```
 
 Pipeline-level `variables` override top-level variables only for that pipeline. If a YAML value begins with `{name}`, quote it, for example `path: "{scripts_dir}/extract.py"`.
+
+### Entity-Mapped Task Templates
+
+Use `entities` when one task template should run once per value. Entity values can be declared globally, per pipeline, or per task. When a pipeline has entities, Piply expands template tasks into runtime task ids before execution.
+
+```yaml
+pipelines:
+  extract_flow:
+    entities:
+      report:
+        - payment
+        - adjustment
+        - refund
+    max_parallel_tasks: 3
+    tasks:
+      extract:
+        type: python
+        path: pipelines/extract.py
+        function: extract_data
+        kwargs:
+          report: "{report}"
+
+      transform:
+        type: python
+        path: pipelines/extract.py
+        function: transform_data
+        depends_on: [extract]
+
+      validate:
+        type: cli
+        command: python validate.py --report {report}
+        depends_on: [transform]
+```
+
+Runtime DAG:
+
+```text
+payment.extract -> payment.transform -> payment.validate
+adjustment.extract -> adjustment.transform -> adjustment.validate
+refund.extract -> refund.transform -> refund.validate
+```
+
+Inside each mapped Python task, Piply adds entity values to `context`:
+
+```python
+def transform_data(context):
+    report = context["report"]
+    extracted = context["extract"]
+    return {"report": report, "records": extracted["records"]}
+```
+
+Reducer tasks can opt out of expansion and wait for all mapped dependencies:
+
+```yaml
+tasks:
+  summarize:
+    type: python
+    path: pipelines/report.py
+    function: summarize
+    entities: false
+    depends_on: [validate]
+```
+
+The reducer can read `context["mapped"]["validate"]`, keyed by runtime entity keys such as `payment`, `adjustment`, and `refund`.
+
+Global entities apply to every pipeline unless a pipeline overrides the same entity name:
+
+```yaml
+entities:
+  tenant:
+    - acme
+    - globex
+
+pipelines:
+  nightly:
+    entities:
+      report: [payment, refund]
+```
+
+This creates a small matrix such as `acme.payment.extract` and `globex.refund.extract`. A task can override or opt out:
+
+```yaml
+tasks:
+  validate:
+    type: cli
+    command: python validate.py --tenant {tenant} --report {report}
+    depends_on: [extract]
+
+  notify_once:
+    type: email
+    entities: false
+    depends_on: [validate]
+```
+
+Best practices:
+
+- Keep template ids short and stable, for example `extract`, `transform`, `load`.
+- Put business values in `entities`, not in copied task blocks.
+- Use `max_parallel_tasks` to control mapped-task fan-out on a local machine.
+- Use a reducer task with `entities: false` when you need one final summary after every mapped task finishes.
+- Use the concrete runtime id, such as `payment.validate`, when retrying one mapped task; use the template id, such as `validate`, when running all mapped instances of that template.
+
+### Pipeline Templates And Deployments
+
+Use deployments when one workflow should run separately for different tenants, schedules, or environments. Simple `pipelines:` YAML remains the default; this section is optional.
+
+```yaml
+pipeline_templates:
+  report_pipeline:
+    retry:
+      attempts: 1
+      mode: resume
+    tasks:
+      extract:
+        type: python
+        path: pipelines/extract.py
+        function: extract_data
+        kwargs:
+          tenant: "{tenant}"
+
+      load:
+        type: cli
+        command: python load.py --tenant {tenant}
+        depends_on: [extract]
+
+pipeline_deployments:
+  client_a_reporting:
+    template: report_pipeline
+    schedule:
+      every: 15m
+    variables:
+      tenant: client_a
+
+  client_b_reporting:
+    template: report_pipeline
+    schedule:
+      cron: "0 * * * *"
+    tenant: client_b
+    max_parallel_tasks: 2
+```
+
+Piply loads `client_a_reporting` and `client_b_reporting` as normal pipelines. The scheduler schedules the deployment ids, not the template id. Deployment-level values override template values, and shortcut fields such as `tenant:` are also exposed as `{tenant}` and `{tenant_id}` variables.
+
+Deployments work with entity expansion:
+
+```yaml
+pipeline_templates:
+  mapped_report:
+    entities:
+      report: [payment, refund]
+    tasks:
+      extract:
+        type: cli
+        command: python extract.py --tenant {tenant} --report {report}
+```
 
 ## 3. Python Tasks
 
@@ -242,6 +409,8 @@ def transform_data(context):
     extracted = context["extract"]
     return {"records": extracted["records"] + 1}
 ```
+
+For entity-mapped tasks, downstream tasks in the same entity receive dependency aliases by template id. For example, `payment.transform` can read `context["extract"]` even though the stored runtime output id is `payment.extract`. All mapped outputs are also available under `context["mapped"][template_id][entity_key]`.
 
 ```yaml
 tasks:
@@ -529,7 +698,42 @@ Current counters include:
 - running and queued tasks
 - configured task capacity
 
-## 15. CLI Reference
+## 15. Runtime Recovery And State Lifecycle
+
+Piply uses run heartbeats to keep runtime state consistent across shutdowns and restarts.
+
+- Manual cancel keeps the run state as `cancelled`.
+- Graceful service shutdown marks active runs as `interrupted`.
+- Running tasks become `interrupted`.
+- Queued tasks that never started become `cancelled`.
+- On the next startup, stale `queued` or `running` runs are reconciled automatically if their heartbeat is older than `PIPLY_STALE_RUN_TIMEOUT_SECONDS`.
+
+Typical run lifecycle:
+
+```text
+queued -> running -> success
+queued -> running -> failed
+queued -> running -> cancelled
+queued -> running -> interrupted
+```
+
+Typical task lifecycle:
+
+```text
+queued -> running -> success
+queued -> running -> failed
+queued -> running -> interrupted
+queued -> cancelled
+queued -> skipped
+```
+
+The scheduler badge in the UI is heartbeat-aware:
+
+- `scheduler live`: scheduler thread is running and heartbeats are fresh
+- `scheduler offline`: scheduler is stopped or heartbeat went stale
+- `scheduler crashed`: scheduler thread raised an exception and exited
+
+## 16. CLI Reference
 
 ### `piply init`
 
@@ -539,6 +743,8 @@ Create a starter workspace.
 piply init my-piply-project
 piply init my-piply-project --force
 ```
+
+The starter YAML includes a runnable pipeline chain plus disabled reference pipelines for entity mapping, built-in operators, and sensors.
 
 ### `piply validate`
 
@@ -610,6 +816,8 @@ Show logs for one run.
 piply logs <run_id> --config piply-demo/piply.yaml
 ```
 
+Python script and CLI subprocess stdout/stderr are written to the run log as task-scoped lines. Piply sets `PYTHONUNBUFFERED=1` for subprocess tasks so normal `print(...)` output appears without waiting for process exit. The run detail page loads the full run log; `/api/runs/{run_id}/logs` remains paginated for very large logs.
+
 ### `piply pause` / `piply resume`
 
 Pause or resume schedule dispatch.
@@ -625,9 +833,12 @@ Start the UI, API, scheduler, and sensor polling loop.
 
 ```bash
 piply start --config piply-demo/piply.yaml
+piply start --config piply-demo/piply.yaml --port 8080
 piply start --config piply-demo/piply.yaml --host 0.0.0.0 --port 8080
 piply start --config piply-demo/piply.yaml -d
 ```
+
+If a previous server is still holding the socket, either run `piply stop --config piply-demo/piply.yaml` or start on another free port.
 
 ### `piply stop`
 
@@ -645,10 +856,11 @@ Compatibility alias for `piply start`.
 piply ui --config piply-demo/piply.yaml
 ```
 
-## 16. API Reference Highlights
+## 17. API Reference Highlights
 
 ```text
 GET  /api/dashboard
+GET  /api/dashboard/scheduler
 GET  /api/metrics
 GET  /api/pipelines
 GET  /api/pipelines/{pipeline_id}
@@ -670,12 +882,12 @@ GET  /api/execution-matrix
 GET  /api/logs
 ```
 
-## 17. UI Pages
+## 18. UI Pages
 
 - Dashboard: run summary, runtime trend, active pipelines, failures, queue/worker metrics.
 - Pipelines: pipeline cards, trigger actions, schedule state.
-- Pipeline detail: DAG, selected-node details, retry/run task actions.
+- Pipeline detail: DAG, denser merged metadata, selected-node details, retry/run task actions.
 - Execution Matrix: task rows by run columns.
-- Run detail: selected-task drawer, log filtering, rerun, retry-from-task, and long output preview drawer.
+- Run detail: collapsible task-focus panel, log filtering, Re-Run action, retry-from-task, and long output preview drawer.
 - Logs: cross-run log search.
 - Settings: schedules, runtime settings, queue metrics, worker metrics.

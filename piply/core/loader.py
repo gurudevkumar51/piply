@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import sys
@@ -11,6 +12,12 @@ from urllib.parse import urlparse
 
 import yaml
 
+from piply.pipeline.expander import (
+    ExpansionError,
+    expand_task_templates,
+    merge_entity_maps,
+    parse_entity_map,
+)
 from piply.settings import load_settings
 
 from .models import (
@@ -29,7 +36,7 @@ class ConfigError(ValueError):
     """Raised when the Piply YAML configuration is invalid."""
 
 
-TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 ENV_TOKEN_PATTERN = re.compile(r"\$(\w+)|\$\{([^}]+)\}|%([^%]+)%")
 BRACE_TOKEN_PATTERN = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
 
@@ -99,6 +106,75 @@ def _ensure_list(value: Any, label: str) -> list[Any]:
     return value
 
 
+def _deep_merge_mapping(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge deployment overrides into a pipeline template."""
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in {"template", "pipeline_template"}:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_mapping(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _normalize_pipeline_definitions(raw_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return runnable pipeline definitions from simple and advanced YAML shapes."""
+    raw_simple_pipelines = raw_data["pipelines"] if "pipelines" in raw_data else raw_data.get("jobs")
+    pipeline_definitions: dict[str, dict[str, Any]] = {}
+
+    if raw_simple_pipelines is not None:
+        simple_pipelines = _ensure_mapping(raw_simple_pipelines, "pipelines")
+        for pipeline_id, raw_pipeline in simple_pipelines.items():
+            if not isinstance(raw_pipeline, dict):
+                raise ConfigError(f"Pipeline '{pipeline_id}' must be a mapping")
+            pipeline_definitions[str(pipeline_id)] = copy.deepcopy(raw_pipeline)
+
+    raw_templates = _ensure_mapping(raw_data.get("pipeline_templates"), "pipeline_templates")
+    deployments = _ensure_mapping(raw_data.get("pipeline_deployments"), "pipeline_deployments")
+    templates: dict[str, dict[str, Any]] = {}
+    for template_id, raw_template in raw_templates.items():
+        if not isinstance(raw_template, dict):
+            raise ConfigError(f"Pipeline template '{template_id}' must be a mapping")
+        templates[str(template_id)] = copy.deepcopy(raw_template)
+
+    for deployment_id, raw_deployment in deployments.items():
+        deployment_key = str(deployment_id)
+        if not isinstance(raw_deployment, dict):
+            raise ConfigError(f"Pipeline deployment '{deployment_key}' must be a mapping")
+        template_id = raw_deployment.get("template") or raw_deployment.get("pipeline_template")
+        if not template_id:
+            raise ConfigError(f"Pipeline deployment '{deployment_key}' must define template")
+        if str(template_id) not in templates:
+            raise ConfigError(f"Pipeline deployment '{deployment_key}' references unknown template '{template_id}'")
+        if deployment_key in pipeline_definitions:
+            raise ConfigError(f"Pipeline deployment '{deployment_key}' conflicts with an existing pipeline id")
+
+        expanded = _deep_merge_mapping(templates[str(template_id)], raw_deployment)
+        expanded["_template_id"] = str(template_id)
+        expanded["_deployment_id"] = deployment_key
+        expanded.setdefault("title", deployment_key.replace("_", " ").replace("-", " ").title())
+
+        deployment_variables = _ensure_mapping(expanded.get("variables"), f"Pipeline deployment '{deployment_key}' variables")
+        deployment_variables = dict(deployment_variables)
+        if raw_deployment.get("tenant") is not None:
+            deployment_variables.setdefault("tenant", str(raw_deployment["tenant"]))
+            deployment_variables.setdefault("tenant_id", str(raw_deployment["tenant"]))
+        if raw_deployment.get("tenant_id") is not None:
+            deployment_variables.setdefault("tenant", str(raw_deployment["tenant_id"]))
+            deployment_variables.setdefault("tenant_id", str(raw_deployment["tenant_id"]))
+        if raw_deployment.get("environment") is not None:
+            deployment_variables.setdefault("environment", str(raw_deployment["environment"]))
+        expanded["variables"] = deployment_variables
+
+        pipeline_definitions[deployment_key] = expanded
+
+    if not pipeline_definitions:
+        raise ConfigError("Config must define a 'pipelines' mapping or 'pipeline_deployments' mapping")
+    return pipeline_definitions
+
+
 def _parse_variables(raw_value: Any, label: str, env_values: dict[str, str]) -> dict[str, str]:
     """Parse reusable config variables and allow earlier variables in later values."""
     raw_variables = _ensure_mapping(raw_value, label)
@@ -108,6 +184,14 @@ def _parse_variables(raw_value: Any, label: str, env_values: dict[str, str]) -> 
         key = str(raw_key)
         variables[key] = _expand_string(str(raw_variable), scoped_values | variables)
     return variables
+
+
+def _parse_entities(raw_value: Any, label: str, env_values: dict[str, str]):
+    """Parse entities after normal Piply string interpolation."""
+    try:
+        return parse_entity_map(_expand_value(raw_value, env_values), label)
+    except ExpansionError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _resolve_path(
@@ -879,6 +963,7 @@ def load_project(
     root_values = env_values | root_variables
 
     connections = _parse_connections(raw_data.get("connections"), root_values)
+    root_entities = _parse_entities(raw_data.get("entities"), "entities", root_values)
 
     default_python = _expand_string(str(defaults.get("python") or sys.executable), root_values)
     default_env = {
@@ -886,17 +971,10 @@ def load_project(
         for key, value in _ensure_mapping(defaults.get("env"), "defaults.env").items()
     }
 
-    raw_pipelines = raw_data["pipelines"] if "pipelines" in raw_data else raw_data.get("jobs")
-    if raw_pipelines is None:
-        raise ConfigError("Config must define a 'pipelines' mapping")
-    if not isinstance(raw_pipelines, dict):
-        raise ConfigError("Config 'pipelines' must be a mapping")
+    raw_pipelines = _normalize_pipeline_definitions(raw_data)
 
     pipelines: dict[str, PipelineDefinition] = {}
     for pipeline_id, raw_pipeline in raw_pipelines.items():
-        if not isinstance(raw_pipeline, dict):
-            raise ConfigError(f"Pipeline '{pipeline_id}' must be a mapping")
-
         pipeline_variables = dict(root_variables)
         pipeline_variables.update(
             _parse_variables(
@@ -906,6 +984,10 @@ def load_project(
             )
         )
         pipeline_values = root_values | pipeline_variables
+        pipeline_entities = merge_entity_maps(
+            root_entities,
+            _parse_entities(raw_pipeline.get("entities"), f"Pipeline '{pipeline_id}' entities", pipeline_values),
+        )
 
         schedule_timezone = _expand_string(str(raw_pipeline.get("timezone") or timezone_name), pipeline_values)
         try:
@@ -952,19 +1034,44 @@ def load_project(
         if not isinstance(raw_tasks, dict) or not raw_tasks:
             raise ConfigError(f"Pipeline '{pipeline_id}' must define a non-empty tasks mapping")
 
+        task_entity_maps = {
+            str(task_id): _parse_entities(
+                raw_task.get("entities"),
+                f"Pipeline '{pipeline_id}' task '{task_id}' entities",
+                pipeline_values,
+            )
+            for task_id, raw_task in raw_tasks.items()
+            if isinstance(raw_task, dict) and "entities" in raw_task and raw_task.get("entities") not in (None, "", False)
+        }
+        try:
+            runtime_task_specs = expand_task_templates(
+                raw_tasks,
+                pipeline_entities=pipeline_entities,
+                task_entities=task_entity_maps,
+            )
+        except ExpansionError as exc:
+            raise ConfigError(f"Pipeline '{pipeline_id}' has invalid entity expansion: {exc}") from exc
+
         tasks: dict[str, TaskDefinition] = {}
-        for task_id, raw_task in raw_tasks.items():
+        template_task_ids = {str(task_id) for task_id in raw_tasks}
+        for task_spec in runtime_task_specs:
+            task_id = task_spec.runtime_id
+            raw_task = task_spec.raw_task
             if not isinstance(raw_task, dict):
                 raise ConfigError(f"Pipeline '{pipeline_id}' task '{task_id}' must be a mapping")
-            tasks[task_id] = _parse_task(
+            task = _parse_task(
                 pipeline_id,
                 task_id,
                 raw_task,
                 workspace=workspace,
                 default_python=default_python,
                 inherited_env=pipeline_env,
-                env_values=pipeline_values,
+                env_values=pipeline_values | task_spec.variables,
             )
+            task.template_id = task_spec.template_id if task_spec.template_id != task_spec.runtime_id else None
+            task.entity_key = task_spec.entity_key
+            task.entity_values = dict(task_spec.entity_values)
+            tasks[task_id] = task
 
         _validate_task_graph(pipeline_id, tasks)
         parallelizable = _detect_parallelism(tasks)
@@ -972,7 +1079,7 @@ def load_project(
             raw_pipeline.get("sensors"),
             pipeline_id,
             workspace=workspace,
-            task_ids=set(tasks),
+            task_ids=set(tasks) | template_task_ids,
             env_values=pipeline_values,
             connections=connections,
         )
@@ -992,6 +1099,8 @@ def load_project(
             title=title,
             description=description,
             tasks=tasks,
+            template_id=None if raw_pipeline.get("_template_id") is None else str(raw_pipeline.get("_template_id")),
+            deployment_id=None if raw_pipeline.get("_deployment_id") is None else str(raw_pipeline.get("_deployment_id")),
             tags=tags,
             schedule=schedule,
             enabled=enabled,

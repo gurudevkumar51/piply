@@ -8,6 +8,7 @@ The active implementation is built around:
 
 - YAML pipeline definitions
 - multi-task DAG execution
+- metadata-driven runtime task expansion
 - downstream pipeline triggers
 - a durable SQLite-backed internal queue
 - task-level run and log tracking
@@ -18,7 +19,10 @@ The active implementation is built around:
 
 - multiple tasks per pipeline
 - dependency validation and cycle detection
+- optional pipeline template/deployment expansion into normal runtime pipelines
 - DAG-inferred sequential or parallel execution
+- entity-mapped task templates through global, pipeline, or task-level `entities`
+- runtime dependency rewriting from template ids to expanded task ids
 - pipeline-level retry policy with `resume` or `startover`
 - manual targeted retry through `piply tasks retry`
 - pipeline-to-pipeline triggers on success
@@ -28,11 +32,13 @@ The active implementation is built around:
 - queue-backed schedule backfill for missed slots
 - run cancellation
 - run and pipeline deletion
+- graceful shutdown interruption handling
 - stale run reconciliation with heartbeats
 - queue dispatch requeue for abandoned dispatches
 - queue and local worker metrics through `/api/metrics`, Dashboard, and Settings
 - per-task upstream failure behavior (`skip`, `fail`, `continue`)
 - persisted task output metadata (`task_outputs`)
+- mapped output aggregation under `context["mapped"][template_id][entity_key]`
 
 ## Implemented Operator Features
 
@@ -62,23 +68,36 @@ The active implementation is built around:
 
 - `.env` files are loaded without adding a third-party dependency
 - reusable YAML `variables` expand with `{name}` inside config strings
+- `pipeline_templates` and `pipeline_deployments` support advanced reuse without changing simple mode
 - config strings can expand secrets and connection values from `.env`
 - `secrets` supports explicit env and file-backed secret values with `${secret:NAME}` references
 - `connections` supports reusable SQL connection strings for sensors
 - runtime settings fall back to defaults when omitted
 - common settings now include scheduler and queue tuning controls
-- `piply init` now scaffolds a runnable context-passing pipeline chain plus disabled operator and sensor examples
+- `piply init` now scaffolds a runnable context-passing pipeline chain plus disabled entity-mapping, operator, and sensor examples
+
+## Runtime Expansion Layer
+
+Piply keeps the YAML definition layer separate from the runtime execution layer:
+
+- Pipeline Definition: `piply.core.loader` validates YAML, variables, deployments, connections, sensors, schedules, and task templates.
+- Runtime Expansion: `piply.pipeline.expander` materializes `entities` into runtime task ids such as `payment.extract`.
+- Execution Engine: `piply.engine.local_engine.LocalEngine` runs the expanded DAG with the same retry, output, logging, and cancellation behavior as static tasks.
+
+The current expansion layer uses small dataclasses and graph helpers instead of adding mandatory NetworkX, Celery, Redis, or distributed-worker dependencies. Pydantic remains on the API boundary through FastAPI response schemas, and heavier orchestration pieces can stay optional later.
 
 ## UI State
 
 Current UI behavior includes:
 
 - light theme
+- lighter, flatter card and toolbar styling with tighter default spacing
 - dashboard status cards
 - pipeline DAG with flow, stage, and focus modes
 - task selection panel on pipeline detail
 - task-run action panel on run detail
-- rerun action on completed run detail pages
+- collapsible task-focus panel on run detail
+- Re-Run action on completed run detail pages
 - side drawer for long task output previews
 - live task duration labels on graph nodes
 - log filtering by selected task
@@ -105,6 +124,7 @@ Core:
 - `piply/core/sensors.py`
 - `piply/core/secrets.py`
 - `piply/core/sql_adapters.py`
+- `piply/pipeline/expander.py`
 
 Execution:
 
@@ -135,6 +155,7 @@ Recent cleanup focused on keeping the project lean:
 - removed checked-in `dist/` package artifacts
 - removed duplicate imports and stale examples
 - normalized Python callable execution under `type: python`
+- moved entity expansion into a focused `piply.pipeline.expander` module instead of spreading it through the engine
 - kept sensors and scheduling centered on SQLite-backed state instead of adding heavier queue infrastructure
 - continued using small focused modules instead of pushing more logic into giant files
 
@@ -143,9 +164,12 @@ Recent cleanup focused on keeping the project lean:
 Current verification expectations:
 
 - automated tests pass
+- entity expansion and mapped context tests pass
 - package compilation passes
 - CLI validation passes
 - demo run flow works
+- graceful shutdown marks active runs interrupted
+- scheduler crash and heartbeat recovery stay covered by tests
 - API task-run route works
 - API task detail + output routes work
 - execution matrix routes work
@@ -173,8 +197,8 @@ Current verification expectations:
 ## Upcoming Commands And Todos
 
 - `piply logs --follow`
-- reusable task templates
 - managed secret-manager plugins
 - plugin hooks for custom operators
 - artifact retention policies for large outputs
+- matrix expansion shortcuts and task groups
 - optional distributed runner

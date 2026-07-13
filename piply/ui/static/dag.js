@@ -10,6 +10,7 @@
       success: { fill: "rgba(27, 156, 96, 0.12)", stroke: "rgba(27, 156, 96, 0.74)", dot: "#1b9c60" },
       running: { fill: "rgba(57, 117, 255, 0.14)", stroke: "rgba(57, 117, 255, 0.78)", dot: "#3975ff" },
       failed: { fill: "rgba(217, 90, 90, 0.13)", stroke: "rgba(217, 90, 90, 0.76)", dot: "#d95a5a" },
+      interrupted: { fill: "rgba(232, 155, 44, 0.14)", stroke: "rgba(184, 95, 22, 0.78)", dot: "#b85f16" },
       cancelled: { fill: "rgba(106, 94, 156, 0.12)", stroke: "rgba(106, 94, 156, 0.74)", dot: "#6a5e9c" },
       skipped: { fill: "rgba(123, 140, 166, 0.11)", stroke: "rgba(123, 140, 166, 0.64)", dot: "#7b8ca6" },
       queued: { fill: "rgba(232, 155, 44, 0.12)", stroke: "rgba(232, 155, 44, 0.7)", dot: "#e89b2c" },

@@ -32,6 +32,7 @@ def test_init_scaffolds_multitask_project(tmp_path: Path) -> None:
     assert tuple(project.pipelines) == (
         "extract_flow",
         "report_flow",
+        "entity_mapping_examples",
         "operator_examples",
         "sensor_examples",
     )
@@ -44,6 +45,15 @@ def test_init_scaffolds_multitask_project(tmp_path: Path) -> None:
     assert project.pipelines["report_flow"].task_count == 1
     assert project.pipelines["report_flow"].tasks["build_report"].task_type == "python"
     assert project.pipelines["report_flow"].tasks["build_report"].call is not None
+    entity_pipeline = project.pipelines["entity_mapping_examples"]
+    assert entity_pipeline.enabled is False
+    assert entity_pipeline.task_count == 7
+    assert entity_pipeline.tasks["payment.validate_report"].depends_on == ("payment.extract_report",)
+    assert entity_pipeline.tasks["summarize_reports"].depends_on == (
+        "payment.validate_report",
+        "adjustment.validate_report",
+        "refund.validate_report",
+    )
     assert project.pipelines["operator_examples"].enabled is False
     assert project.pipelines["sensor_examples"].enabled is False
     assert project.pipelines["sensor_examples"].sensor_count == 3

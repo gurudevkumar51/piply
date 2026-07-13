@@ -74,6 +74,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         yield
 
         watcher_task.cancel()
+        service.shutdown_runtime("Run interrupted because the Piply service shut down.")
         scheduler.stop()
 
     app = FastAPI(

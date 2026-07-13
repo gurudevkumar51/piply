@@ -97,6 +97,121 @@ def test_load_project_expands_reusable_variables_without_breaking_json_body(tmp_
     assert pipeline.tasks["notify"].body == '{"event":"piply-demo"}'
 
 
+def test_load_project_expands_entity_mapped_task_templates(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ops.py").write_text("print('ops')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Entity Expansion Workspace",
+                "workspace: workspace",
+                "pipelines:",
+                "  extract_flow:",
+                "    entities:",
+                "      report:",
+                "        - payment",
+                "        - adjustment",
+                "        - refund",
+                "    max_parallel_tasks: 3",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: ops.py",
+                "        function: extract",
+                "        kwargs:",
+                "          report: '{report}'",
+                "      load:",
+                "        type: cli",
+                "        command: python load.py --report {report}",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["extract_flow"]
+
+    assert tuple(pipeline.tasks) == (
+        "payment.extract",
+        "adjustment.extract",
+        "refund.extract",
+        "payment.load",
+        "adjustment.load",
+        "refund.load",
+    )
+    assert pipeline.tasks["payment.extract"].kwargs == {"report": "payment"}
+    assert pipeline.tasks["payment.extract"].template_id == "extract"
+    assert pipeline.tasks["payment.extract"].entity_values == {"report": "payment"}
+    assert pipeline.tasks["payment.load"].depends_on == ("payment.extract",)
+    assert pipeline.tasks["adjustment.load"].command == "python load.py --report adjustment"
+    assert pipeline.execution_mode == "parallel"
+
+
+def test_load_project_expands_pipeline_template_deployments(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ops.py").write_text("print('ops')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Deployment Workspace",
+                "workspace: workspace",
+                "pipeline_templates:",
+                "  report_pipeline:",
+                "    retry:",
+                "      attempts: 1",
+                "      mode: resume",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: ops.py",
+                "        function: extract",
+                "        kwargs:",
+                "          tenant: '{tenant}'",
+                "      load:",
+                "        type: cli",
+                "        command: python load.py --tenant {tenant}",
+                "        depends_on: [extract]",
+                "pipeline_deployments:",
+                "  client_a_reporting:",
+                "    template: report_pipeline",
+                "    schedule:",
+                "      every: 15m",
+                "    variables:",
+                "      tenant: client_a",
+                "  client_b_reporting:",
+                "    template: report_pipeline",
+                "    schedule:",
+                "      cron: '0 * * * *'",
+                "    tenant: client_b",
+                "    max_parallel_tasks: 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+
+    assert tuple(project.pipelines) == ("client_a_reporting", "client_b_reporting")
+    client_a = project.pipelines["client_a_reporting"]
+    client_b = project.pipelines["client_b_reporting"]
+    assert client_a.template_id == "report_pipeline"
+    assert client_a.deployment_id == "client_a_reporting"
+    assert client_a.tasks["extract"].kwargs == {"tenant": "client_a"}
+    assert client_a.tasks["load"].command == "python load.py --tenant client_a"
+    assert client_a.schedule is not None
+    assert client_b.tasks["extract"].kwargs == {"tenant": "client_b"}
+    assert client_b.max_parallel_tasks == 2
+
+
 def test_load_project_detects_parallelizable_graph_and_limit(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

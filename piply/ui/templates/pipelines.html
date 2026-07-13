@@ -62,6 +62,12 @@
 
             <div class="tag-row" style="margin-bottom:18px;">
                 <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+                {% if pipeline.template_id %}
+                <span class="meta-pill">template {{ pipeline.template_id }}</span>
+                {% endif %}
+                {% if pipeline.deployment_id %}
+                <span class="meta-pill">deployment {{ pipeline.deployment_id }}</span>
+                {% endif %}
                 <span class="meta-pill">running {{ pipeline.active_runs }}</span>
                 <span class="meta-pill">max concurrent {{ pipeline.max_concurrent_runs }}</span>
                 <span class="meta-pill">{{ pipeline.execution_summary }}</span>

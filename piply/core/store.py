@@ -301,7 +301,7 @@ class RunStore:
         now = _to_iso(datetime.now(timezone.utc))
         with self._lock, self._connect() as connection:
             connection.execute(
-                "UPDATE runs SET status = ?, started_at = ?, heartbeat_at = ? WHERE id = ?",
+                "UPDATE runs SET status = ?, started_at = ?, heartbeat_at = ? WHERE id = ? AND status = 'queued'",
                 ("running", now, now, run_id),
             )
             connection.commit()
@@ -321,7 +321,7 @@ class RunStore:
                 """
                 UPDATE runs
                 SET status = ?, finished_at = ?, exit_code = ?, error = ?, heartbeat_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN ('queued', 'running')
                 """,
                 (
                     status,
@@ -338,7 +338,7 @@ class RunStore:
         """Refresh the heartbeat timestamp for one run."""
         with self._lock, self._connect() as connection:
             connection.execute(
-                "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ? AND status IN ('queued', 'running')",
                 (_to_iso(datetime.now(timezone.utc)), run_id),
             )
             connection.commit()
@@ -352,11 +352,17 @@ class RunStore:
                 UPDATE task_runs
                 SET status = ?, started_at = ?
                 WHERE run_id = ? AND task_id = ?
+                  AND status = 'queued'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM runs
+                      WHERE id = ? AND status IN ('queued', 'running')
+                  )
                 """,
-                ("running", now, run_id, task_id),
+                ("running", now, run_id, task_id, run_id),
             )
             connection.execute(
-                "UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                "UPDATE runs SET heartbeat_at = ? WHERE id = ? AND status IN ('queued', 'running')",
                 (now, run_id),
             )
             connection.commit()
@@ -377,7 +383,7 @@ class RunStore:
                 """
                 UPDATE task_runs
                 SET status = ?, finished_at = ?, exit_code = ?, error = ?
-                WHERE run_id = ? AND task_id = ?
+                WHERE run_id = ? AND task_id = ? AND status IN ('queued', 'running')
                 """,
                 (
                     status,
@@ -510,6 +516,63 @@ class RunStore:
             )
             connection.commit()
 
+    def interrupt_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "Run interrupted during shutdown.",
+        queued_reason: str = "Task did not start before the run was interrupted.",
+    ) -> bool:
+        """Mark one queued or running run as interrupted during shutdown or recovery."""
+        now = _to_iso(datetime.now(timezone.utc))
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE runs
+                SET status = 'interrupted',
+                    finished_at = ?,
+                    exit_code = NULL,
+                    error = COALESCE(error, ?),
+                    heartbeat_at = ?
+                WHERE id = ? AND status IN ('queued', 'running')
+                """,
+                (now, reason, now, run_id),
+            )
+            if cursor.rowcount <= 0:
+                connection.commit()
+                return False
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = 'interrupted',
+                    finished_at = ?,
+                    exit_code = NULL,
+                    error = COALESCE(error, ?)
+                WHERE run_id = ? AND status = 'running'
+                """,
+                (now, reason, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = 'cancelled',
+                    finished_at = ?,
+                    exit_code = NULL,
+                    error = COALESCE(error, ?)
+                WHERE run_id = ? AND status = 'queued'
+                """,
+                (now, queued_reason, run_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO logs (run_id, task_id, created_at, stream, message)
+                VALUES (?, NULL, ?, 'stderr', ?)
+                """,
+                (run_id, now, reason),
+            )
+            connection.commit()
+        return True
+
     def mark_task_reused(self, run_id: str, task_id: str, source_run_id: str) -> None:
         """Mark a task as reused from a previous successful retry source."""
         now = _to_iso(datetime.now(timezone.utc))
@@ -561,7 +624,7 @@ class RunStore:
             connection.commit()
 
     def reconcile_stale_runs(self, stale_after_seconds: int) -> list[str]:
-        """Mark long-silent queued or running runs as failed."""
+        """Mark long-silent queued or running runs as interrupted."""
         with self._lock, self._connect() as connection:
             now = datetime.now(timezone.utc)
             cutoff_dt = _to_iso(now - timedelta(seconds=stale_after_seconds))
@@ -584,21 +647,22 @@ class RunStore:
                 connection.execute(
                     """
                     UPDATE runs
-                    SET status = 'failed',
+                    SET status = 'interrupted',
                         finished_at = ?,
-                        exit_code = 1,
-                        error = COALESCE(error, 'Run marked failed after heartbeat timeout.'),
+                        exit_code = NULL,
+                        error = COALESCE(error, 'Run marked interrupted after heartbeat timeout recovery.'),
                         heartbeat_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status IN ('queued', 'running')
                     """,
                     (now_iso, now_iso, run_id),
                 )
                 connection.execute(
                     """
                     UPDATE task_runs
-                    SET status = 'failed',
+                    SET status = 'interrupted',
                         finished_at = ?,
-                        error = COALESCE(error, 'Task interrupted after heartbeat timeout.')
+                        exit_code = NULL,
+                        error = COALESCE(error, 'Task interrupted after heartbeat timeout recovery.')
                     WHERE run_id = ? AND status = 'running'
                     """,
                     (now_iso, run_id),
@@ -606,9 +670,10 @@ class RunStore:
                 connection.execute(
                     """
                     UPDATE task_runs
-                    SET status = 'skipped',
+                    SET status = 'cancelled',
                         finished_at = ?,
-                        error = COALESCE(error, 'Task skipped after upstream heartbeat timeout.')
+                        exit_code = NULL,
+                        error = COALESCE(error, 'Task did not start before heartbeat timeout recovery.')
                     WHERE run_id = ? AND status = 'queued'
                     """,
                     (now_iso, run_id),
@@ -616,7 +681,7 @@ class RunStore:
                 connection.execute(
                     """
                     INSERT INTO logs (run_id, task_id, created_at, stream, message)
-                    VALUES (?, NULL, ?, 'stderr', 'Run marked failed after heartbeat timeout.')
+                    VALUES (?, NULL, ?, 'stderr', 'Run marked interrupted after heartbeat timeout recovery.')
                     """,
                     (run_id, now_iso),
                 )
@@ -842,6 +907,19 @@ class RunStore:
                 params,
             ).fetchone()
         return int(row["count"])
+
+    def list_active_run_ids(self) -> list[str]:
+        """Return queued or running run ids for shutdown and recovery workflows."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM runs
+                WHERE status IN ('queued', 'running')
+                ORDER BY COALESCE(started_at, created_at) ASC
+                """
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     def delete_run(self, run_id: str) -> None:
         """Delete one finished run and all related task runs and logs."""
@@ -1146,7 +1224,7 @@ class RunStore:
                     COUNT(*) AS total_runs,
                     SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_runs,
                     SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successful_runs,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_runs
+                    SUM(CASE WHEN status IN ('failed', 'interrupted') THEN 1 ELSE 0 END) AS failed_runs
                 FROM runs
                 """
             ).fetchone()

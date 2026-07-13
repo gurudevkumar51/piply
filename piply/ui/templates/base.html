@@ -30,9 +30,13 @@
                 <a class="nav-link {% if page == 'settings' %}active{% endif %}" href="/settings">Settings</a>
             </div>
 
-            <div class="scheduler-chip" title="Config: {{ scheduler.config_path }}">
+            <div
+                class="scheduler-chip {{ scheduler.state or ('running' if scheduler.running else 'stopped') }}"
+                data-scheduler-chip
+                title="Config: {{ scheduler.config_path }}"
+            >
                 <span class="status-dot"></span>
-                {% if scheduler.running %}scheduler live{% else %}scheduler offline{% endif %}
+                <span data-scheduler-label>{{ scheduler.label or ('scheduler live' if scheduler.running else 'scheduler offline') }}</span>
             </div>
 
             <a href="/logout" class="button ghost" style="padding: 6px 12px; font-size: 0.85rem;">Logout</a>
@@ -41,5 +45,34 @@
         {% block content %}{% endblock %}
     </div>
     {% block scripts %}{% endblock %}
+    <script>
+    document.addEventListener("DOMContentLoaded", () => {
+        const chip = document.querySelector("[data-scheduler-chip]");
+        const label = document.querySelector("[data-scheduler-label]");
+        if (!chip || !label || typeof piplyRequest !== "function") {
+            return;
+        }
+
+        const renderScheduler = (payload) => {
+            const state = payload.state || (payload.running ? "running" : "stopped");
+            chip.className = `scheduler-chip ${state}`;
+            label.textContent = payload.label || (payload.running ? "scheduler live" : "scheduler offline");
+            const detail = payload.last_error ? ` | ${payload.last_error}` : "";
+            chip.title = `Config: ${payload.config_path}${detail}`;
+        };
+
+        const refreshScheduler = async () => {
+            try {
+                const payload = await piplyRequest("/api/dashboard/scheduler");
+                renderScheduler(payload);
+            } catch (error) {
+                chip.className = "scheduler-chip stale";
+                label.textContent = "scheduler offline";
+            }
+        };
+
+        window.setInterval(refreshScheduler, 5000);
+    });
+    </script>
 </body>
 </html>

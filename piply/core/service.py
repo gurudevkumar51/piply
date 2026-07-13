@@ -68,6 +68,9 @@ class PipelineService:
         self._project: ProjectDefinition | None = None
         self._config_mtime: float | None = None
         self._lock = threading.RLock()
+        self.store.set_meta("runtime_accepting_work", "true")
+        self._accept_new_work = True
+        self._shutdown_reason: str | None = None
         self.reconcile_runtime_health()
         self.reload_project(force=True)
 
@@ -114,6 +117,40 @@ class PipelineService:
     def reconcile_runtime_health(self) -> list[str]:
         """Reconcile stale queued or running executions before building UI views."""
         return self.store.reconcile_stale_runs(self.settings.stale_run_timeout_seconds)
+
+    @property
+    def is_shutting_down(self) -> bool:
+        """Return whether the service has stopped accepting new work."""
+        with self._lock:
+            return not self._accept_new_work
+
+    def prepare_for_shutdown(self, reason: str = "Piply is shutting down.") -> None:
+        """Stop accepting new work before the scheduler and engine wind down."""
+        with self._lock:
+            self._accept_new_work = False
+            self._shutdown_reason = reason
+        self.store.set_meta("runtime_accepting_work", "false")
+        self.store.set_meta("runtime_shutdown_reason", reason)
+
+    def shutdown_runtime(self, reason: str = "Run interrupted because the Piply service shut down.") -> list[str]:
+        """Interrupt queued or running executions during graceful shutdown."""
+        self.prepare_for_shutdown(reason)
+        interrupted: list[str] = []
+        for run_id in self.store.list_active_run_ids():
+            self.engine.cancel(run_id)
+            if self.store.interrupt_run(
+                run_id,
+                reason=reason,
+                queued_reason="Task did not start before the Piply service shut down.",
+            ):
+                interrupted.append(run_id)
+        return interrupted
+
+    def _ensure_accepting_new_work(self) -> None:
+        """Raise when a shutdown is in progress and new executions should be rejected."""
+        if self.is_shutting_down:
+            reason = self._shutdown_reason or "Piply is shutting down and not accepting new executions."
+            raise ValueError(reason)
 
     def _format_next_run_label(
         self,
@@ -165,6 +202,8 @@ class PipelineService:
                     last_run=last_run,
                     active_runs=self.store.count_running_runs(pipeline.pipeline_id),
                     retry_summary=pipeline.retry_policy.summary,
+                    template_id=pipeline.template_id,
+                    deployment_id=pipeline.deployment_id,
                 )
             )
         return sorted(summaries, key=lambda item: item.title.lower())
@@ -285,6 +324,8 @@ class PipelineService:
 
     def enqueue_due_schedules(self, *, now: datetime | None = None) -> int:
         """Backfill and enqueue every due scheduled slot that is not yet materialized."""
+        if self.is_shutting_down:
+            return 0
         current = now or datetime.now(timezone.utc)
         paused_ids = self.store.list_paused_pipeline_ids()
         enqueued = 0
@@ -307,6 +348,8 @@ class PipelineService:
 
     def poll_sensors(self, *, now: datetime | None = None) -> int:
         """Poll configured sensors and enqueue pipeline triggers for new events."""
+        if self.is_shutting_down:
+            return 0
         current = now or datetime.now(timezone.utc)
         paused_ids = self.store.list_paused_pipeline_ids()
         enqueued = 0
@@ -352,6 +395,8 @@ class PipelineService:
         wait_for_pipeline_triggers: bool = False,
     ) -> list[str]:
         """Dispatch due queue items while keeping per-pipeline order intact."""
+        if self.is_shutting_down:
+            return []
         self.reconcile_runtime_health()
         effective_limit = max(1, min(limit, self.settings.queue_dispatch_batch_size))
         self.store.requeue_stale_dispatches(self.settings.queue_dispatch_stale_seconds)
@@ -508,7 +553,7 @@ class PipelineService:
         if run is None:
             raise KeyError(f"Unknown run '{run_id}'")
         task_runs = self.store.list_task_runs(run_id)
-        logs = self.store.list_logs(run_id, limit=500)
+        logs = self.store.list_logs(run_id)
         return run, task_runs, logs
 
     def get_run_detail(self, run_id: str) -> dict[str, object]:
@@ -527,7 +572,7 @@ class PipelineService:
         task = next((item for item in task_runs if item.task_id == task_id), None)
         if task is None:
             raise KeyError(f"Unknown task '{task_id}' in run '{run_id}'")
-        logs = self.store.list_logs(run_id, limit=500, task_id=task_id)
+        logs = self.store.list_logs(run_id, task_id=task_id)
         return {
             "run": run,
             "task_run": task,
@@ -555,6 +600,8 @@ class PipelineService:
         updated_tasks: dict[str, object] = {}
         for task_id, task in pipeline.tasks.items():
             override = command_overrides.get(task_id)
+            if override is None and task.template_id is not None:
+                override = command_overrides.get(task.template_id)
             if override is None:
                 updated_tasks[task_id] = task
                 continue
@@ -569,9 +616,14 @@ class PipelineService:
 
     def _clone_pipeline_for_task(self, pipeline: PipelineDefinition, task_id: str) -> PipelineDefinition:
         """Build a task-focused pipeline that includes the selected task and its dependencies."""
-        if task_id not in pipeline.tasks:
+        selected_task_ids = (
+            {task_id}
+            if task_id in pipeline.tasks
+            else {current_id for current_id, task in pipeline.tasks.items() if task.template_id == task_id}
+        )
+        if not selected_task_ids:
             raise KeyError(f"Unknown task '{task_id}' in pipeline '{pipeline.pipeline_id}'")
-        required_ids = upstream_closure(pipeline, {task_id})
+        required_ids = upstream_closure(pipeline, selected_task_ids)
         scoped_tasks = {
             current_task_id: current_task
             for current_task_id, current_task in pipeline.tasks.items()
@@ -633,6 +685,7 @@ class PipelineService:
         initial_context: dict[str, object] | None = None,
     ) -> RunRecord:
         """Create and dispatch one new run for a pipeline."""
+        self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         pipeline = self._clone_pipeline_with_command_overrides(
             self.get_pipeline(pipeline_id),
@@ -688,6 +741,7 @@ class PipelineService:
         initial_context: dict[str, object] | None = None,
     ) -> RunRecord:
         """Create and dispatch one run scoped to a selected task and its dependencies."""
+        self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         pipeline = self._clone_pipeline_for_task(self.get_pipeline(pipeline_id), task_id)
         pipeline = self._clone_pipeline_with_command_overrides(pipeline, command_overrides)
@@ -721,6 +775,7 @@ class PipelineService:
         on_log: Callable[[str], None] | None = None,
     ) -> RunRecord:
         """Create a retry run in startover or resume mode."""
+        self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         previous_run, previous_task_runs, _ = self.get_run(run_id)
         if previous_run.status in {"queued", "running"}:
@@ -942,13 +997,46 @@ class PipelineService:
     def scheduler_snapshot(self) -> dict[str, object]:
         """Return scheduler heartbeat, database metadata, and runtime counters for the UI."""
         metrics = self.runtime_metrics()
+        heartbeat = self.store.get_meta("scheduler_heartbeat")
+        configured_state = self.store.get_meta("scheduler_state") or (
+            "running" if self.store.get_meta("scheduler_running") == "true" else "stopped"
+        )
+        heartbeat_age_seconds: float | None = None
+        if heartbeat:
+            try:
+                heartbeat_dt = datetime.fromisoformat(heartbeat)
+                heartbeat_age_seconds = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - heartbeat_dt.astimezone(timezone.utc)).total_seconds(),
+                )
+            except ValueError:
+                heartbeat_age_seconds = None
+
+        stale_after_seconds = max(6, self.settings.scheduler_poll_interval_seconds * 3)
+        state = configured_state
+        if configured_state == "running" and (
+            heartbeat_age_seconds is None or heartbeat_age_seconds > stale_after_seconds
+        ):
+            state = "stale"
+        running = state == "running"
+        if state == "running":
+            label = "scheduler live"
+        elif state == "crashed":
+            label = "scheduler crashed"
+        else:
+            label = "scheduler offline"
         return {
-            "running": self.store.get_meta("scheduler_running") == "true",
-            "heartbeat": self.store.get_meta("scheduler_heartbeat"),
+            "running": running,
+            "state": state,
+            "label": label,
+            "heartbeat": heartbeat,
+            "heartbeat_age_seconds": heartbeat_age_seconds,
+            "last_error": self.store.get_meta("scheduler_last_error"),
             "config_path": str(self.config_path),
             "database_path": str(self.database_path),
             "queue_depth": self.store.count_queue(),
             "sensor_count": sum(pipeline.sensor_count for pipeline in self.project.pipelines.values()),
+            "accepting_work": not self.is_shutting_down,
             "queue_metrics": metrics["queue"],
             "worker_metrics": metrics["workers"],
         }
@@ -1069,6 +1157,9 @@ class PipelineService:
         recent_runs = self.store.list_runs(limit=10)
         trend_runs = self.store.list_runs(limit=12)
         scheduler = self.scheduler_snapshot()
+        recent_failure_like_runs = [
+            run for run in self.store.list_runs(limit=20) if run.status in {"failed", "interrupted"}
+        ][:5]
         runtime_metrics = {
             "queue": scheduler.get("queue_metrics", {}),
             "workers": scheduler.get("worker_metrics", {}),
@@ -1086,7 +1177,7 @@ class PipelineService:
             "stats": stats,
             "pipelines": pipelines,
             "recent_runs": recent_runs,
-            "recent_failures": self.store.list_runs(status="failed", limit=5),
+            "recent_failures": recent_failure_like_runs,
             "active_pipelines": [pipeline for pipeline in pipelines if pipeline.active_runs > 0],
             "runtime_trend": self._runtime_trend(trend_runs),
             "scheduler": scheduler,

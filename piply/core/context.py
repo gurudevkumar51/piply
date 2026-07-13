@@ -44,6 +44,19 @@ class RuntimeTaskContext(MutableMapping[str, Any]):
         """Store the output for a completed task."""
         self[task_id] = output
 
+    def set_mapped_task_output(self, template_id: str, entity_key: str, output: Any) -> None:
+        """Store a mapped output under context['mapped'][template_id][entity_key]."""
+        with self._lock:
+            mapped = self._values.get("mapped")
+            if not isinstance(mapped, dict):
+                mapped = {}
+            template_outputs = mapped.get(template_id)
+            if not isinstance(template_outputs, dict):
+                template_outputs = {}
+            template_outputs[entity_key] = output
+            mapped[template_id] = template_outputs
+            self._values["mapped"] = mapped
+
     def json_safe_snapshot(self) -> dict[str, Any]:
         """Return only values that can be safely represented as JSON."""
         with self._lock:

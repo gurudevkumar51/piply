@@ -23,7 +23,11 @@ class PipelineScheduler:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        current = datetime.now(timezone.utc)
         self.service.store.set_meta("scheduler_running", "true")
+        self.service.store.set_meta("scheduler_state", "running")
+        self.service.store.set_meta("scheduler_last_error", "")
+        self.service.store.set_meta("scheduler_heartbeat", current.isoformat())
         self._thread = threading.Thread(
             target=self._run_loop,
             daemon=True,
@@ -34,19 +38,30 @@ class PipelineScheduler:
     def stop(self) -> None:
         """Stop the scheduler thread and update the heartbeat flag."""
         self._stop_event.set()
+        current = datetime.now(timezone.utc)
         self.service.store.set_meta("scheduler_running", "false")
+        self.service.store.set_meta("scheduler_state", "stopped")
+        self.service.store.set_meta("scheduler_heartbeat", current.isoformat())
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
 
     def _run_loop(self) -> None:
         """Poll for due schedules until the scheduler is stopped."""
         while not self._stop_event.is_set():
-            self.tick()
+            try:
+                self.tick()
+            except Exception as exc:  # pragma: no cover - defensive thread crash handling
+                self.service.store.set_meta("scheduler_running", "false")
+                self.service.store.set_meta("scheduler_state", "crashed")
+                self.service.store.set_meta("scheduler_last_error", str(exc) or exc.__class__.__name__)
+                self.service.store.set_meta("scheduler_heartbeat", datetime.now(timezone.utc).isoformat())
+                break
             self._stop_event.wait(self.poll_interval)
 
     def tick(self, now: datetime | None = None) -> None:
         """Evaluate due schedules and launch eligible pipeline runs."""
         current = now or datetime.now(timezone.utc)
+        self.service.store.set_meta("scheduler_state", "running")
         self.service.store.set_meta("scheduler_heartbeat", current.isoformat())
         self.service.reconcile_runtime_health()
         self.service.reload_project()

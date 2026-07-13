@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -205,3 +206,54 @@ def test_sql_sensor_enqueues_pipeline_when_new_rows_arrive(tmp_path: Path) -> No
     assert runs[0].trigger == "sensor"
     _, _, logs = service.get_run(runs[0].run_id)
     assert any("Detected new rows in inbound_events" in line.message for line in logs)
+
+
+def test_scheduler_marks_itself_crashed_when_tick_raises(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Scheduler Crash Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  scheduled_flow:",
+                "    schedule:",
+                "      interval_seconds: 60",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(
+        config_path=config_path,
+        database_path=tmp_path / "runs.db",
+        engine=ImmediateEngine(),
+    )
+    scheduler = PipelineScheduler(service, poll_interval=1)
+
+    def raise_on_enqueue(*, now=None):
+        del now
+        raise RuntimeError("scheduler boom")
+
+    service.enqueue_due_schedules = raise_on_enqueue  # type: ignore[method-assign]
+    scheduler.start()
+
+    snapshot = service.scheduler_snapshot()
+    for _ in range(30):
+        snapshot = service.scheduler_snapshot()
+        if snapshot["state"] == "crashed":
+            break
+        time.sleep(0.1)
+
+    assert snapshot["running"] is False
+    assert snapshot["state"] == "crashed"
+    assert snapshot["last_error"] == "scheduler boom"

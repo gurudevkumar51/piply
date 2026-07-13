@@ -11,6 +11,7 @@ Current stack:
 - small vanilla JS modules for graph rendering and actions
 - SQLite for runs, logs, queue state, and sensor cursors
 - a background scheduler thread for schedules and sensors
+- the same expanded runtime DAG that the CLI executes
 
 ## Start The Server
 
@@ -28,6 +29,12 @@ Optional flags:
 
 ```bash
 piply start --config piply-demo/piply.yaml --host 0.0.0.0 --port 8080 --reload
+```
+
+Run on another port when `8000` is already occupied:
+
+```bash
+piply start --config piply-demo/piply.yaml --port 8081
 ```
 
 Compatibility alias:
@@ -73,6 +80,7 @@ Pipeline and run pages currently support:
 - flow view
 - stage view
 - focus view
+- compact, low-shadow cards and tighter table spacing
 - edge labels
 - live node colors
 - live task duration labels
@@ -90,9 +98,10 @@ Run detail page actions:
 
 - cancel active run
 - delete finished run
-- rerun any finished run
-- retry from selected failed or skipped task
+- Re-Run any finished run
+- retry from selected failed, interrupted, or skipped task
 - filter logs by selected task
+- collapse or expand the task-focus panel without reloading DAG data
 - open long task output previews in a side drawer
 
 ## API Routes
@@ -100,6 +109,7 @@ Run detail page actions:
 ### Dashboard
 
 - `GET /api/dashboard`
+- `GET /api/dashboard/scheduler`
 
 Returns:
 
@@ -147,6 +157,12 @@ Trigger a pipeline:
 curl -X POST http://127.0.0.1:8000/api/pipelines/extract_flow/run
 ```
 
+For advanced YAML, deployment ids are normal pipeline ids:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/pipelines/client_a_reporting/run
+```
+
 Trigger a pipeline with tenant context and run parameters:
 
 ```bash
@@ -160,6 +176,8 @@ Trigger a task scope:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/pipelines/extract_flow/tasks/publish_manifest/run
 ```
+
+For entity-mapped pipelines, `{task_id}` can be either a concrete runtime id such as `payment.validate` or the original template id such as `validate`. Template ids run all mapped instances of that template with their required upstream tasks.
 
 Trigger a selected task with tenant params:
 
@@ -243,6 +261,12 @@ Fetch captured task output (includes decoded JSON when available):
 curl http://127.0.0.1:8000/api/runs/<run_id>/tasks/<task_id>/output
 ```
 
+Mapped task outputs are stored by concrete runtime id:
+
+```bash
+curl http://127.0.0.1:8000/api/runs/<run_id>/tasks/payment.extract/output
+```
+
 Retry from a task inside a failed run:
 
 ```bash
@@ -277,11 +301,16 @@ curl "http://127.0.0.1:8000/api/logs?q=failed&pipeline_id=extract_flow&limit=200
 The dashboard snapshot includes:
 
 - scheduler running status
+- scheduler state (`running`, `stopped`, `stale`, `crashed`)
+- scheduler label
 - last scheduler heartbeat
+- heartbeat age
+- last scheduler error
 - config path
 - database path
 - queue depth
 - sensor count
+- accepting-work flag
 - `queue_metrics`
 - `worker_metrics`
 
@@ -303,9 +332,21 @@ Important tables:
 - `sensor_state`
 - `pipeline_overrides`
 
+## Task Response Metadata
+
+Pipeline task responses include entity metadata when a task came from a reusable template:
+
+- `task_id`: concrete runtime id, for example `payment.extract`
+- `template_id`: source template id, for example `extract`
+- `entity_key`: runtime entity key, for example `payment`
+- `entity_values`: values injected into YAML interpolation and Python context
+
+Static tasks keep these fields empty, so existing API clients continue to work.
+
 ## Current Gaps And Planned Additions
 
 - `piply logs --follow`
 - plugin hooks for custom operators
 - artifact retention policies for large task outputs
+- richer matrix/task-group UI controls
 - optional distributed runner while local mode remains the default

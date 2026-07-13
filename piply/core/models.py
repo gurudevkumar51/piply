@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-RunStatus = Literal["queued", "running", "success", "failed", "cancelled"]
-TaskStatus = Literal["queued", "running", "success", "failed", "skipped", "cancelled"]
+RunStatus = Literal["queued", "running", "success", "failed", "cancelled", "interrupted"]
+TaskStatus = Literal["queued", "running", "success", "failed", "skipped", "cancelled", "interrupted"]
 TriggerType = Literal["manual", "schedule", "api", "pipeline", "retry", "sensor", "task"]
 TaskType = Literal["python", "cli", "api", "ssh", "email", "webhook"]
 RetryMode = Literal["startover", "resume"]
@@ -127,6 +127,9 @@ class TaskDefinition:
     kwargs: dict[str, object] = field(default_factory=dict)
     command: str | None = None
     shell: str | None = None
+    template_id: str | None = None
+    entity_key: str | None = None
+    entity_values: dict[str, str] = field(default_factory=dict)
     cwd: Path | None = None
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None
@@ -207,6 +210,8 @@ class PipelineDefinition:
     title: str
     description: str
     tasks: dict[str, TaskDefinition]
+    template_id: str | None = None
+    deployment_id: str | None = None
     tags: tuple[str, ...] = ()
     schedule: SchedulePlan | None = None
     enabled: bool = True
@@ -449,6 +454,8 @@ class PipelineSummary:
     last_run: RunRecord | None = None
     active_runs: int = 0
     retry_summary: str = "No automatic retry"
+    template_id: str | None = None
+    deployment_id: str | None = None
 
     @property
     def execution_summary(self) -> str:

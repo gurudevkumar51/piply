@@ -61,6 +61,109 @@ def test_python_task_outputs_are_passed_through_context_and_persisted(
     assert transform_output.json_value == '{"records": 42}'
 
 
+def test_entity_mapped_tasks_get_scoped_context_and_reduce_outputs(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ops.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def extract(report: str, context):",
+                "    assert context['report'] == report",
+                "    return {'report': report, 'rows': len(report)}",
+                "",
+                "def transform(context):",
+                "    extracted = context['extract']",
+                "    return {'report': extracted['report'], 'rows': extracted['rows'] + 1}",
+                "",
+                "def summarize(context):",
+                "    mapped = context['mapped']['transform']",
+                "    return {key: value['report'] for key, value in sorted(mapped.items())}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Entity Runtime Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  mapped_flow:",
+                "    entities:",
+                "      report: [payment, adjustment, refund]",
+                "    max_parallel_tasks: 3",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: ops.py",
+                "        function: extract",
+                "        kwargs:",
+                "          report: '{report}'",
+                "      transform:",
+                "        type: python",
+                "        path: ops.py",
+                "        function: transform",
+                "        depends_on: [extract]",
+                "      summarize:",
+                "        type: python",
+                "        path: ops.py",
+                "        function: summarize",
+                "        entities: false",
+                "        depends_on: [transform]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("mapped_flow", wait=True)
+    stored_run, task_runs, _ = service.get_run(run.run_id)
+    output = service.get_task_output(run.run_id, "summarize")
+
+    assert stored_run.status == "success"
+    assert len(task_runs) == 7
+    assert all(task.status == "success" for task in task_runs)
+    assert output.json_value == '{"adjustment": "adjustment", "payment": "payment", "refund": "refund"}'
+
+
+def test_run_detail_keeps_all_subprocess_log_lines(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Log Capture Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  log_flow:",
+                "    tasks:",
+                "      loud:",
+                "        type: cli",
+                "        command: >-",
+                "          python -c \"for i in range(520): print(f'line-{i}')\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("log_flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+    messages = [line.message for line in logs]
+
+    assert stored_run.status == "success"
+    assert any(message == "line-0" for message in messages)
+    assert any(message == "line-519" for message in messages)
+
+
 def test_task_upstream_failure_behavior_can_fail_or_continue(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -108,6 +108,18 @@ class TaskRunner:
             prefix = f"[{task_id}] " if task_id else ""
             self.on_log(f"{prefix}{message}")
 
+    def for_context(self, context: RuntimeTaskContext) -> TaskRunner:
+        """Return a runner sharing process/log wiring with a task-specific context."""
+        return TaskRunner(
+            store=self.store,
+            run_id=self.run_id,
+            on_log=self.on_log,
+            is_cancelled=self.is_cancelled,
+            register_process=self.register_process,
+            unregister_process=self.unregister_process,
+            context=context,
+        )
+
     def _run_subprocess(
         self,
         *,
@@ -120,6 +132,7 @@ class TaskRunner:
         """Run a local process and stream its merged stdout/stderr."""
         environment = os.environ.copy()
         environment.update(env)
+        environment.setdefault("PYTHONUNBUFFERED", "1")
         context_json = self.context.to_env_json()
         if context_json is not None:
             environment["PIPLY_CONTEXT_JSON"] = context_json

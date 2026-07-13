@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -57,9 +58,82 @@ def test_service_reconciles_stale_running_runs(tmp_path: Path) -> None:
 
     record, task_runs, logs = service.get_run(run.run_id)
 
-    assert record.status == "failed"
-    assert task_runs[0].status == "failed"
-    assert any("heartbeat timeout" in line.message for line in logs)
+    assert record.status == "interrupted"
+    assert task_runs[0].status == "interrupted"
+    assert any("heartbeat timeout recovery" in line.message for line in logs)
+
+
+def test_app_shutdown_interrupts_active_runs(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "slow.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "for index in range(20):",
+                "    print(f'tick-{index}')",
+                "    time.sleep(0.2)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Shutdown Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  slow_flow:",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: slow.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    database_path = tmp_path / "shutdown.db"
+    previous_config = os.environ.get("PIPLY_CONFIG")
+    previous_database = os.environ.get("PIPLY_DATABASE")
+    os.environ["PIPLY_CONFIG"] = str(config_path)
+    os.environ["PIPLY_DATABASE"] = str(database_path)
+
+    try:
+        app = create_app(str(config_path))
+        with TestClient(app) as client:
+            run_response = client.post("/api/pipelines/slow_flow/run", json={})
+            assert run_response.status_code == 200
+            run_id = run_response.json()["id"]
+
+            detail = None
+            for _ in range(30):
+                detail = client.get(f"/api/runs/{run_id}")
+                status = detail.json()["run"]["status"]
+                if status in {"queued", "running"}:
+                    break
+                time.sleep(0.1)
+            assert detail is not None
+            assert detail.json()["run"]["status"] in {"queued", "running"}
+    finally:
+        if previous_config is None:
+            os.environ.pop("PIPLY_CONFIG", None)
+        else:
+            os.environ["PIPLY_CONFIG"] = previous_config
+        if previous_database is None:
+            os.environ.pop("PIPLY_DATABASE", None)
+        else:
+            os.environ["PIPLY_DATABASE"] = previous_database
+
+    service = PipelineService(config_path=config_path, database_path=database_path)
+    record, task_runs, logs = service.get_run(run_id)
+
+    assert record.status == "interrupted"
+    assert task_runs[0].status == "interrupted"
+    assert any("Piply service shut down" in line.message for line in logs)
 
 
 def test_auth_middleware_supports_basic_for_ui_and_bearer_for_api(

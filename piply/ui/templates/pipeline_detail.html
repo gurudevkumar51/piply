@@ -22,35 +22,41 @@
             </span>
             <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
             <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+            {% if pipeline.template_id %}
+            <span class="meta-pill">template {{ pipeline.template_id }}</span>
+            {% endif %}
+            {% if pipeline.deployment_id %}
+            <span class="meta-pill">deployment {{ pipeline.deployment_id }}</span>
+            {% endif %}
             <span class="meta-pill">{{ pipeline.execution_summary }}</span>
             <span class="meta-pill">{{ pipeline.retry_summary }}</span>
             {% for target in pipeline.trigger_targets %}
             <span class="tag">triggers {{ target }}</span>
             {% endfor %}
         </div>
-    </section>
 
-    <section class="detail-grid">
-        <article class="detail-card">
-            <div class="detail-label">Schedule</div>
-            <div class="detail-value">{{ pipeline.schedule_text }}</div>
-        </article>
-        <article class="detail-card">
-            <div class="detail-label">Primary entry</div>
-            <div class="detail-value mono path-value">{{ pipeline.primary_entry }}</div>
-        </article>
-        <article class="detail-card">
-            <div class="detail-label">Flow summary</div>
-            <div class="detail-value mono path-value">{{ pipeline.command_preview }}</div>
-        </article>
-        <article class="detail-card">
-            <div class="detail-label">Execution</div>
-            <div class="detail-value">{{ pipeline.execution_summary }}</div>
-        </article>
-        <article class="detail-card">
-            <div class="detail-label">Retry policy</div>
-            <div class="detail-value">{{ pipeline.retry_summary }}</div>
-        </article>
+        <section class="detail-grid hero-detail-grid">
+            <article class="detail-card">
+                <div class="detail-label">Schedule</div>
+                <div class="detail-value">{{ pipeline.schedule_text }}</div>
+            </article>
+            <article class="detail-card">
+                <div class="detail-label">Primary entry</div>
+                <div class="detail-value mono path-value">{{ pipeline.primary_entry }}</div>
+            </article>
+            <article class="detail-card">
+                <div class="detail-label">Flow summary</div>
+                <div class="detail-value mono path-value">{{ pipeline.command_preview }}</div>
+            </article>
+            <article class="detail-card">
+                <div class="detail-label">Execution</div>
+                <div class="detail-value">{{ pipeline.execution_summary }}</div>
+            </article>
+            <article class="detail-card">
+                <div class="detail-label">Retry policy</div>
+                <div class="detail-value">{{ pipeline.retry_summary }}</div>
+            </article>
+        </section>
     </section>
 
     <section class="panel">
@@ -63,6 +69,7 @@
                 <span class="status-badge success">success</span>
                 <span class="status-badge running">running</span>
                 <span class="status-badge failed">failed</span>
+                <span class="status-badge interrupted">interrupted</span>
                 <span class="status-badge cancelled">cancelled</span>
                 <span class="status-badge queued">queued</span>
                 <span class="status-badge skipped">skipped</span>
@@ -273,7 +280,7 @@ function renderPipelineDag() {
         taskStateMap,
         {
             selectedNodeId: selectedPipelineTaskId,
-            clickableStatuses: ["queued", "running", "success", "failed", "skipped", "cancelled"],
+            clickableStatuses: ["queued", "running", "success", "failed", "interrupted", "skipped", "cancelled"],
             onNodeClick: (node) => {
                 focusPipelineTask(node.task_id, false, false);
             },
@@ -315,12 +322,15 @@ function refreshTaskStatuses(latestTaskRuns) {
             badge.textContent = task.status;
         }
         if (card) {
-            card.classList.remove("task-card-success", "task-card-failed", "task-card-cancelled");
+            card.classList.remove("task-card-success", "task-card-failed", "task-card-interrupted", "task-card-cancelled");
             if (task.status === "success") {
                 card.classList.add("task-card-success");
             }
             if (task.status === "failed") {
                 card.classList.add("task-card-failed");
+            }
+            if (task.status === "interrupted") {
+                card.classList.add("task-card-interrupted");
             }
             if (task.status === "cancelled") {
                 card.classList.add("task-card-cancelled");

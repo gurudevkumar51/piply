@@ -26,7 +26,7 @@
             {% if run.status in ['queued', 'running'] %}
             <button class="button warn" onclick="cancelRun('{{ run.run_id }}')">Cancel run</button>
             {% else %}
-            <button class="button primary" onclick="retryRun('{{ run.run_id }}', 'startover')">Rerun</button>
+            <button class="button primary" onclick="retryRun('{{ run.run_id }}', 'startover')">Re-Run</button>
             <button class="button ghost" onclick="deleteRun('{{ run.run_id }}')">Delete run</button>
             {% endif %}
         </div>
@@ -42,17 +42,21 @@
                 <span class="status-badge success">success</span>
                 <span class="status-badge running">running</span>
                 <span class="status-badge failed">failed</span>
+                <span class="status-badge interrupted">interrupted</span>
                 <span class="status-badge cancelled">cancelled</span>
                 <span class="status-badge queued">queued</span>
                 <span class="status-badge skipped">skipped</span>
+                <button class="toolbar-button" id="task-focus-toggle" type="button" onclick="toggleTaskFocusPanel()">Hide task focus</button>
             </div>
         </div>
-        <div class="dag-operator-grid run-dag-grid">
+        <div class="dag-operator-grid run-dag-grid" id="run-dag-grid">
             <div class="dag-shell run-graph-panel">
                 <div class="dag-stage" id="run-dag-stage"></div>
             </div>
             <aside class="task-inspector" id="run-task-inspector">
-                <div class="detail-label">Task focus</div>
+                <div class="inspector-header">
+                    <div class="detail-label">Task focus</div>
+                </div>
                 <div class="empty-state">Select a task node to inspect it.</div>
             </aside>
         </div>
@@ -129,7 +133,7 @@
         </div>
         <div class="task-grid" id="task-run-grid">
             {% for task in task_runs %}
-            <article class="task-card pipeline-focus-card {% if task.status in ['failed', 'skipped'] %}retryable{% endif %} {% if task.status == 'failed' %}task-card-failed{% elif task.status == 'success' %}task-card-success{% elif task.status == 'cancelled' %}task-card-cancelled{% endif %}" onclick="focusRunTask('{{ task.task_id }}', true)" data-task-card="{{ task.task_id }}">
+            <article class="task-card pipeline-focus-card {% if task.status in ['failed', 'interrupted', 'skipped'] %}retryable{% endif %} {% if task.status == 'failed' %}task-card-failed{% elif task.status == 'success' %}task-card-success{% elif task.status == 'interrupted' %}task-card-interrupted{% elif task.status == 'cancelled' %}task-card-cancelled{% endif %}" onclick="focusRunTask('{{ task.task_id }}', true)" data-task-card="{{ task.task_id }}">
                 <div class="task-card-header">
                     <div>
                         <h3 class="card-title">{{ task.title }}</h3>
@@ -197,6 +201,8 @@ let currentUpcomingRuns = initialUpcomingRuns.slice();
 let selectedRunTaskId = initialTaskRuns[0]?.task_id || null;
 let taskLogFilterId = null;
 let durationTicker = null;
+const taskFocusStorageKey = "piply.runTaskFocusCollapsed";
+let taskFocusCollapsed = window.localStorage.getItem(taskFocusStorageKey) === "true";
 
 function updateRunHeader(run) {
     document.getElementById("run-status").textContent = run.status;
@@ -267,11 +273,11 @@ function renderRunInspector(taskId) {
     const inspector = document.getElementById("run-task-inspector");
     const task = currentTaskRuns.find((item) => item.task_id === taskId);
     if (!task) {
-        inspector.innerHTML = '<div class="detail-label">Task focus</div><div class="empty-state">Select a task node to inspect it.</div>';
+        inspector.innerHTML = '<div class="inspector-header"><div class="detail-label">Task focus</div></div><div class="empty-state">Select a task node to inspect it.</div>';
         return;
     }
     const dependencyText = task.depends_on && task.depends_on.length ? task.depends_on.join(", ") : "none";
-    const canRetryFromTask = currentRun.status === "failed" && (task.status === "failed" || task.status === "skipped");
+    const canRetryFromTask = ["failed", "interrupted"].includes(currentRun.status) && ["failed", "interrupted", "skipped"].includes(task.status);
     const canRerun = currentRun.status !== "queued" && currentRun.status !== "running";
     const outputBlock = task.output_preview
         ? `<div class="inspector-section">
@@ -284,7 +290,9 @@ function renderRunInspector(taskId) {
         : "";
     const errorBlock = task.error ? `<p class="footer-note">${escapeHtml(task.error)}</p>` : "";
     inspector.innerHTML = `
-        <div class="detail-label">Task focus</div>
+        <div class="inspector-header">
+            <div class="detail-label">Task focus</div>
+        </div>
         <h3 class="panel-title" style="margin-top:10px;">${escapeHtml(task.title)}</h3>
         <div class="task-stats" style="margin-top:12px;">
             <span class="task-type-badge">${escapeHtml(task.task_type)}</span>
@@ -310,7 +318,7 @@ function renderRunInspector(taskId) {
             <button class="button secondary" onclick="filterLogsToTask('${task.task_id}')">Filter logs</button>
             <button class="button ghost" onclick="copySelectedTaskCommand()">Copy command</button>
             ${canRetryFromTask ? `<button class="button primary" onclick="retryRun(runId, 'resume', '${task.task_id}')">Resume from here</button>` : ""}
-            ${canRerun ? `<button class="button ghost" onclick="retryRun(runId, 'startover')">Rerun run</button>` : ""}
+            ${canRerun ? `<button class="button ghost" onclick="retryRun(runId, 'startover')">Re-Run</button>` : ""}
         </div>
     `;
 }
@@ -336,11 +344,62 @@ function closeOutputPreview() {
     document.body.classList.remove("drawer-open");
 }
 
+function renderRunGraph(taskRuns) {
+    window.renderDagInto(
+        "run-dag-stage",
+        taskRuns.map((task) => ({
+            task_id: task.task_id,
+            title: task.title,
+            task_type: task.task_type,
+            depends_on: task.depends_on,
+            command_preview: task.command_preview,
+            status: task.status,
+            duration_seconds: task.duration_seconds,
+        })),
+        Object.fromEntries(taskRuns.map((task) => [task.task_id, task.status])),
+        {
+            selectedNodeId: selectedRunTaskId,
+            clickableStatuses: ["queued", "running", "success", "failed", "interrupted", "skipped", "cancelled"],
+            onNodeClick: (node) => {
+                focusRunTask(node.task_id, false, false);
+            },
+            defaultLayout: "flow",
+        },
+    );
+}
+
+function applyTaskFocusState({ persist = true, rerenderDag = true } = {}) {
+    const grid = document.getElementById("run-dag-grid");
+    const inspector = document.getElementById("run-task-inspector");
+    const button = document.getElementById("task-focus-toggle");
+    if (grid) {
+        grid.classList.toggle("inspector-collapsed", taskFocusCollapsed);
+    }
+    if (inspector) {
+        inspector.setAttribute("aria-hidden", taskFocusCollapsed ? "true" : "false");
+    }
+    if (button) {
+        button.textContent = taskFocusCollapsed ? "Show task focus" : "Hide task focus";
+        button.classList.toggle("active", !taskFocusCollapsed);
+    }
+    if (persist) {
+        window.localStorage.setItem(taskFocusStorageKey, taskFocusCollapsed ? "true" : "false");
+    }
+    if (rerenderDag) {
+        renderRunGraph(currentTaskRuns);
+    }
+}
+
+function toggleTaskFocusPanel() {
+    taskFocusCollapsed = !taskFocusCollapsed;
+    applyTaskFocusState();
+}
+
 function renderTaskRuns(taskRuns) {
     currentTaskRuns = taskRuns.slice();
     const grid = document.getElementById("task-run-grid");
     grid.innerHTML = taskRuns.map((task) => `
-        <article class="task-card pipeline-focus-card ${task.status === "failed" ? "task-card-failed retryable" : ""} ${task.status === "success" ? "task-card-success" : ""} ${task.status === "cancelled" ? "task-card-cancelled" : ""} ${task.status === "skipped" ? "retryable" : ""} ${task.task_id === selectedRunTaskId ? "task-card-focused" : ""}" onclick="focusRunTask('${task.task_id}', true)" data-task-card="${escapeHtml(task.task_id)}">
+        <article class="task-card pipeline-focus-card ${task.status === "failed" ? "task-card-failed retryable" : ""} ${task.status === "success" ? "task-card-success" : ""} ${task.status === "interrupted" ? "task-card-interrupted retryable" : ""} ${task.status === "cancelled" ? "task-card-cancelled" : ""} ${task.status === "skipped" ? "retryable" : ""} ${task.task_id === selectedRunTaskId ? "task-card-focused" : ""}" onclick="focusRunTask('${task.task_id}', true)" data-task-card="${escapeHtml(task.task_id)}">
             <div class="task-card-header">
                 <div>
                     <h3 class="card-title">${escapeHtml(task.title)}</h3>
@@ -359,27 +418,7 @@ function renderTaskRuns(taskRuns) {
     `).join("");
     renderRunInspector(selectedRunTaskId || taskRuns[0]?.task_id || null);
     syncTaskCardFocus();
-    window.renderDagInto(
-        "run-dag-stage",
-        taskRuns.map((task) => ({
-            task_id: task.task_id,
-            title: task.title,
-            task_type: task.task_type,
-            depends_on: task.depends_on,
-            command_preview: task.command_preview,
-            status: task.status,
-            duration_seconds: task.duration_seconds,
-        })),
-        Object.fromEntries(taskRuns.map((task) => [task.task_id, task.status])),
-        {
-            selectedNodeId: selectedRunTaskId,
-            clickableStatuses: ["queued", "running", "success", "failed", "skipped", "cancelled"],
-            onNodeClick: (node) => {
-                focusRunTask(node.task_id, false, false);
-            },
-            defaultLayout: "flow",
-        },
-    );
+    renderRunGraph(taskRuns);
 }
 
 function focusRunTask(taskId, shouldScroll = false, rerender = true) {
@@ -468,6 +507,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderTaskRuns(initialTaskRuns);
     renderLogs(initialLogs);
     renderUpcomingRuns(initialUpcomingRuns);
+    applyTaskFocusState({ persist: false, rerenderDag: true });
     startDurationTicker();
     if (active) {
         setInterval(refreshRun, 3000);

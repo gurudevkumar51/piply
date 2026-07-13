@@ -7,7 +7,10 @@ Piply is a lightweight DAG runner for script-heavy teams. It keeps the runtime s
 - multiple pipelines in one workspace
 - multiple tasks per pipeline
 - dependency-aware execution
+- metadata-driven entity expansion for reusable task templates
+- optional pipeline templates and deployments for tenant/environment reuse
 - automatic schedule backfill through a durable internal queue
+- graceful shutdown and startup recovery for interrupted runs
 - pipeline-to-pipeline triggers
 - pipeline-to-pipeline context passing (JSON outputs)
 - file, SQL, and API sensors
@@ -23,7 +26,7 @@ CLI / API / UI
        |
 PipelineService
        |
-Loader + Scheduler + RunStore
+Loader + DeploymentExpander + EntityExpander + Scheduler + RunStore
        |
 Internal trigger queue + sensor cursor state
        |
@@ -34,12 +37,25 @@ python / cli / api / webhook / email / ssh
 SQLite state + local processes
 ```
 
+## Runtime Recovery
+
+Piply now treats shutdown recovery as a first-class runtime behavior:
+
+- graceful service shutdown stops accepting new work before the scheduler exits
+- queued or running runs are marked `interrupted` instead of being left `running`
+- actively running tasks are marked `interrupted`
+- queued tasks that never started are marked `cancelled`
+- startup reconciliation converts stale heartbeat records into terminal states
+- the scheduler chip uses heartbeat freshness, not just a boolean flag, to decide whether it is live
+
 ## Core Design Choices
 
 - keep SQLite as the default state store
 - keep the queue internal instead of requiring Redis
 - keep Python callable execution under `type: python`
 - keep reusable YAML values lightweight with `variables` and `{name}` interpolation
+- keep mapped task expansion metadata-driven and optional
+- keep deployment architecture optional so simple `pipelines:` YAML remains simple
 - keep secrets out of YAML by expanding `.env` and environment variables
 - keep concurrency inferred from `depends_on`
 - keep modules small enough to evolve without a large rewrite
@@ -53,10 +69,13 @@ Top-level fields:
 - `workspace`
 - `timezone`
 - `variables`
+- `entities`
 - `defaults`
 - `secrets`
 - `connections`
 - `pipelines`
+- `pipeline_templates`
+- `pipeline_deployments`
 
 Each pipeline can define:
 
@@ -70,9 +89,11 @@ Each pipeline can define:
 - `sensors`
 - `tasks`
 - `variables`
+- `entities`
 
 Each task can also define:
 
+- `entities`
 - `on_upstream_failure` (`skip`, `fail`, `continue`)
 - `shell` for CLI command tasks that need `bash`, `cmd`, `powershell`, or `pwsh`
 
@@ -94,6 +115,73 @@ tasks:
 ```
 
 Pipeline-level variables override top-level values for one pipeline. If a scalar starts with `{name}`, quote it, for example `path: "{scripts_dir}/extract.py"`.
+
+## Pipeline Templates And Deployments
+
+Advanced YAML can define reusable templates and concrete deployments:
+
+```yaml
+pipeline_templates:
+  report_pipeline:
+    tasks:
+      extract:
+        type: python
+        path: pipelines/extract.py
+        function: extract_data
+        kwargs:
+          tenant: "{tenant}"
+
+pipeline_deployments:
+  client_a_reporting:
+    template: report_pipeline
+    schedule:
+      every: 15m
+    variables:
+      tenant: client_a
+```
+
+`client_a_reporting` is loaded as a normal pipeline id. The scheduler, UI, CLI, and API all operate on deployment ids, while the template stays a reusable definition. Simple `pipelines:` definitions continue to work unchanged.
+
+## Entity Expansion
+
+`entities` turns static task definitions into runtime task templates without changing the old YAML shape.
+
+```yaml
+pipelines:
+  extract_flow:
+    entities:
+      report: [payment, adjustment, refund]
+    tasks:
+      extract:
+        type: python
+        path: pipelines/extract.py
+        function: extract_data
+        kwargs:
+          report: "{report}"
+      load:
+        type: cli
+        command: python load.py --report {report}
+        depends_on: [extract]
+```
+
+Runtime ids:
+
+- `payment.extract -> payment.load`
+- `adjustment.extract -> adjustment.load`
+- `refund.extract -> refund.load`
+
+Architecture layers:
+
+- Pipeline Definition: YAML loader validates templates, variables, entities, task types, sensors, and schedules.
+- Runtime Expansion: `piply.pipeline.expander` builds concrete runtime task ids and rewrites dependencies.
+- Execution Engine: `LocalEngine` executes the expanded DAG with retries, logs, context, and outputs.
+
+Best-practice naming:
+
+- Runtime ids use `{entity_key}.{template_task_id}` for one dimension.
+- Multi-dimension ids join entity keys with dots before the template id.
+- Template ids remain stable for command overrides and task-scoped runs.
+- Reducer tasks can use `entities: false` and depend on a mapped template to wait for every mapped runtime task.
 
 ## Python Task Model
 
@@ -154,6 +242,8 @@ Pipeline-to-pipeline passing:
 - Tenant context is preserved as `context["tenant_id"]`.
 - CLI/API run params are available as `context["params"]`.
 - CLI runs with `--wait` also finish downstream pipeline triggers inline, which keeps local smoke tests deterministic.
+- Mapped tasks receive same-entity aliases by template id, so `payment.transform` can read `context["extract"]` from `payment.extract`.
+- Reducers that use `entities: false` can read all mapped values through `context["mapped"][template_id][entity_key]`.
 
 ## Sensors
 
@@ -300,7 +390,8 @@ Current DAG pages support:
 - task selection side panels
 - task actions from the selected node
 - log filtering by selected task on the run page
-- rerun from completed run detail pages
+- collapsible task-focus panel on the run page
+- re-run from completed run detail pages
 - long task output previews in a side drawer so run pages stay compact
 
 Additional operator pages:
@@ -333,6 +424,7 @@ Additional operator pages:
 
 - `extract_flow`: runnable scheduled pipeline with Python callable output passing, CLI tasks, retry policy, and a downstream trigger
 - `report_flow`: runnable downstream pipeline that can read upstream JSON outputs through `context`
+- `entity_mapping_examples`: disabled reference pipeline for entity-mapped task templates and a reducer task
 - `operator_examples`: disabled reference pipeline for `cli`, `api`, `webhook`, `email`, and `ssh`
 - `sensor_examples`: disabled reference pipeline for `file_sensor`, `sql_sensor`, and `api_sensor`
 - `pipelines/extract.py`, `pipelines/report.py`, and `sensor_inbox/`
@@ -340,9 +432,10 @@ Additional operator pages:
 ## Roadmap Pointers
 
 - `piply logs --follow`
-- reusable task templates
 - managed secret-manager plugins
 - plugin hooks for custom operators
+- task groups, conditional branches, and richer matrix controls
 - optional distributed runner
 
 See `USAGE_GUIDE.md` for full YAML examples and every CLI command.
+See `../docs/architecture/technical_architecture.md` for the deep maintainer guide.

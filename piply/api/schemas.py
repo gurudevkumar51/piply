@@ -111,6 +111,9 @@ class TaskResponse(BaseModel):
     command_preview: str
     on_upstream_failure: str
     shell: str | None = None
+    template_id: str | None = None
+    entity_key: str | None = None
+    entity_values: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
     def from_definition(cls, definition: TaskDefinition) -> TaskResponse:
@@ -125,6 +128,9 @@ class TaskResponse(BaseModel):
             command_preview=definition.command_preview,
             on_upstream_failure=definition.on_upstream_failure,
             shell=definition.shell,
+            template_id=definition.template_id,
+            entity_key=definition.entity_key,
+            entity_values=definition.entity_values,
         )
 
 
@@ -236,6 +242,8 @@ class PipelineResponse(BaseModel):
     pipeline_id: str
     title: str
     description: str
+    template_id: str | None = None
+    deployment_id: str | None = None
     enabled: bool
     paused: bool
     schedule_text: str
@@ -262,6 +270,8 @@ class PipelineResponse(BaseModel):
             pipeline_id=summary.pipeline_id,
             title=summary.title,
             description=summary.description,
+            template_id=summary.template_id,
+            deployment_id=summary.deployment_id,
             enabled=summary.enabled,
             paused=summary.paused,
             schedule_text=summary.schedule_text,
@@ -337,11 +347,16 @@ class SchedulerResponse(BaseModel):
     """SchedulerResponse exposes scheduler metadata for the dashboard."""
 
     running: bool
+    state: str | None = None
+    label: str | None = None
     heartbeat: str | None = None
+    heartbeat_age_seconds: float | None = None
+    last_error: str | None = None
     config_path: str
     database_path: str
     queue_depth: int | None = None
     sensor_count: int | None = None
+    accepting_work: bool | None = None
     queue_metrics: dict[str, object] = Field(default_factory=dict)
     worker_metrics: dict[str, object] = Field(default_factory=dict)
 

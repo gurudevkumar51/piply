@@ -18,7 +18,7 @@
             </select>
             <select name="status">
                 <option value="">Any status</option>
-                {% for status in ["success", "failed", "running", "queued", "cancelled"] %}
+                {% for status in ["success", "failed", "interrupted", "running", "queued", "cancelled"] %}
                 <option value="{{ status }}" {% if matrix.filters.status == status %}selected{% endif %}>{{ status }}</option>
                 {% endfor %}
             </select>
@@ -36,6 +36,7 @@
             <div class="legend-row">
                 <span class="status-badge success">success</span>
                 <span class="status-badge failed">failed</span>
+                <span class="status-badge interrupted">interrupted</span>
                 <span class="status-badge running">running</span>
                 <span class="status-badge skipped">skipped</span>
                 <span class="status-badge queued">retry</span>
@@ -138,7 +139,7 @@ async function openMatrixCell(runId, taskId) {
             <div class="card-actions">
                 <a class="button secondary" href="/runs/${runId}">Open run</a>
                 <button class="button ghost" onclick="triggerTask('${payload.run.pipeline_id}', '${taskId}')">Run task</button>
-                ${payload.run.status === "failed" ? `<button class="button primary" onclick="retryRun('${runId}', 'resume', '${taskId}')">Retry from task</button>` : ""}
+                ${["failed", "interrupted"].includes(payload.run.status) ? `<button class="button primary" onclick="retryRun('${runId}', 'resume', '${taskId}')">Retry from task</button>` : ""}
             </div>
             <div class="log-viewer">
                 ${logs.length ? logs.slice(0, 80).map((line) => `

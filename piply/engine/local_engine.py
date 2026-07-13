@@ -162,6 +162,16 @@ class LocalEngine(BaseEngine):
                 final_run = store.get_run(run_id)
                 if final_run is not None and on_success is not None:
                     on_success(pipeline, final_run)
+        except KeyboardInterrupt:
+            cancel_event.set()
+            runner.emit("Pipeline interrupted by shutdown signal.")
+            self.cancel(run_id)
+            store.interrupt_run(
+                run_id,
+                reason="Run interrupted by shutdown signal.",
+                queued_reason="Task did not start before the run was interrupted by shutdown signal.",
+            )
+            raise
         except Exception as exc:  # pragma: no cover - defensive path
             runner.emit(traceback.format_exc().rstrip())
             store.finish_run(run_id, status="failed", exit_code=1, error=str(exc))
@@ -189,7 +199,7 @@ class LocalEngine(BaseEngine):
                 break
             if task.task_id in task_statuses:
                 continue
-            result = self._run_or_skip_task(task, run_id, store, runner, context, task_statuses)
+            result = self._run_or_skip_task(task, pipeline, run_id, store, runner, context, task_statuses)
             if result.status == "failed" and first_error is None:
                 first_error = result.error or f"Task {task.task_id} failed"
         return first_error
@@ -263,7 +273,7 @@ class LocalEngine(BaseEngine):
                                 first_error = result.error or f"Task {task.task_id} failed"
                             continue
 
-                    in_flight[executor.submit(self._execute_task, task, run_id, store, runner)] = task
+                    in_flight[executor.submit(self._execute_task, task, pipeline, run_id, store, runner, context)] = task
 
                 if not in_flight and not scheduled_this_round:
                     break
@@ -292,6 +302,7 @@ class LocalEngine(BaseEngine):
     def _run_or_skip_task(
         self,
         task: TaskDefinition,
+        pipeline: PipelineDefinition,
         run_id: str,
         store: RunStore,
         runner: TaskRunner,
@@ -317,7 +328,7 @@ class LocalEngine(BaseEngine):
                 task_statuses[task.task_id] = result.status
                 return result
 
-        result = self._execute_task(task, run_id, store, runner)
+        result = self._execute_task(task, pipeline, run_id, store, runner, context)
         store.finish_task_run(
             run_id,
             task.task_id,
@@ -400,6 +411,8 @@ class LocalEngine(BaseEngine):
         if result.status != "success":
             return
         context.set_task_output(task.task_id, result.output)
+        if task.template_id and task.entity_key:
+            context.set_mapped_task_output(task.template_id, task.entity_key, result.output)
         output_record = store.record_task_output(run_id, task.task_id, result.output)
         if output_record.preview:
             runner.emit(f"Output captured: {output_record.preview}", task_id=task.task_id)
@@ -420,15 +433,45 @@ class LocalEngine(BaseEngine):
     def _execute_task(
         self,
         task: TaskDefinition,
+        pipeline: PipelineDefinition,
         run_id: str,
         store: RunStore,
         runner: TaskRunner,
+        context: RuntimeTaskContext,
     ) -> TaskExecutionResult:
         """Execute one task through the shared TaskRunner."""
         store.mark_task_running(run_id, task.task_id)
         runner.emit(f"Running task {task.task_id} ({task.operator_label})", task_id=task.task_id)
         runner.emit(f"Plan: {task.command_preview}", task_id=task.task_id)
-        return runner.run(task)
+        task_context = RuntimeTaskContext(self._context_for_task(task, pipeline, context))
+        return runner.for_context(task_context).run(task)
+
+    def _context_for_task(
+        self,
+        task: TaskDefinition,
+        pipeline: PipelineDefinition,
+        context: RuntimeTaskContext,
+    ) -> dict[str, object]:
+        """Build a task-local context with entity variables and dependency aliases."""
+        task_context = context.snapshot()
+        task_context["runtime_task_id"] = task.task_id
+        if task.template_id is not None:
+            task_context["template_task_id"] = task.template_id
+        if task.entity_key is not None:
+            task_context["entity_key"] = task.entity_key
+            task_context["entities"] = dict(task.entity_values)
+            task_context.update(task.entity_values)
+
+        for dependency_id in task.depends_on:
+            dependency = pipeline.tasks.get(dependency_id)
+            if dependency is None or dependency.template_id is None:
+                continue
+            if dependency_id not in task_context:
+                continue
+            if task.entity_key is not None and dependency.entity_key != task.entity_key:
+                continue
+            task_context[dependency.template_id] = task_context[dependency_id]
+        return task_context
 
     def _mark_pending_tasks_cancelled(
         self,
