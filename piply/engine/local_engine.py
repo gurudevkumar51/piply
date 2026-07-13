@@ -273,7 +273,9 @@ class LocalEngine(BaseEngine):
                                 first_error = result.error or f"Task {task.task_id} failed"
                             continue
 
-                    in_flight[executor.submit(self._execute_task, task, pipeline, run_id, store, runner, context)] = task
+                    in_flight[executor.submit(self._execute_task, task, pipeline, run_id, store, runner, context)] = (
+                        task
+                    )
 
                 if not in_flight and not scheduled_this_round:
                     break

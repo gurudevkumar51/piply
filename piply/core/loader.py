@@ -156,7 +156,9 @@ def _normalize_pipeline_definitions(raw_data: dict[str, Any]) -> dict[str, dict[
         expanded["_deployment_id"] = deployment_key
         expanded.setdefault("title", deployment_key.replace("_", " ").replace("-", " ").title())
 
-        deployment_variables = _ensure_mapping(expanded.get("variables"), f"Pipeline deployment '{deployment_key}' variables")
+        deployment_variables = _ensure_mapping(
+            expanded.get("variables"), f"Pipeline deployment '{deployment_key}' variables"
+        )
         deployment_variables = dict(deployment_variables)
         if raw_deployment.get("tenant") is not None:
             deployment_variables.setdefault("tenant", str(raw_deployment["tenant"]))
@@ -1041,7 +1043,9 @@ def load_project(
                 pipeline_values,
             )
             for task_id, raw_task in raw_tasks.items()
-            if isinstance(raw_task, dict) and "entities" in raw_task and raw_task.get("entities") not in (None, "", False)
+            if isinstance(raw_task, dict)
+            and "entities" in raw_task
+            and raw_task.get("entities") not in (None, "", False)
         }
         try:
             runtime_task_specs = expand_task_templates(
@@ -1100,7 +1104,9 @@ def load_project(
             description=description,
             tasks=tasks,
             template_id=None if raw_pipeline.get("_template_id") is None else str(raw_pipeline.get("_template_id")),
-            deployment_id=None if raw_pipeline.get("_deployment_id") is None else str(raw_pipeline.get("_deployment_id")),
+            deployment_id=None
+            if raw_pipeline.get("_deployment_id") is None
+            else str(raw_pipeline.get("_deployment_id")),
             tags=tags,
             schedule=schedule,
             enabled=enabled,

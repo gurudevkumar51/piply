@@ -108,11 +108,13 @@ def parse_entity_map(raw_value: Any, label: str) -> EntityMap:
         elif isinstance(raw_items, list):
             for raw_item in raw_items:
                 if isinstance(raw_item, dict):
-                    raw_key = raw_item.get("id") or raw_item.get("name") or raw_item.get("value") or raw_item.get(
-                        entity_name
+                    raw_key = (
+                        raw_item.get("id") or raw_item.get("name") or raw_item.get("value") or raw_item.get(entity_name)
                     )
                     if raw_key is None:
-                        raise ExpansionError(f"{label}.{entity_name} mapping items need id, name, value, or {entity_name}")
+                        raise ExpansionError(
+                            f"{label}.{entity_name} mapping items need id, name, value, or {entity_name}"
+                        )
                     items.append(_entity_item_from_mapping(entity_name, raw_key, raw_item))
                 else:
                     items.append(_entity_item_from_scalar(entity_name, raw_item))

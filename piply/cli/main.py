@@ -177,7 +177,7 @@ def init(
                 "        function: extract_data",
                 "        kwargs:",
                 "          records: 25",
-                "          report: \"{report}\"",
+                '          report: "{report}"',
                 "      validate_report:",
                 "        type: cli",
                 "        command: python {scripts_dir}/validate_cli.py {report}",
