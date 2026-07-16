@@ -405,6 +405,60 @@ select {
     gap: 12px;
 }
 
+.pipeline-view-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.view-toggle {
+    display: inline-flex;
+    gap: 4px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+}
+
+.view-toggle-button {
+    padding: 5px 10px;
+    font-size: 0.82rem;
+}
+
+.view-toggle-button.active {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--surface);
+}
+
+.pipeline-grid.pipeline-list {
+    grid-template-columns: 1fr;
+}
+
+.pipeline-grid.pipeline-list .pipeline-card {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.9fr) minmax(260px, 1.25fr) auto;
+    align-items: center;
+    gap: 12px 20px;
+}
+
+.pipeline-grid.pipeline-list .card-topline,
+.pipeline-grid.pipeline-list .title-row {
+    margin: 0 !important;
+}
+
+.pipeline-grid.pipeline-list .card-copy,
+.pipeline-grid.pipeline-list .stack {
+    display: none;
+}
+
+.pipeline-grid.pipeline-list .tag-row,
+.pipeline-grid.pipeline-list .card-actions {
+    margin: 0 !important;
+}
+
 .pipeline-card {
     padding: 12px;
 }

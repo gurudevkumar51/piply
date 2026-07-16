@@ -19,7 +19,14 @@
     </section>
 
     {% if pipelines %}
-    <section class="pipeline-grid">
+    <div class="pipeline-view-toolbar" aria-label="Pipeline display options">
+        <span class="muted">Display</span>
+        <div class="view-toggle" role="group" aria-label="Pipeline view">
+            <button type="button" class="button ghost view-toggle-button" data-pipeline-view-button="grid" aria-pressed="true" onclick="setPipelineView('grid')">Grid</button>
+            <button type="button" class="button ghost view-toggle-button" data-pipeline-view-button="list" aria-pressed="false" onclick="setPipelineView('list')">List</button>
+        </div>
+    </div>
+    <section class="pipeline-grid" data-pipeline-view>
         {% for pipeline in pipelines %}
         <article class="pipeline-card">
             <div class="card-topline">
@@ -91,4 +98,24 @@
     <div class="empty-state">No pipelines were discovered in <span class="mono">{{ project.config_path }}</span>.</div>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function setPipelineView(view) {
+    const container = document.querySelector("[data-pipeline-view]");
+    if (!container || !["grid", "list"].includes(view)) return;
+    container.classList.toggle("pipeline-list", view === "list");
+    document.querySelectorAll("[data-pipeline-view-button]").forEach((button) => {
+        const active = button.dataset.pipelineViewButton === view;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+    });
+    localStorage.setItem("piply:pipeline-view", view);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    setPipelineView(localStorage.getItem("piply:pipeline-view") || "grid");
+});
+</script>
 {% endblock %}

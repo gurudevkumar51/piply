@@ -15,6 +15,13 @@ def test_parse_cli_params_preserves_json_scalars() -> None:
     assert params == {"count": 25, "enabled": True, "name": "acme"}
 
 
+def test_version_option_prints_installed_version() -> None:
+    result = CliRunner().invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip()
+
+
 def test_init_scaffolds_multitask_project(tmp_path: Path) -> None:
     runner = CliRunner()
     project_dir = tmp_path / "starter"

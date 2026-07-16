@@ -49,6 +49,8 @@ Simple mode uses `pipelines:` directly and stays unchanged. Advanced mode adds:
 
 The loader expands deployments into ordinary `PipelineDefinition` records. After loading, the scheduler, API, CLI, UI, and engine all operate on deployment ids such as `client_a_reporting`.
 
+When a deployment triggers another pipeline, its resolved variables travel with the trigger event. The target uses them only to resolve placeholders still unresolved in its own definition; explicit target variables win. The values are also placed in the target run context.
+
 ```text
 pipeline_templates.report_pipeline
   -> pipeline_deployments.client_a_reporting

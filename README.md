@@ -107,7 +107,9 @@ def transform_data(context):
     return {"records": extracted["records"] + 1}
 ```
 
-For Bash-specific CLI commands, set `shell: bash`:
+For plain commands, omit `shell` so Piply uses the platform default shell. Set
+`shell: bash` only for Bash-specific syntax and only on machines where Bash is
+installed and available on `PATH`:
 
 ```yaml
 tasks:
@@ -179,9 +181,39 @@ pipeline_deployments:
 
 Each deployment becomes a normal runnable pipeline id, so the scheduler, UI, CLI, and API keep working without a second execution model.
 
+### Deployment Variables In Downstream Pipelines
+
+Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. The downstream pipeline's own `variables` take precedence. This forwarding only applies to a trigger; a manual run of the downstream pipeline still needs its own variables or top-level defaults.
+
+```yaml
+pipelines:
+  Bronze_to_Silver:
+    tasks:
+      dbt:
+        type: cli
+        command: DBT_CLIENT={practice} dbt run --selector appointment_silver
+
+pipeline_templates:
+  ECW_Extract_test:
+    tasks:
+      extract:
+        type: cli
+        command: echo extract
+
+pipeline_deployments:
+  BENNETT_ETL_Flow:
+    template: ECW_Extract_test
+    variables:
+      practice: BENNETT
+    triggers_on_success: [Bronze_to_Silver]
+```
+
+When `BENNETT_ETL_Flow` succeeds, Piply runs `Bronze_to_Silver` with `DBT_CLIENT=BENNETT`. A deployment for PALOS would use the same target and set `practice: PALOS`.
+
 ## Common CLI
 
 ```bash
+piply --version
 piply init my-piply-project
 piply validate --config piply-demo/piply.yaml
 piply list --config piply-demo/piply.yaml
@@ -294,3 +326,21 @@ Recommended scheduling order:
 2. Ready Time ASC
 3. Created Time ASC
 4. Random tie-breaker
+
+The Pipelines page supports Grid and List views. The selected view is remembered in the browser.
+
+
+## Tasks For future
+- for downstream pipeline, i want when i run downstream pipeline (Bronze_to_Silver) indepedently, it should use global variable but when any upstream pipeline calls then use parent variable. as of now i see when i defined same variable twice with different value it always consider global value.
+
+variables:
+  practice: practice_1
+
+pipeline_deployments:
+  BENNETT_ETL_Flow:
+    template: ECW_Extract_test
+    schedule:
+      cron: "05 0 * * 0"
+    variables:
+      practice: practice_2
+    triggers_on_success: [Bronze_to_Silver]

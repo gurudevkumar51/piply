@@ -141,6 +141,8 @@ curl http://127.0.0.1:8000/api/metrics
 
 ### Pipelines
 
+The Pipelines page can be displayed as a card Grid or a compact List. The selection is stored in the browser and does not change the API response.
+
 - `GET /api/pipelines`
 - `GET /api/pipelines/{pipeline_id}`
 - `GET /api/pipelines/{pipeline_id}/tasks/{task_id}`

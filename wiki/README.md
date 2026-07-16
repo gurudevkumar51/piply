@@ -109,10 +109,12 @@ variables:
 tasks:
   validate:
     type: cli
-    shell: bash
-    command: set -a && source .env && set +a && conda run -n {conda_env} python {scripts_dir}/validate.py
+    command: python {scripts_dir}/validate.py
     cwd: .
 ```
+
+Omit `shell` for plain commands. Use `shell: bash` only for Bash-specific syntax
+such as `source .env`, and only when Bash is installed on the host.
 
 Pipeline-level variables override top-level values for one pipeline. If a scalar starts with `{name}`, quote it, for example `path: "{scripts_dir}/extract.py"`.
 
@@ -240,6 +242,7 @@ Pipeline-to-pipeline passing:
 - When `triggers_on_success` launches a downstream pipeline, JSON outputs from the upstream run are attached to the downstream run context.
 - Downstream callable tasks can read them via `context["task_id"]` and `context["upstream"]["task_id"]`.
 - Tenant context is preserved as `context["tenant_id"]`.
+- Deployment variables are preserved for `triggers_on_success`. Unresolved placeholders in the downstream configuration, such as `{practice}`, use those values; callable tasks can read them through `context["variables"]` or `context["practice"]`. Downstream-local variables take precedence.
 - CLI/API run params are available as `context["params"]`.
 - CLI runs with `--wait` also finish downstream pipeline triggers inline, which keeps local smoke tests deterministic.
 - Mapped tasks receive same-entity aliases by template id, so `payment.transform` can read `context["extract"]` from `payment.extract`.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -18,10 +19,35 @@ from piply.settings import PiplySettings, load_settings
 
 from .graph import upstream_closure
 from .loader import discover_config, load_project
-from .models import PipelineDefinition, PipelineSummary, ProjectDefinition, RetryMode, RetryPolicy, RunRecord
+from .models import (
+    PipelineDefinition,
+    PipelineSummary,
+    ProjectDefinition,
+    RetryMode,
+    RetryPolicy,
+    RunRecord,
+    TaskDefinition,
+)
 from .retry import build_retry_plan
 from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor
 from .store import RunStore
+
+_RUNTIME_VARIABLE_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_runtime_value(value: object, variables: dict[str, str]) -> object:
+    """Resolve remaining config placeholders using variables supplied by an upstream run."""
+    if isinstance(value, str):
+        return _RUNTIME_VARIABLE_PATTERN.sub(lambda match: variables.get(match.group(1), match.group(0)), value)
+    if isinstance(value, Path):
+        return Path(_expand_runtime_value(str(value), variables))
+    if isinstance(value, tuple):
+        return tuple(_expand_runtime_value(item, variables) for item in value)
+    if isinstance(value, list):
+        return [_expand_runtime_value(item, variables) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_runtime_value(item, variables) for key, item in value.items()}
+    return value
 
 
 def _format_relative_time(delta_seconds: float) -> str:
@@ -461,6 +487,10 @@ class PipelineService:
                         initial_context.update(payload["context"])
                     if isinstance(payload.get("upstream"), dict):
                         initial_context.setdefault("upstream", payload["upstream"])
+                    inherited_variables = {
+                        str(key): str(value)
+                        for key, value in payload.get("variables", {}).items()
+                    } if isinstance(payload.get("variables"), dict) else {}
                     if parent_run_id is not None:
                         initial_context.setdefault(
                             "parent",
@@ -478,6 +508,7 @@ class PipelineService:
                         parent_pipeline_id=parent_pipeline_id,
                         tenant_id=tenant_id,
                         initial_context=initial_context,
+                        inherited_variables=inherited_variables,
                     )
                 self.store.mark_queue_dispatched(item.queue_id, run.run_id)
                 dispatched_run_ids.append(run.run_id)
@@ -614,6 +645,26 @@ class PipelineService:
 
         return replace(pipeline, tasks=updated_tasks)
 
+    def _clone_pipeline_with_inherited_variables(
+        self,
+        pipeline: PipelineDefinition,
+        inherited_variables: dict[str, str] | None,
+    ) -> PipelineDefinition:
+        """Resolve placeholders left by the downstream config with upstream deployment values."""
+        if not inherited_variables:
+            return pipeline
+        # A downstream pipeline explicitly owns any variable it declares.
+        effective_variables = dict(inherited_variables)
+        effective_variables.update(pipeline.variables)
+        updated_tasks: dict[str, TaskDefinition] = {}
+        for task_id, task in pipeline.tasks.items():
+            expanded = {
+                field_name: _expand_runtime_value(getattr(task, field_name), effective_variables)
+                for field_name in task.__dataclass_fields__
+            }
+            updated_tasks[task_id] = replace(task, **expanded)
+        return replace(pipeline, tasks=updated_tasks, variables=effective_variables)
+
     def _clone_pipeline_for_task(self, pipeline: PipelineDefinition, task_id: str) -> PipelineDefinition:
         """Build a task-focused pipeline that includes the selected task and its dependencies."""
         selected_task_ids = (
@@ -683,12 +734,13 @@ class PipelineService:
         parent_pipeline_id: str | None = None,
         tenant_id: str | None = None,
         initial_context: dict[str, object] | None = None,
+        inherited_variables: dict[str, str] | None = None,
     ) -> RunRecord:
         """Create and dispatch one new run for a pipeline."""
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         pipeline = self._clone_pipeline_with_command_overrides(
-            self.get_pipeline(pipeline_id),
+            self._clone_pipeline_with_inherited_variables(self.get_pipeline(pipeline_id), inherited_variables),
             command_overrides,
         )
         if scheduled_for is not None and self.store.has_run_for_slot(pipeline_id, scheduled_for):
@@ -709,6 +761,10 @@ class PipelineService:
                 tenant_id=tenant_id,
             )
             dispatch_context = dict(initial_context or {})
+            if pipeline.variables:
+                dispatch_context.setdefault("variables", dict(pipeline.variables))
+                for key, value in pipeline.variables.items():
+                    dispatch_context.setdefault(key, value)
             if tenant_id is not None:
                 dispatch_context.setdefault("tenant_id", tenant_id)
             self._dispatch_engine(
@@ -860,6 +916,7 @@ class PipelineService:
                     "tenant_id": run.tenant_id,
                     "context": output_context,
                     "upstream": output_context,
+                    "variables": pipeline.variables,
                 },
                 source_key=run.run_id,
                 dedupe_key=f"pipeline:{run.run_id}:{target}",

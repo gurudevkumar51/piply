@@ -1103,6 +1103,7 @@ def load_project(
             title=title,
             description=description,
             tasks=tasks,
+            variables=pipeline_variables,
             template_id=None if raw_pipeline.get("_template_id") is None else str(raw_pipeline.get("_template_id")),
             deployment_id=None
             if raw_pipeline.get("_deployment_id") is None

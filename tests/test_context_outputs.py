@@ -274,3 +274,52 @@ def test_downstream_pipeline_receives_parent_output_context(tmp_path: Path) -> N
     assert downstream_run.parent_run_id == source_run.run_id
     output = service.get_task_output(downstream_run.run_id, "sink")
     assert output.json_value == '"passed"'
+
+
+def test_pipeline_trigger_passes_deployment_variables_to_downstream_pipeline(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "workspace: workspace",
+                "pipeline_templates:",
+                "  extract_template:",
+                "    tasks:",
+                "      extract:",
+                "        type: cli",
+                "        command: echo extract",
+                "pipeline_deployments:",
+                "  BENNETT_ETL_Flow:",
+                "    template: extract_template",
+                "    variables:",
+                "      practice: BENNETT",
+                "    triggers_on_success: [DATA_DBT_Flow]",
+                "pipelines:",
+                "  DATA_DBT_Flow:",
+                "    tasks:",
+                "      dbt:",
+                "        type: cli",
+                '        command: "echo {practice}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    source_run = service.trigger_pipeline("BENNETT_ETL_Flow", wait=True)
+
+    downstream_run = None
+    for _ in range(50):
+        runs = service.list_runs(pipeline_id="DATA_DBT_Flow", limit=1)
+        if runs and runs[0].status == "success":
+            downstream_run = runs[0]
+            break
+        time.sleep(0.05)
+
+    assert downstream_run is not None
+    assert downstream_run.parent_run_id == source_run.run_id
+    logs = service.store.list_logs(downstream_run.run_id)
+    assert any("Plan: echo BENNETT" in item.message for item in logs)

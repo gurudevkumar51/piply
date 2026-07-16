@@ -210,6 +210,7 @@ class PipelineDefinition:
     title: str
     description: str
     tasks: dict[str, TaskDefinition]
+    variables: dict[str, str] = field(default_factory=dict)
     template_id: str | None = None
     deployment_id: str | None = None
     tags: tuple[str, ...] = ()

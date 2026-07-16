@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 
 import typer
@@ -28,6 +30,32 @@ TASK_PARAM_OPTION = typer.Option(
     "--param",
     help="Run parameter as KEY=VALUE. Repeat for multiple params; JSON values are accepted.",
 )
+
+
+def _show_version(value: bool) -> None:
+    """Print the installed Piply version for the top-level CLI option."""
+    if not value:
+        return
+    try:
+        current_version = package_version("mr-piply")
+    except PackageNotFoundError:
+        current_version = "0.1.6"
+    typer.echo(current_version)
+    raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Show the Piply version and exit.",
+        is_eager=True,
+        callback=_show_version,
+    ),
+) -> None:
+    """Piply command-line application."""
 
 
 def _resolve_config(config: str | None) -> Path:

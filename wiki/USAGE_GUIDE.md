@@ -242,6 +242,26 @@ pipeline_deployments:
 
 Piply loads `client_a_reporting` and `client_b_reporting` as normal pipelines. The scheduler schedules the deployment ids, not the template id. Deployment-level values override template values, and shortcut fields such as `tenant:` are also exposed as `{tenant}` and `{tenant_id}` variables.
 
+Deployment variables also flow into a downstream pipeline when the deployment completes successfully. This lets one downstream definition serve many practices or tenants:
+
+```yaml
+pipelines:
+  Bronze_to_Silver:
+    tasks:
+      dbt:
+        type: cli
+        command: DBT_CLIENT={practice} dbt run --selector appointment_silver
+
+pipeline_deployments:
+  BENNETT_ETL_Flow:
+    template: extract_template
+    variables:
+      practice: BENNETT
+    triggers_on_success: [Bronze_to_Silver]
+```
+
+The triggered command is `DBT_CLIENT=BENNETT ...`. A variable declared on `Bronze_to_Silver` overrides the inherited value. This inheritance is limited to `triggers_on_success`; manually running `Bronze_to_Silver` requires a local or top-level `practice` value.
+
 Deployments work with entity expansion:
 
 ```yaml
@@ -313,6 +333,7 @@ tasks:
 ```
 
 Piply supports direct executable paths, `.cmd`, `.bat`, and `.ps1` path execution.
+For plain commands, omit `shell` so Piply uses the platform default shell.
 
 For Bash-only syntax such as `set -a`, `source .env`, and `&&` chains that should run in Bash even on a machine whose default shell is not Bash, set `shell: bash`:
 
@@ -325,7 +346,7 @@ tasks:
     cwd: .
 ```
 
-Supported explicit shells include `bash`, `sh`, `zsh`, `cmd`, `powershell`, and `pwsh`. If `shell` is omitted, Piply keeps the old behavior and uses the platform default shell for `command` tasks.
+Supported explicit shells include `bash`, `sh`, `zsh`, `cmd`, `powershell`, and `pwsh`. If `shell` is omitted, Piply keeps the old behavior and uses the platform default shell for `command` tasks. On Windows, `shell: bash` requires a working Bash installation such as Git Bash or WSL; otherwise the task will fail before the command runs.
 
 ## 5. API, Webhook, Email, And SSH Tasks
 
@@ -453,6 +474,8 @@ Downstream callable tasks can read upstream outputs with:
 def build_report(context):
     extract_output = context["upstream"]["extract"]
 ```
+
+The same triggered run exposes inherited deployment variables in `context["variables"]` and by name, for example `context["practice"]`.
 
 CLI `--wait` runs finish downstream pipeline triggers inline, which makes local chain smoke tests deterministic.
 
