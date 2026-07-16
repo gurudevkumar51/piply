@@ -487,10 +487,11 @@ class PipelineService:
                         initial_context.update(payload["context"])
                     if isinstance(payload.get("upstream"), dict):
                         initial_context.setdefault("upstream", payload["upstream"])
-                    inherited_variables = {
-                        str(key): str(value)
-                        for key, value in payload.get("variables", {}).items()
-                    } if isinstance(payload.get("variables"), dict) else {}
+                    inherited_variables = (
+                        {str(key): str(value) for key, value in payload.get("variables", {}).items()}
+                        if isinstance(payload.get("variables"), dict)
+                        else {}
+                    )
                     if parent_run_id is not None:
                         initial_context.setdefault(
                             "parent",
