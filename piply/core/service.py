@@ -654,15 +654,23 @@ class PipelineService:
         """Resolve placeholders left by the downstream config with upstream deployment values."""
         if not inherited_variables:
             return pipeline
-        # A downstream pipeline explicitly owns any variable it declares.
-        effective_variables = dict(inherited_variables)
-        effective_variables.update(pipeline.variables)
+        # Direct/manual downstream runs use their configured variables. Pipeline
+        # triggers let the parent deployment override shared keys for that run.
+        effective_variables = dict(pipeline.variables)
+        effective_variables.update(inherited_variables)
         updated_tasks: dict[str, TaskDefinition] = {}
         for task_id, task in pipeline.tasks.items():
+            task_variables = effective_variables | task.entity_values
             expanded = {
-                field_name: _expand_runtime_value(getattr(task, field_name), effective_variables)
+                field_name: _expand_runtime_value(getattr(task, field_name), task_variables)
                 for field_name in task.__dataclass_fields__
+                if field_name != "variable_templates"
             }
+            for field_name, template_value in task.variable_templates.items():
+                rendered_value = _expand_runtime_value(template_value, task_variables)
+                if field_name == "args" and isinstance(rendered_value, list):
+                    rendered_value = tuple(rendered_value)
+                expanded[field_name] = rendered_value
             updated_tasks[task_id] = replace(task, **expanded)
         return replace(pipeline, tasks=updated_tasks, variables=effective_variables)
 

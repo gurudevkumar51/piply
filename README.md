@@ -183,7 +183,7 @@ Each deployment becomes a normal runnable pipeline id, so the scheduler, UI, CLI
 
 ### Deployment Variables In Downstream Pipelines
 
-Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. The downstream pipeline's own `variables` take precedence. This forwarding only applies to a trigger; a manual run of the downstream pipeline still needs its own variables or top-level defaults.
+Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run; a manual run of the downstream pipeline uses the downstream pipeline's own variables or top-level defaults.
 
 ```yaml
 pipelines:
@@ -328,19 +328,3 @@ Recommended scheduling order:
 4. Random tie-breaker
 
 The Pipelines page supports Grid and List views. The selected view is remembered in the browser.
-
-
-## Tasks For future
-- for downstream pipeline, i want when i run downstream pipeline (Bronze_to_Silver) indepedently, it should use global variable but when any upstream pipeline calls then use parent variable. as of now i see when i defined same variable twice with different value it always consider global value.
-
-variables:
-  practice: practice_1
-
-pipeline_deployments:
-  BENNETT_ETL_Flow:
-    template: ECW_Extract_test
-    schedule:
-      cron: "05 0 * * 0"
-    variables:
-      practice: practice_2
-    triggers_on_success: [Bronze_to_Silver]

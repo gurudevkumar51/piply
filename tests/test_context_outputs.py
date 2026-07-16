@@ -285,6 +285,8 @@ def test_pipeline_trigger_passes_deployment_variables_to_downstream_pipeline(tmp
             [
                 'version: "1"',
                 "workspace: workspace",
+                "variables:",
+                "  practice: GLOBAL",
                 "pipeline_templates:",
                 "  extract_template:",
                 "    tasks:",
@@ -299,16 +301,22 @@ def test_pipeline_trigger_passes_deployment_variables_to_downstream_pipeline(tmp
                 "    triggers_on_success: [DATA_DBT_Flow]",
                 "pipelines:",
                 "  DATA_DBT_Flow:",
+                "    entities:",
+                "      selector: [appointment_silver]",
                 "    tasks:",
                 "      dbt:",
                 "        type: cli",
-                '        command: "echo {practice}"',
+                '        command: "echo {selector} {practice}"',
             ]
         ),
         encoding="utf-8",
     )
 
     service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    direct_run = service.trigger_pipeline("DATA_DBT_Flow", wait=True)
+    direct_logs = service.store.list_logs(direct_run.run_id)
+    assert any("Plan: echo appointment_silver GLOBAL" in item.message for item in direct_logs)
+
     source_run = service.trigger_pipeline("BENNETT_ETL_Flow", wait=True)
 
     downstream_run = None
@@ -322,4 +330,4 @@ def test_pipeline_trigger_passes_deployment_variables_to_downstream_pipeline(tmp
     assert downstream_run is not None
     assert downstream_run.parent_run_id == source_run.run_id
     logs = service.store.list_logs(downstream_run.run_id)
-    assert any("Plan: echo BENNETT" in item.message for item in logs)
+    assert any("Plan: echo appointment_silver BENNETT" in item.message for item in logs)

@@ -848,6 +848,10 @@ def _parse_task(
             args=tuple(raw_args),
             cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values),
             env=task_env,
+            variable_templates={
+                "command": None if command is None else str(command),
+                "args": raw_task.get("args", []),
+            },
         )
 
     if task_type == "api" or task_type == "webhook":

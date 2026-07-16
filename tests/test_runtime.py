@@ -112,12 +112,16 @@ def test_app_shutdown_interrupts_active_runs(tmp_path: Path) -> None:
             detail = None
             for _ in range(30):
                 detail = client.get(f"/api/runs/{run_id}")
-                status = detail.json()["run"]["status"]
-                if status in {"queued", "running"}:
+                payload = detail.json()
+                status = payload["run"]["status"]
+                task_statuses = [item["status"] for item in payload["task_runs"]]
+                if status == "running" and "running" in task_statuses:
                     break
                 time.sleep(0.1)
             assert detail is not None
-            assert detail.json()["run"]["status"] in {"queued", "running"}
+            payload = detail.json()
+            assert payload["run"]["status"] == "running"
+            assert "running" in [item["status"] for item in payload["task_runs"]]
     finally:
         if previous_config is None:
             os.environ.pop("PIPLY_CONFIG", None)

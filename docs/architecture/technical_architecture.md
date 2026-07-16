@@ -400,7 +400,7 @@ pipeline_deployments:
       tenant: client_a
 ```
 
-The loader deep-merges deployment overrides into the template, injects shortcut `tenant` and `tenant_id` variables when present, then runs the same validation/entity-expansion path used by simple pipelines.
+The loader deep-merges deployment overrides into the template, injects shortcut `tenant` and `tenant_id` variables when present, then runs the same validation/entity-expansion path used by simple pipelines. When one pipeline triggers another, the parent deployment variables are carried in the trigger payload and override shared top-level variables for that triggered run only.
 
 ## Extensibility Guide
 

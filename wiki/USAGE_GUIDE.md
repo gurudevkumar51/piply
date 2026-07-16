@@ -260,7 +260,7 @@ pipeline_deployments:
     triggers_on_success: [Bronze_to_Silver]
 ```
 
-The triggered command is `DBT_CLIENT=BENNETT ...`. A variable declared on `Bronze_to_Silver` overrides the inherited value. This inheritance is limited to `triggers_on_success`; manually running `Bronze_to_Silver` requires a local or top-level `practice` value.
+The triggered command is `DBT_CLIENT=BENNETT ...`. If `practice` is also defined globally as `GLOBAL`, the direct/manual `Bronze_to_Silver` run uses `GLOBAL`, while the triggered downstream run uses the parent deployment value `BENNETT`. This inheritance is limited to `triggers_on_success`; manually running `Bronze_to_Silver` requires a local or top-level `practice` value.
 
 Deployments work with entity expansion:
 

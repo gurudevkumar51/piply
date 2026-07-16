@@ -151,6 +151,7 @@ class TaskDefinition:
     email_to: tuple[str, ...] = ()
     email_subject: str | None = None
     email_body: str | None = None
+    variable_templates: dict[str, object] = field(default_factory=dict)
 
     @property
     def operator_label(self) -> str:
