@@ -54,7 +54,5 @@ build_tmp/
 # Prefect
 .flow/
 .prefect/
-piply-demo/.piply/
-piply-demo/*.db
-piply-demo/pipelines/__pycache__/
+piply-demo/*
 piply.db

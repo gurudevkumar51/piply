@@ -1034,6 +1034,18 @@ def load_project(
             }
         )
 
+        env_file_paths = _ensure_list(raw_pipeline.get("env_files"), f"Pipeline '{pipeline_id}' env_files")
+        if raw_pipeline.get("env_file"):
+            env_file_paths.append(str(raw_pipeline["env_file"]))
+        for env_file_path in env_file_paths:
+            pipeline_env.update(
+                load_secret_values(
+                    {"backend": "file", "path": _expand_string(str(env_file_path), pipeline_values)},
+                    workspace=workspace,
+                    env_values=pipeline_values,
+                )
+            )
+
         raw_tasks = raw_pipeline.get("tasks")
         if raw_tasks is None:
             raw_tasks = _build_single_task_pipeline(raw_pipeline)
