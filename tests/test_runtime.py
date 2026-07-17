@@ -41,7 +41,8 @@ def test_service_reconciles_stale_running_runs(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    service = PipelineService(config_path=config_path,
+                              database_path=tmp_path / "runs.db")
     pipeline = service.get_pipeline("job_flow")
     run = service.store.create_run(pipeline, trigger="manual")
     service.store.mark_running(run.run_id)
@@ -114,14 +115,16 @@ def test_app_shutdown_interrupts_active_runs(tmp_path: Path) -> None:
                 detail = client.get(f"/api/runs/{run_id}")
                 payload = detail.json()
                 status = payload["run"]["status"]
-                task_statuses = [item["status"] for item in payload["task_runs"]]
+                task_statuses = [item["status"]
+                                 for item in payload["task_runs"]]
                 if status == "running" and "running" in task_statuses:
                     break
                 time.sleep(0.1)
             assert detail is not None
             payload = detail.json()
             assert payload["run"]["status"] == "running"
-            assert "running" in [item["status"] for item in payload["task_runs"]]
+            assert "running" in [item["status"]
+                                 for item in payload["task_runs"]]
     finally:
         if previous_config is None:
             os.environ.pop("PIPLY_CONFIG", None)
@@ -132,7 +135,8 @@ def test_app_shutdown_interrupts_active_runs(tmp_path: Path) -> None:
         else:
             os.environ["PIPLY_DATABASE"] = previous_database
 
-    service = PipelineService(config_path=config_path, database_path=database_path)
+    service = PipelineService(config_path=config_path,
+                              database_path=database_path)
     record, task_runs, logs = service.get_run(run_id)
 
     assert record.status == "interrupted"
@@ -183,7 +187,8 @@ def test_auth_middleware_supports_basic_for_ui_and_bearer_for_api(
         app = create_app(str(config_path))
         with TestClient(app) as client:
             ui_unauthorized = client.get("/")
-            ui_authorized = client.get("/", headers=_basic_auth_header("demo", "secret"))
+            ui_authorized = client.get(
+                "/", headers=_basic_auth_header("demo", "secret"))
             api_bearer = client.get(
                 "/api/dashboard",
                 headers={"Authorization": "Bearer token-123"},
@@ -242,7 +247,8 @@ def test_run_api_includes_upcoming_runs_and_pipeline_run_overrides(
         with TestClient(app) as client:
             run_response = client.post(
                 "/api/pipelines/cli_flow/run",
-                json={"command_overrides": {"command_task": "python -c \"print('override-from-api')\""}},
+                json={"command_overrides": {
+                    "command_task": "python -c \"print('override-from-api')\""}},
             )
             assert run_response.status_code == 200
             run_id = run_response.json()["id"]
@@ -252,6 +258,7 @@ def test_run_api_includes_upcoming_runs_and_pipeline_run_overrides(
                 if detail.json()["run"]["status"] == "success":
                     break
             payload = detail.json()
+            payload = wait_for_run_completion(client, run_id)
     finally:
         if previous_config is None:
             os.environ.pop("PIPLY_CONFIG", None)
@@ -262,10 +269,10 @@ def test_run_api_includes_upcoming_runs_and_pipeline_run_overrides(
         else:
             os.environ["PIPLY_DATABASE"] = previous_database
 
-    payload = wait_for_run_completion(client, run_id)
     assert payload["run"]["status"] == "success"
     assert payload["upcoming_runs"]
-    assert any("override-from-api" in line["message"] for line in payload["logs"])
+    assert any("override-from-api" in line["message"]
+               for line in payload["logs"])
 
 
 def test_pipeline_run_api_still_accepts_empty_body(tmp_path: Path) -> None:
@@ -306,6 +313,7 @@ def test_pipeline_run_api_still_accepts_empty_body(tmp_path: Path) -> None:
                 if detail.json()["run"]["status"] == "success":
                     break
             payload = detail.json()
+            payload = wait_for_run_completion(client, run_id)
     finally:
         if previous_config is None:
             os.environ.pop("PIPLY_CONFIG", None)
@@ -315,9 +323,10 @@ def test_pipeline_run_api_still_accepts_empty_body(tmp_path: Path) -> None:
             os.environ.pop("PIPLY_DATABASE", None)
         else:
             os.environ["PIPLY_DATABASE"] = previous_database
-    payload = wait_for_run_completion(client, run_id)
+    # payload = wait_for_run_completion(client, run_id)
     assert payload["run"]["status"] == "success"
-    assert any("no-body-trigger" in line["message"] for line in payload["logs"])
+    assert any("no-body-trigger" in line["message"]
+               for line in payload["logs"])
 
 
 def test_pipeline_task_run_api_executes_selected_task_scope(tmp_path: Path) -> None:
@@ -355,7 +364,8 @@ def test_pipeline_task_run_api_executes_selected_task_scope(tmp_path: Path) -> N
     try:
         app = create_app(str(config_path))
         with TestClient(app) as client:
-            run_response = client.post("/api/pipelines/task_flow/tasks/publish/run", json={})
+            run_response = client.post(
+                "/api/pipelines/task_flow/tasks/publish/run", json={})
             assert run_response.status_code == 200
             run_id = run_response.json()["id"]
 
@@ -364,6 +374,7 @@ def test_pipeline_task_run_api_executes_selected_task_scope(tmp_path: Path) -> N
                 if detail.json()["run"]["status"] == "success":
                     break
             payload = detail.json()
+            payload = wait_for_run_completion(client, run_id)
     finally:
         if previous_config is None:
             os.environ.pop("PIPLY_CONFIG", None)
@@ -376,7 +387,7 @@ def test_pipeline_task_run_api_executes_selected_task_scope(tmp_path: Path) -> N
 
     task_ids = [task["task_id"] for task in payload["task_runs"]]
 
-    payload = wait_for_run_completion(client, run_id)
+    # payload = wait_for_run_completion(client, run_id)
 
     assert payload["run"]["status"] == "success"
     assert task_ids == ["extract", "publish"]
@@ -400,4 +411,5 @@ def wait_for_run_completion(client, run_id, timeout=5.0):
 
         time.sleep(0.1)
 
-    raise AssertionError(f"Run {run_id} did not reach a terminal state within {timeout} seconds.")
+    raise AssertionError(
+        f"Run {run_id} did not reach a terminal state within {timeout} seconds.")
