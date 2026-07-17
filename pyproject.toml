@@ -1,59 +1,120 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
+
 [project]
-name = "piply"
-version = "0.1.0"
-description = "Lightweight YAML-driven workflow orchestration framework"
-readme = "README.md"
-requires-python = ">=3.8"
+name = "mr-piply"
+version = "0.1.8"
+description = "Lightweight Python workflow orchestration platform"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+
 license = { text = "MIT" }
-authors = [{ name = "Piply Team" }]
-keywords = ["workflow", "orchestration", "pipeline", "yaml", "prefect", "dbt"]
+
+authors = [{ name = "Medrcm Piply Team" }]
+
+keywords = ["workflow", "scheduler", "orchestration", "automation", "pipeline"]
+
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Topic :: System :: Distributed Computing",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
+
+
 dependencies = [
-    "prefect>=2.0.0",
-    "pydantic>=2.0.0",
-    "pyyaml>=6.0",
-    "typer>=0.9.0",
-    "schedule>=1.2.0",
-    "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
-    "sqlalchemy>=2.0.0",
-    "alembic>=1.12.0",
-    "jinja2>=3.1.0",
-    "python-multipart>=0.0.6",
+    "fastapi>=0.110,<1.0",
+    "uvicorn>=0.29,<1.0",
+    "pydantic>=2,<3",
+    "jinja2>=3.1,<4",
+    "pyyaml>=6,<7",
+    "typer>=0.12,<1",
+    "httpx>=0.27,<1",
+    "python-dotenv>=1,<2",
 ]
+
+
+[project.optional-dependencies]
+
+dev = ["ruff>=0.6,<1", "pre-commit>=3,<4"]
+
+test = ["pytest>=8,<9", "pytest-cov>=5,<6"]
+
+types = ["mypy>=1,<2"]
+
+build = ["build>=1,<2", "twine>=6.2,<7", "pkginfo>=1.12"]
+
+
+[project.urls]
+Homepage = "https://github.com/gurudevkumar51/piply"
+Repository = "https://github.com/gurudevkumar51/piply"
+Issues = "https://github.com/gurudevkumar51/piply/issues"
+
 
 [project.scripts]
 piply = "piply.cli.main:app"
 
-[project.optional-dependencies]
-dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "black>=23.0.0", "ruff>=0.0.290"]
+
+[tool.setuptools]
+package-dir = { "" = "." }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["piply*", "tests*"]
+include = ["piply*"]
 
-[tool.black]
-line-length = 88
-target-version = ['py38']
+[tool.setuptools.package-data]
+piply = ["ui/templates/**/*.html", "ui/static/**/*"]
+
+# -------------------------
+# Ruff
+# -------------------------
 
 [tool.ruff]
-line-length = 88
-select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
-ignore = []
+line-length = 120
+target-version = "py310"
 
-[tool.ruff.per-file-ignores]
-"tests/*" = ["E501"]
+exclude = [".git", ".venv", "build", "dist", "__pycache__"]
+
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle
+    "F",  # pyflakes
+    "I",  # import sorting
+    "UP", # pyupgrade
+    "B",  # bugbear
+]
+
+ignore = ["E501"]
+
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+
+# -------------------------
+# Pytest
+# -------------------------
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+
+# -------------------------
+# Mypy
+# -------------------------
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+strict = false

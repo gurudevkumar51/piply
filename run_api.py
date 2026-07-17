@@ -1,14 +1,13 @@
 #!/usr/bin/env python
-"""
-Standalone script to run the Piply API server.
-"""
+from __future__ import annotations
+
 import uvicorn
-from piply.api.app import app
 
 if __name__ == "__main__":
     uvicorn.run(
-        "piply.api.app:app",
-        host="0.0.0.0",
+        "piply.api.app:create_app",
+        factory=True,
+        host="127.0.0.1",
         port=8000,
-        reload=True
+        reload=True,
     )

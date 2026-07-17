@@ -1,103 +1,199 @@
-"""
-Tests for plugin steps.
-"""
+from __future__ import annotations
 
-import pytest
-from piply.core.context import PipelineContext
-from piply.plugins.python.step import PythonStep
-from piply.plugins.shell.step import ShellStep
-from piply.plugins.dbt.step import DbtStep
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
-
-class TestPythonStep:
-    """Tests for PythonStep."""
-
-    def test_python_step_with_module_function(self):
-        """Test executing a Python function from a module."""
-        # Create a simple test function
-        step = PythonStep(
-            "test", {"function": "tests.test_helpers.sample_function"})
-        ctx = PipelineContext()
-        output = step.run(ctx)
-        assert output.success is True
-        assert output.result == "sample result"
-
-    def test_python_step_missing_function(self):
-        """Test error when function is not specified."""
-        step = PythonStep("test", {})
-        ctx = PipelineContext()
-        output = step.run(ctx)
-        assert output.success is False
-        assert "missing 'function'" in output.error
-
-    def test_python_step_invalid_module(self):
-        """Test error when module doesn't exist."""
-        step = PythonStep("test", {"function": "nonexistent.module.func"})
-        ctx = PipelineContext()
-        output = step.run(ctx)
-        assert output.success is False
+from piply.core.service import PipelineService
 
 
-class TestShellStep:
-    """Tests for ShellStep."""
+class TokenHandler(BaseHTTPRequestHandler):
+    seen_auth = None
+    seen_body = None
 
-    def test_shell_step_simple_command(self):
-        """Test executing a simple shell command."""
-        step = ShellStep("test", {"command": "echo 'Hello World'"})
-        ctx = PipelineContext()
-        output = step.run(ctx)
-        assert output.success is True
-        assert "Hello World" in output.result["stdout"]
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        TokenHandler.seen_auth = self.headers.get("Authorization")
+        TokenHandler.seen_body = self.rfile.read(length).decode("utf-8")
+        self.send_response(201)
+        self.end_headers()
+        self.wfile.write(b'{"ok": true}')
 
-    def test_shell_step_missing_command(self):
-        """Test error when command is not specified."""
-        step = ShellStep("test", {})
-        ctx = PipelineContext()
-        output = step.run(ctx)
-        assert output.success is False
-        assert "missing 'command'" in output.error
-
-    def test_shell_step_failing_command(self):
-        """Test that failing command returns error."""
-        step = ShellStep("test", {"command": "false"})
-        ctx = PipelineContext()
-        output = step.run(ctx)
-        assert output.success is False
-        assert "failed with exit code" in output.error
-
-    def test_shell_step_with_retries(self):
-        """Test shell step retry logic."""
-        step = ShellStep("test", {
-            "command": "exit 1",
-            "retries": 2,
-            "retry_delay": 0
-        })
-        ctx = PipelineContext()
-        output = step.run(ctx)
-        assert output.success is False
-        assert output.metadata["attempts"] == 3  # initial + 2 retries
+    def log_message(self, format: str, *args) -> None:  # noqa: A003
+        return
 
 
-class TestDbtStep:
-    """Tests for DbtStep."""
-
-    def test_dbt_step_missing_command(self):
-        """Test default command is 'run'."""
-        step = DbtStep("test", {})
-        ctx = PipelineContext()
-        # We won't actually run dbt, just check configuration
-        # defaults to run in _execute
-        assert step.config.get("command") is None
-
-    def test_dbt_step_with_models(self):
-        """Test dbt command construction with models."""
-        step = DbtStep("test", {
-            "command": "run",
-            "models": ["staging", "marts"]
-        })
-        # Verify configuration is stored
-        assert step.config["models"] == ["staging", "marts"]
+def _write_native_executable(path: Path, *, windows_body: str, posix_body: str) -> Path:
+    """Create a tiny executable script that matches the current platform."""
+    if os.name == "nt":
+        path.write_text(windows_body, encoding="utf-8")
+    else:
+        path.write_text(posix_body, encoding="utf-8")
+        path.chmod(0o755)
+    return path
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_api_operator_sends_bearer_token(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    server = HTTPServer(("127.0.0.1", 0), TokenHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: API Operator Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  call_api:",
+                "    tasks:",
+                "      webhook:",
+                "        type: api",
+                f"        url: http://127.0.0.1:{server.server_port}/hook",
+                "        method: POST",
+                "        token: demo-token",
+                '        body: \'{"hello": "world"}\'',
+                "        expected_status: 201",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+        run = service.trigger_pipeline("call_api", wait=True)
+        stored_run, _, logs = service.get_run(run.run_id)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert stored_run.status == "success"
+    assert TokenHandler.seen_auth == "Bearer demo-token"
+    assert TokenHandler.seen_body == '{"hello": "world"}'
+    assert any("Response 201" in line.message for line in logs)
+
+
+def test_ssh_operator_executes_configured_binary(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_ssh = _write_native_executable(
+        workspace / ("fake_ssh.cmd" if os.name == "nt" else "fake_ssh.sh"),
+        windows_body="@echo off\r\necho fake ssh %*\r\nexit /b 0\r\n",
+        posix_body='#!/usr/bin/env sh\necho fake ssh "$@"\nexit 0\n',
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: SSH Operator Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  ssh_probe:",
+                "    tasks:",
+                "      remote_check:",
+                "        type: ssh",
+                "        host: localhost",
+                "        user: demo",
+                "        command: echo remote-ok",
+                f"        ssh_binary: '{fake_ssh.as_posix()}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("ssh_probe", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+    assert any("fake ssh" in line.message.lower() for line in logs)
+
+
+def test_python_operator_runs_module_function(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "report_ops.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_report(report_name: str, batch_size: int = 10) -> dict[str, object]:",
+                "    print(f'building {report_name} with batch {batch_size}')",
+                "    return {'report_name': report_name, 'batch_size': batch_size}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Python Operator Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  report_flow:",
+                "    tasks:",
+                "      build_report:",
+                "        type: python",
+                "        path: report_ops.py",
+                "        function: build_report",
+                "        kwargs:",
+                "          report_name: nightly",
+                "          batch_size: 24",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("report_flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+    assert any("building nightly with batch 24" in line.message for line in logs)
+    assert any("Return value" in line.message for line in logs)
+
+
+def test_cli_operator_executes_batch_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    script_name = "job.cmd" if os.name == "nt" else "job.sh"
+    _write_native_executable(
+        workspace / script_name,
+        windows_body="@echo off\r\necho batch-path-ok\r\nexit /b 0\r\n",
+        posix_body="#!/usr/bin/env sh\necho batch-path-ok\nexit 0\n",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: CLI Path Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  job_flow:",
+                "    tasks:",
+                "      batch_task:",
+                "        type: cli",
+                f"        path: {script_name}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("job_flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+    assert any("batch-path-ok" in line.message for line in logs)

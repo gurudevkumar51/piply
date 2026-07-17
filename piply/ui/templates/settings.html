@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - Piply{% endblock %}
+
+{% block content %}
+<div class="page-grid">
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Settings</div>
+            <h1 class="panel-title" style="font-size:1.55rem; margin:0;">Runtime configuration</h1>
+            <p class="page-header-copy" style="margin:8px 0 0;">Small, explicit settings for schedules, engine behavior, auth, and notifications.</p>
+        </div>
+        <div class="run-stats-row">
+            <span class="meta-pill">scheduler {% if scheduler.running %}live{% else %}offline{% endif %}</span>
+            <span class="meta-pill">queue {{ scheduler.queue_depth or "0" }}</span>
+            <span class="meta-pill">sensors {{ scheduler.sensor_count or "0" }}</span>
+        </div>
+    </section>
+
+    <section class="detail-grid">
+        <article class="detail-card">
+            <div class="detail-label">Users</div>
+            <div class="detail-value">{% if settings.auth_enabled %}Basic/API auth enabled{% else %}Auth disabled{% endif %}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Engine config</div>
+            <div class="detail-value">default workers {{ settings.default_max_parallel_tasks }}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Queue</div>
+            <div class="detail-value">{{ runtime_metrics.queue.due|default(0) }} due / {{ runtime_metrics.queue.queued|default(0) }} queued</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Workers</div>
+            <div class="detail-value">{{ runtime_metrics.workers.running_tasks|default(0) }} running / {{ runtime_metrics.workers.configured_task_capacity|default(0) }} capacity</div>
+        </article>
+    </section>
+
+    <section class="detail-grid">
+        <article class="detail-card">
+            <div class="detail-label">Heartbeat</div>
+            <div class="detail-value">{{ settings.heartbeat_interval_seconds }}s, stale after {{ settings.stale_run_timeout_seconds }}s</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Dispatch queue</div>
+            <div class="detail-value">batch {{ settings.queue_dispatch_batch_size }}, stale {{ settings.queue_dispatch_stale_seconds }}s</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Queue status</div>
+            <div class="detail-value">dispatching {{ runtime_metrics.queue.dispatching|default(0) }}, failed {{ runtime_metrics.queue.failed|default(0) }}</div>
+        </article>
+        <article class="detail-card">
+            <div class="detail-label">Notifications</div>
+            <div class="detail-value">Use email, webhook, or API tasks in YAML</div>
+        </article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Schedules</h2>
+                <p class="panel-copy">Pause or resume schedule dispatch without changing YAML.</p>
+            </div>
+        </div>
+        {% if pipelines %}
+        <div class="table-wrap">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Pipeline</th>
+                        <th>Schedule</th>
+                        <th>Next</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for pipeline in pipelines %}
+                    <tr>
+                        <td><a href="/pipelines/{{ pipeline.pipeline_id }}">{{ pipeline.title }}</a></td>
+                        <td>{{ pipeline.schedule_text }}</td>
+                        <td>{{ pipeline.next_run_label }}</td>
+                        <td><span class="status-badge {% if pipeline.paused %}skipped{% elif pipeline.enabled %}success{% else %}cancelled{% endif %}">{% if pipeline.paused %}paused{% elif pipeline.enabled %}enabled{% else %}disabled{% endif %}</span></td>
+                        <td>
+                            <button class="button {% if pipeline.paused %}secondary{% else %}warn{% endif %}" onclick="togglePipelinePause('{{ pipeline.pipeline_id }}', {{ 'false' if pipeline.paused else 'true' }})">
+                                {% if pipeline.paused %}Resume{% else %}Pause{% endif %}
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">No pipelines are configured.</div>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Paths</h2>
+                <p class="panel-copy">The active config and database Piply is using now.</p>
+            </div>
+        </div>
+        <div class="stack">
+            <div class="detail-card">
+                <div class="detail-label">Config file</div>
+                <div class="detail-value mono path-value">{{ scheduler.config_path }}</div>
+            </div>
+            <div class="detail-card">
+                <div class="detail-label">Database</div>
+                <div class="detail-value mono path-value">{{ scheduler.database_path }}</div>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}

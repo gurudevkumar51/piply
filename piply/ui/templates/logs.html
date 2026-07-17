@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Logs - Piply{% endblock %}
+
+{% block content %}
+<div class="page-grid">
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Logs</div>
+            <h1 class="panel-title" style="font-size:1.55rem; margin:0;">Searchable output</h1>
+            <p class="page-header-copy" style="margin:8px 0 0;">Filter recent pipeline and task logs without leaving the control plane.</p>
+        </div>
+        <form class="filter-bar" method="get" action="/logs">
+            <input name="q" value="{{ query }}" placeholder="search logs">
+            <select name="pipeline_id">
+                <option value="">All pipelines</option>
+                {% for pipeline in pipelines %}
+                <option value="{{ pipeline.pipeline_id }}" {% if selected_pipeline_id == pipeline.pipeline_id %}selected{% endif %}>{{ pipeline.title }}</option>
+                {% endfor %}
+            </select>
+            <input name="task_id" value="{{ selected_task_id }}" placeholder="task id">
+            <button class="button secondary" type="submit">Search</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Recent log lines</h2>
+                <p class="panel-copy">Newest matching lines appear first.</p>
+            </div>
+        </div>
+        {% if logs %}
+        <div class="log-viewer">
+            {% for line in logs %}
+            <a class="log-line" href="/runs/{{ line.run_id }}">
+                <time>{{ line.created_at.strftime('%H:%M:%S.%f')[:-3] }}</time>
+                <div class="log-task">{{ line.task_id or "pipeline" }}</div>
+                <div class="log-message">{{ line.message }}</div>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">No log lines matched the current filters.</div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

@@ -1,269 +1,444 @@
-"""
-Unit tests for Piply core components.
-"""
+from __future__ import annotations
 
-import pytest
-import tempfile
-import os
 from pathlib import Path
 
-from piply.core.context import PipelineContext, StepOutput
-from piply.core.step import Step
-from piply.core.pipeline import Pipeline
-from piply.core.models import PipelineConfig, StepConfig, TenantConfig
-from piply.parser.yaml_parser import load_pipeline
-from piply.engine.local_engine import LocalEngine
+from piply.core.loader import load_project
+from piply.core.scheduling import CronSchedule
 
 
-class TestPipelineContext:
-    """Tests for PipelineContext."""
+def test_load_project_parses_multitask_pipeline_and_trigger(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "extract.py").write_text("print('extract')", encoding="utf-8")
+    (workspace / "report.py").write_text("print('report')", encoding="utf-8")
 
-    def test_create_context(self):
-        ctx = PipelineContext(pipeline_name="test")
-        assert ctx.pipeline_name == "test"
-        assert ctx.tenant is None
-        assert len(ctx.step_outputs) == 0
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Test Workspace",
+                "workspace: workspace",
+                "pipelines:",
+                "  extract_flow:",
+                "    schedule:",
+                "      every: 5m",
+                "    triggers_on_success:",
+                "      - report_flow",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: extract.py",
+                "      validate:",
+                "        type: cli",
+                "        command: python -c \"print('validate')\"",
+                "        depends_on: [extract]",
+                "  report_flow:",
+                "    tasks:",
+                "      build_report:",
+                "        type: python",
+                "        path: report.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-    def test_set_and_get_output(self):
-        ctx = PipelineContext()
-        output = StepOutput(step_name="test", success=True,
-                            result={"key": "value"})
-        ctx.set_output("test", output)
-        retrieved = ctx.get_output("test")
-        assert retrieved == output
-        assert retrieved.success is True
+    project = load_project(config_path)
+    pipeline = project.pipelines["extract_flow"]
 
-    def test_set_and_get_variable(self):
-        ctx = PipelineContext()
-        ctx.set_variable("key", "value")
-        assert ctx.get_variable("key") == "value"
-        assert ctx.get_variable("missing", "default") == "default"
-
-
-class TestStep:
-    """Tests for Step base class."""
-
-    def test_step_initialization(self):
-        config = {"name": "test_step", "retries": 2, "retry_delay": 30}
-        step = Step("test_step", config)
-        assert step.name == "test_step"
-        assert step.retries == 2
-        assert step.retry_delay == 30
-        assert step.depends_on == []
-
-    def test_step_retry_logic(self):
-        """Test that step retries on failure."""
-        class FailingStep(Step):
-            attempt_count = 0
-
-            def _execute(self, context):
-                FailingStep.attempt_count += 1
-                if FailingStep.attempt_count < 3:
-                    raise ValueError("Not yet")
-                return "success"
-
-        config = {"name": "failing", "retries": 2, "retry_delay": 0}
-        step = FailingStep("failing", config)
-        ctx = PipelineContext()
-        output = step.run(ctx)
-
-        assert output.success is True
-        assert FailingStep.attempt_count == 3
-
-    def test_step_exhausts_retries(self):
-        """Test that step fails after all retries."""
-        class AlwaysFailingStep(Step):
-            attempt_count = 0
-
-            def _execute(self, context):
-                AlwaysFailingStep.attempt_count += 1
-                raise ValueError("Always fails")
-
-        config = {"name": "always_fail", "retries": 2, "retry_delay": 0}
-        step = AlwaysFailingStep("always_fail", config)
-        ctx = PipelineContext()
-        output = step.run(ctx)
-
-        assert output.success is False
-        assert AlwaysFailingStep.attempt_count == 3  # initial + 2 retries
+    assert pipeline.task_count == 2
+    assert pipeline.execution_mode == "sequential"
+    assert pipeline.triggers_on_success == ("report_flow",)
+    assert pipeline.tasks["validate"].depends_on == ("extract",)
+    assert pipeline.tasks["extract"].command_preview.endswith("extract.py")
 
 
-class TestPipeline:
-    """Tests for Pipeline."""
+def test_load_project_expands_reusable_variables_without_breaking_json_body(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
 
-    def test_pipeline_creation(self):
-        steps = [Step("step1", {}), Step("step2", {})]
-        pipeline = Pipeline("test", steps, tenants=["t1", "t2"])
-        assert pipeline.name == "test"
-        assert len(pipeline.steps) == 2
-        assert pipeline.tenants == ["t1", "t2"]
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Variable Workspace",
+                "workspace: workspace",
+                "variables:",
+                "  scripts_dir: scripts",
+                "  env_name: py312_extract",
+                "pipelines:",
+                "  tenant_flow:",
+                "    variables:",
+                "      batch_id: tenant-a",
+                "    tasks:",
+                "      run_cli:",
+                "        type: cli",
+                "        shell: bash",
+                "        command: conda run -n {env_name} python {scripts_dir}/test_cli.py {batch_id} ${LATE_PARAM}",
+                "        cwd: .",
+                "      notify:",
+                "        type: webhook",
+                "        url: https://example.com/webhook",
+                '        body: \'{"event":"piply-demo"}\'',
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-    def test_pipeline_single_run(self):
-        """Test pipeline execution without tenants."""
-        class SuccessStep(Step):
-            def _execute(self, context):
-                return "done"
+    project = load_project(config_path)
+    pipeline = project.pipelines["tenant_flow"]
 
-        steps = [SuccessStep("s1", {}), SuccessStep("s2", {})]
-        pipeline = Pipeline("test", steps)
-        engine = LocalEngine()
-
-        # Should run without errors
-        pipeline.run(engine)
-
-    def test_pipeline_multi_tenant(self):
-        """Test multi-tenant execution."""
-        class TrackTenantStep(Step):
-            tenants_seen = []
-
-            def _execute(self, context):
-                TrackTenantStep.tenants_seen.append(context.tenant)
-                return f"done for {context.tenant}"
-
-        steps = [TrackTenantStep("s1", {})]
-        pipeline = Pipeline("test", steps, tenants=["t1", "t2"])
-        engine = LocalEngine()
-        pipeline.run(engine)
-
-        assert TrackTenantStep.tenants_seen == ["t1", "t2"]
-
-
-class TestYAMLParser:
-    """Tests for YAML parser."""
-
-    def test_load_valid_pipeline(self):
-        """Test loading a valid YAML pipeline."""
-        yaml_content = """
-pipeline:
-  name: test_pipeline
-  steps:
-    - name: step1
-      type: python
-      function: "test_module.func"
-"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write(yaml_content)
-            f.flush()
-
-            pipeline = load_pipeline(f.name)
-            assert pipeline.name == "test_pipeline"
-            assert len(pipeline.steps) == 1
-            assert pipeline.steps[0].name == "step1"
-
-        os.unlink(f.name)
-
-    def test_load_pipeline_with_tenants(self):
-        """Test loading pipeline with tenants."""
-        yaml_content = """
-pipeline:
-  name: multi_tenant_pipeline
-  tenants:
-    - tenant1
-    - tenant2
-  steps:
-    - name: step1
-      type: shell
-      command: "echo hello"
-"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write(yaml_content)
-            f.flush()
-
-            pipeline = load_pipeline(f.name)
-            assert pipeline.tenants == ["tenant1", "tenant2"]
-
-        os.unlink(f.name)
-
-    def test_load_pipeline_with_dependencies(self):
-        """Test loading pipeline with step dependencies."""
-        yaml_content = """
-pipeline:
-  name: dag_pipeline
-  steps:
-    - name: step1
-      type: python
-      function: "module.func1"
-    - name: step2
-      type: shell
-      command: "echo step2"
-      depends_on:
-        - step1
-    - name: step3
-      type: python
-      function: "module.func3"
-      depends_on:
-        - step1
-"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write(yaml_content)
-            f.flush()
-
-            pipeline = load_pipeline(f.name)
-            step2 = next(s for s in pipeline.steps if s.name == "step2")
-            step3 = next(s for s in pipeline.steps if s.name == "step3")
-
-            assert step2.depends_on == ["step1"]
-            assert step3.depends_on == ["step1"]
-
-        os.unlink(f.name)
+    assert pipeline.tasks["run_cli"].command == (
+        "conda run -n py312_extract python scripts/test_cli.py tenant-a ${LATE_PARAM}"
+    )
+    assert pipeline.tasks["run_cli"].shell == "bash"
+    assert pipeline.tasks["run_cli"].cwd == workspace.resolve()
+    assert pipeline.tasks["notify"].body == '{"event":"piply-demo"}'
 
 
-class TestLocalEngine:
-    """Tests for LocalEngine."""
+def test_load_project_expands_entity_mapped_task_templates(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ops.py").write_text("print('ops')", encoding="utf-8")
 
-    def test_engine_executes_steps(self):
-        """Test that engine executes all steps."""
-        class TrackExecution(Step):
-            executed = []
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Entity Expansion Workspace",
+                "workspace: workspace",
+                "pipelines:",
+                "  extract_flow:",
+                "    entities:",
+                "      report:",
+                "        - payment",
+                "        - adjustment",
+                "        - refund",
+                "    max_parallel_tasks: 3",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: ops.py",
+                "        function: extract",
+                "        kwargs:",
+                "          report: '{report}'",
+                "      load:",
+                "        type: cli",
+                "        command: python load.py --report {report}",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-            def _execute(self, context):
-                TrackExecution.executed.append(self.name)
-                return "done"
+    project = load_project(config_path)
+    pipeline = project.pipelines["extract_flow"]
 
-        steps = [TrackExecution("s1", {}), TrackExecution("s2", {})]
-        pipeline = Pipeline("test", steps)
-        engine = LocalEngine()
-        pipeline.run(engine)
-
-        assert set(TrackExecution.executed) == {"s1", "s2"}
-
-    def test_engine_respects_dependencies(self):
-        """Test that engine respects step dependencies."""
-        execution_order = []
-
-        class OrderStep(Step):
-            def __init__(self, name, config, order_num):
-                super().__init__(name, config)
-                self.order_num = order_num
-
-            def _execute(self, context):
-                execution_order.append(self.order_num)
-                return "done"
-
-        steps = [
-            OrderStep("s1", {}, 1),
-            OrderStep("s2", {"depends_on": ["s1"]}, 2),
-            OrderStep("s3", {"depends_on": ["s2"]}, 3),
-        ]
-        pipeline = Pipeline("test", steps)
-        engine = LocalEngine()
-        pipeline.run(engine)
-
-        assert execution_order == [1, 2, 3]
-
-    def test_engine_fails_on_step_error(self):
-        """Test that engine raises error when step fails."""
-        class FailingStep(Step):
-            def _execute(self, context):
-                raise ValueError("Step failed")
-
-        steps = [FailingStep("fail", {})]
-        pipeline = Pipeline("test", steps)
-        engine = LocalEngine()
-
-        with pytest.raises(RuntimeError, match="Step 'fail' failed"):
-            pipeline.run(engine)
+    assert tuple(pipeline.tasks) == (
+        "payment.extract",
+        "adjustment.extract",
+        "refund.extract",
+        "payment.load",
+        "adjustment.load",
+        "refund.load",
+    )
+    assert pipeline.tasks["payment.extract"].kwargs == {"report": "payment"}
+    assert pipeline.tasks["payment.extract"].template_id == "extract"
+    assert pipeline.tasks["payment.extract"].entity_values == {"report": "payment"}
+    assert pipeline.tasks["payment.load"].depends_on == ("payment.extract",)
+    assert pipeline.tasks["adjustment.load"].command == "python load.py --report adjustment"
+    assert pipeline.execution_mode == "parallel"
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_load_project_expands_pipeline_template_deployments(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ops.py").write_text("print('ops')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Deployment Workspace",
+                "workspace: workspace",
+                "pipeline_templates:",
+                "  report_pipeline:",
+                "    retry:",
+                "      attempts: 1",
+                "      mode: resume",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: ops.py",
+                "        function: extract",
+                "        kwargs:",
+                "          tenant: '{tenant}'",
+                "      load:",
+                "        type: cli",
+                "        command: python load.py --tenant {tenant}",
+                "        depends_on: [extract]",
+                "pipeline_deployments:",
+                "  client_a_reporting:",
+                "    template: report_pipeline",
+                "    schedule:",
+                "      every: 15m",
+                "    variables:",
+                "      tenant: client_a",
+                "  client_b_reporting:",
+                "    template: report_pipeline",
+                "    schedule:",
+                "      cron: '0 * * * *'",
+                "    tenant: client_b",
+                "    max_parallel_tasks: 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+
+    assert tuple(project.pipelines) == ("client_a_reporting", "client_b_reporting")
+    client_a = project.pipelines["client_a_reporting"]
+    client_b = project.pipelines["client_b_reporting"]
+    assert client_a.template_id == "report_pipeline"
+    assert client_a.deployment_id == "client_a_reporting"
+    assert client_a.tasks["extract"].kwargs == {"tenant": "client_a"}
+    assert client_a.tasks["load"].command == "python load.py --tenant client_a"
+    assert client_a.schedule is not None
+    assert client_b.tasks["extract"].kwargs == {"tenant": "client_b"}
+    assert client_b.max_parallel_tasks == 2
+
+
+def test_load_project_detects_parallelizable_graph_and_limit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+    (workspace / "fanout.py").write_text("print('fanout')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Parallel Workspace",
+                "workspace: workspace",
+                "pipelines:",
+                "  job_flow:",
+                "    execution:",
+                "      mode: parallel",
+                "      max_parallel_tasks: 3",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+                "      validate:",
+                "        type: python",
+                "        path: fanout.py",
+                "        depends_on: [main]",
+                "      publish:",
+                "        type: python",
+                "        path: fanout.py",
+                "        depends_on: [main]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["job_flow"]
+
+    assert pipeline.execution_mode == "parallel"
+    assert pipeline.parallelizable is True
+    assert pipeline.max_parallel_tasks == 3
+
+
+def test_load_project_parses_retry_policy_and_cli_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.cmd").write_text("@echo off\r\necho hello\r\n", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Retry Workspace",
+                "workspace: workspace",
+                "pipelines:",
+                "  job_flow:",
+                "    retry:",
+                "      attempts: 2",
+                "      mode: resume",
+                "      delay_seconds: 3",
+                "    tasks:",
+                "      main:",
+                "        type: cli",
+                "        path: job.cmd",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["job_flow"]
+
+    assert pipeline.retry_policy.attempts == 2
+    assert pipeline.retry_policy.mode == "resume"
+    assert pipeline.retry_policy.delay_seconds == 3
+    assert pipeline.tasks["main"].path is not None
+    assert pipeline.tasks["main"].command_preview.endswith("job.cmd")
+
+
+def test_load_project_parses_file_and_sql_sensors(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Sensor Workspace",
+                "workspace: workspace",
+                "pipelines:",
+                "  watch_flow:",
+                "    sensors:",
+                "      landing_files:",
+                "        type: file_sensor",
+                "        path: inbox",
+                "        pattern: '*.csv'",
+                "        task_id: main",
+                "      inbound_rows:",
+                "        type: sql_sensor",
+                "        database: sensor.db",
+                "        table: inbound_events",
+                "        cursor_column: id",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["watch_flow"]
+
+    assert pipeline.sensor_count == 2
+    assert pipeline.sensors["landing_files"].sensor_type == "file_sensor"
+    assert pipeline.sensors["landing_files"].task_id == "main"
+    assert pipeline.sensors["inbound_rows"].sensor_type == "sql_sensor"
+    assert pipeline.sensors["inbound_rows"].table == "inbound_events"
+
+
+def test_load_project_expands_dotenv_for_sql_connection_and_sftp_sensor(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "PIPLY_SENSOR_DB_URL=sqlite:///sensor.db",
+                "PIPLY_SENSOR_SFTP=sftp://demo@example.com:2222/inbox",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Env Sensor Workspace",
+                "workspace: workspace",
+                "pipelines:",
+                "  watch_flow:",
+                "    sensors:",
+                "      landing_files:",
+                "        type: file_sensor",
+                "        path: ${PIPLY_SENSOR_SFTP}",
+                "      inbound_rows:",
+                "        type: sql_sensor",
+                "        connection: ${PIPLY_SENSOR_DB_URL}",
+                "        table: inbound_events",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["watch_flow"]
+
+    assert pipeline.sensors["landing_files"].is_remote is True
+    assert pipeline.sensors["landing_files"].ssh_host == "example.com"
+    assert pipeline.sensors["landing_files"].ssh_user == "demo"
+    assert pipeline.sensors["landing_files"].remote_path == "/inbox"
+    assert pipeline.sensors["inbound_rows"].connection is not None
+    assert pipeline.sensors["inbound_rows"].connection.endswith("/workspace/sensor.db")
+
+
+def test_load_project_resolves_secret_backed_connections_and_api_sensor(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Connection Workspace",
+                "workspace: workspace",
+                "secrets:",
+                "  values:",
+                "    APP_DB: sqlite:///sensor.db",
+                "connections:",
+                "  app_db: ${secret:APP_DB}",
+                "pipelines:",
+                "  watch_flow:",
+                "    sensors:",
+                "      inbound_rows:",
+                "        type: sql_sensor",
+                "        connection_ref: app_db",
+                "        table: inbound_events",
+                "      external_events:",
+                "        type: api_sensor",
+                "        url: https://example.com/events",
+                "        cursor_path: version",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    pipeline = project.pipelines["watch_flow"]
+
+    assert pipeline.sensor_count == 2
+    assert pipeline.sensors["inbound_rows"].connection is not None
+    assert pipeline.sensors["inbound_rows"].connection.endswith("/workspace/sensor.db")
+    assert pipeline.sensors["external_events"].sensor_type == "api_sensor"
+    assert pipeline.sensors["external_events"].cursor_path == "version"
+
+
+def test_cron_schedule_can_be_constructed_with_slots() -> None:
+    schedule = CronSchedule("0 2 * * *", timezone_name="UTC")
+
+    assert schedule.describe() == "Cron 0 2 * * * (UTC)"

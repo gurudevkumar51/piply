@@ -1,343 +1,330 @@
-👉 # Piply - YAML-driven Workflow Orchestration Framework
+# Piply
 
-A lightweight, low-code workflow orchestration framework built on top of Prefect.
+Piply is a lightweight Python pipeline framework for teams that want YAML-defined workflows, schedules, retries, logs, sensors, and an operations UI without running a heavy orchestration stack.
+
+It stays small on purpose:
+
+- local dependency-aware DAG execution
+- SQLite for runs, logs, task outputs, queue state, sensors, and pause overrides
+- FastAPI plus server-rendered UI
+- no Redis, Celery, Airflow, Prefect, or external queue required
 
 ## Features
 
-- **YAML-driven pipeline definition** - No code required for basic pipelines
-- **DAG support** - Define task dependencies
-- **Multi-tenant execution** - Run the same pipeline for multiple tenants
-- **Multiple step types**:
-  - Python functions (from modules or files)
-  - Shell/CLI commands
-  - dbt workflows
-- **Retry mechanisms** - Automatic retries with configurable delays
-- **Two execution engines**:
-  - Prefect (default) - Full-featured with scheduling, monitoring
-  - Local - Simple sequential execution for testing
-- **CLI interface** - Easy command-line operations
-- **Extensible** - Plugin architecture for custom step types
-
-## Installation
-
-```bash
-pip install -e .
-```
+- Multi-task pipelines with `depends_on`
+- Python script, Python callable, CLI, API, webhook, email, and SSH tasks
+- Reusable YAML `variables` with `{name}` interpolation
+- `.env`, environment variables, explicit secrets, and reusable SQL connections
+- Task output passing through `context["task_id"]`
+- Pipeline-to-pipeline output and tenant context passing
+- Metadata-driven `entities` expansion for reusable task templates
+- Optional `pipeline_templates` and `pipeline_deployments` for advanced reuse
+- Per-task upstream failure behavior: `skip`, `fail`, or `continue`
+- Heartbeat-backed runtime recovery for interrupted runs and stale scheduler state
+- Schedules, sensors, retries, cancellation, reruns, and searchable logs
+- Dashboard, Pipelines, Execution Matrix, Logs, Settings, and run detail pages
 
 ## Quick Start
 
-### 1. Initialize a project
-
 ```bash
-piply init --name my_pipeline
+pip install -e .
+copy .env.example .env
+piply validate --config piply-demo/piply.yaml
+piply start --config piply-demo/piply.yaml
 ```
 
-This creates:
-- `piply.yaml` - Pipeline configuration
-- `pipelines/` directory with example Python functions
+Open `http://127.0.0.1:8000`.
 
-### 2. Edit the pipeline configuration
+Run on a different port when `8000` is already in use:
 
-Edit `piply.yaml` to customize your pipeline:
+```bash
+piply start --config piply-demo/piply.yaml --port 8080
+piply start --config piply-demo/piply.yaml --host 0.0.0.0 --port 8080
+```
+
+Create a starter workspace:
+
+```bash
+piply init my-piply-project
+piply run extract_flow --config my-piply-project/piply.yaml --wait
+```
+
+## Minimal YAML
 
 ```yaml
-pipeline:
-  name: my_pipeline
-  schedule: "0 0 * * *"  # Optional: daily at midnight
-  retries: 1
-  variables:
-    environment: "dev"
+version: "1"
+title: Piply Workspace
+workspace: .
 
-  steps:
-    - name: extract
-      type: python
-      function: "pipelines.extract.main"
-      retries: 2
+variables:
+  scripts_dir: pipelines
+  batch_id: demo-batch
 
-    - name: transform
-      type: shell
-      command: "python transform.py"
-      depends_on:
-        - extract
+connections:
+  app_db: sqlite:///sensor_demo.db
 
-    - name: load
-      type: dbt
-      command: "run"
-      models:
-        - "staging"
-      depends_on:
-        - transform
+pipelines:
+  extract_flow:
+    schedule:
+      every: 15m
+    retry:
+      attempts: 2
+      mode: resume
+      delay_seconds: 10
+    triggers_on_success:
+      - report_flow
+    tasks:
+      extract:
+        type: python
+        path: "{scripts_dir}/extract.py"
+        function: extract_data
+
+      transform:
+        type: python
+        path: "{scripts_dir}/extract.py"
+        function: transform_data
+        depends_on: [extract]
+
+      validate:
+        type: cli
+        command: python {scripts_dir}/validate_cli.py {batch_id}
+        cwd: .
+        depends_on: [transform]
+
+  report_flow:
+    tasks:
+      build_report:
+        type: python
+        path: "{scripts_dir}/report.py"
+        function: build_report
 ```
 
-### 3. Run the pipeline
+Python callable tasks can consume upstream outputs:
 
-```bash
-# Run with auto engine selection (tries Prefect, falls back to local)
-piply run
-
-# Run with specific engine
-piply run --engine prefect   # Use Prefect (requires proper Prefect setup)
-piply run --engine local     # Use local engine (no dependencies)
-
-# Run for a specific tenant
-piply run --tenant tenant1
-
-# Retry only failed steps
-piply run --retry-failed
-```
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `piply init` | Create a new pipeline configuration |
-| `piply run` | Run the pipeline |
-| `piply list dags` | List all available pipelines |
-| `piply test` | Test pipeline execution |
-| `piply tasks list` | List tasks in a pipeline |
-| `piply tasks run` | Run specific tasks |
-| `piply logs` | View execution logs || `piply ui` | Start the web UI server (default: http://localhost:8000) |
-## Pipeline Configuration Reference
-
-### Top-level fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Pipeline name (required) |
-| `schedule` | string | Cron expression for scheduling (optional) |
-| `retries` | integer | Number of pipeline-level retries (default: 0) |
-| `timeout` | integer | Pipeline timeout in seconds (optional) |
-| `tenants` | list | List of tenant identifiers for multi-tenant execution |
-| `variables` | dict | Global variables accessible in all steps |
-
-### Step configuration
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Step name (required) |
-| `type` | string | Step type: `python`, `shell`, or `dbt` (required) |
-| `depends_on` | list | List of step names this step depends on |
-| `retries` | integer | Number of retry attempts (default: 0) |
-| `retry_delay` | integer | Delay between retries in seconds (default: 60) |
-| `timeout` | integer | Step timeout in seconds (optional) |
-
-### Python step specific
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `function` | string | Function to execute. Format: `module.function` or `file.py:function` |
-
-The function receives a `PipelineContext` object as its first argument (if it accepts parameters).
-
-Example:
 ```python
-# In file: pipelines/extract.py
-def main(context):
-    tenant = context.tenant
-    # Do work...
-    return {"rows": 100}
+def transform_data(context):
+    extracted = context["extract"]
+    return {"records": extracted["records"] + 1}
 ```
 
-### Shell step specific
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `command` | string | Shell command to execute |
-
-The command runs in a subprocess with output captured.
-
-### dbt step specific
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `command` | string | dbt command: `run`, `test`, `seed`, etc. (default: `run`) |
-| `models` | list | List of dbt models to run |
-| `select` | string | dbt selection criteria |
-| `vars` | dict | Variables to pass to dbt |
-| `profiles_dir` | string | Path to profiles directory |
-| `project_dir` | string | Path to dbt project directory |
-
-## Multi-tenant Execution
-
-Define tenants in your pipeline:
+For plain commands, omit `shell` so Piply uses the platform default shell. Set
+`shell: bash` only for Bash-specific syntax and only on machines where Bash is
+installed and available on `PATH`:
 
 ```yaml
-pipeline:
-  name: etl_pipeline
-  tenants:
-    - client_a
-    - client_b
-    - client_c
-  steps:
-    - name: extract
-      type: python
-      function: "extract.main"
+tasks:
+  load_env_and_run:
+    type: cli
+    shell: bash
+    command: set -a && source .env && set +a && conda run -n py312_extract python {scripts_dir}/job.py
+    cwd: .
 ```
 
-The pipeline will run once for each tenant, with `context.tenant` set accordingly.
+## Dynamic Entity Mapping
 
-Run for a specific tenant:
+Use `entities` when one task template should run once per business value. Piply expands templates at runtime into normal DAG tasks, so existing retries, logs, outputs, and parallel execution continue to work.
+
+```yaml
+pipelines:
+  extract_flow:
+    entities:
+      report:
+        - payment
+        - adjustment
+        - refund
+    max_parallel_tasks: 3
+    tasks:
+      extract:
+        type: python
+        path: pipelines/extract.py
+        function: extract_data
+        kwargs:
+          report: "{report}"
+
+      validate:
+        type: cli
+        command: python validate.py --report {report}
+        depends_on: [extract]
+```
+
+Runtime tasks are generated as `payment.extract -> payment.validate`, `adjustment.extract -> adjustment.validate`, and `refund.extract -> refund.validate`.
+
+## Advanced Deployments
+
+Simple `pipelines:` YAML remains the default. For repeated tenant or environment rollouts, define a reusable template and deployment-specific schedules or variables:
+
+```yaml
+pipeline_templates:
+  report_pipeline:
+    tasks:
+      extract:
+        type: python
+        path: pipelines/extract.py
+        function: extract_data
+        kwargs:
+          tenant: "{tenant}"
+
+pipeline_deployments:
+  client_a_reporting:
+    template: report_pipeline
+    schedule:
+      every: 15m
+    variables:
+      tenant: client_a
+
+  client_b_reporting:
+    template: report_pipeline
+    schedule:
+      cron: "0 * * * *"
+    tenant: client_b
+```
+
+Each deployment becomes a normal runnable pipeline id, so the scheduler, UI, CLI, and API keep working without a second execution model.
+
+### Deployment Variables In Downstream Pipelines
+
+Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run; a manual run of the downstream pipeline uses the downstream pipeline's own variables or top-level defaults.
+
+```yaml
+pipelines:
+  Bronze_to_Silver:
+    tasks:
+      dbt:
+        type: cli
+        command: DBT_CLIENT={practice} dbt run --selector appointment_silver
+
+pipeline_templates:
+  ECW_Extract_test:
+    tasks:
+      extract:
+        type: cli
+        command: echo extract
+
+pipeline_deployments:
+  BENNETT_ETL_Flow:
+    template: ECW_Extract_test
+    variables:
+      practice: BENNETT
+    triggers_on_success: [Bronze_to_Silver]
+```
+
+When `BENNETT_ETL_Flow` succeeds, Piply runs `Bronze_to_Silver` with `DBT_CLIENT=BENNETT`. A deployment for PALOS would use the same target and set `practice: PALOS`.
+
+## Common CLI
+
 ```bash
-piply run --tenant client_a
+piply --version
+piply init my-piply-project
+piply validate --config piply-demo/piply.yaml
+piply list --config piply-demo/piply.yaml
+piply run extract_flow --config piply-demo/piply.yaml --wait
+piply run extract_flow --tenant acme --param batch=2026-05-26 --config piply-demo/piply.yaml
+piply tasks list extract_flow --config piply-demo/piply.yaml
+piply tasks run extract_flow validate --tenant acme --param region=west --config piply-demo/piply.yaml
+piply tasks retry <run_id> <task_id> --mode resume --config piply-demo/piply.yaml
+piply runs --config piply-demo/piply.yaml
+piply logs <run_id> --config piply-demo/piply.yaml
+piply pause extract_flow --config piply-demo/piply.yaml
+piply resume extract_flow --config piply-demo/piply.yaml
+piply start --config piply-demo/piply.yaml
+piply start --config piply-demo/piply.yaml --port 8080
+piply stop --config piply-demo/piply.yaml
 ```
 
-## Dependencies and DAGs
+## Docs
 
-Define step dependencies to create a directed acyclic graph (DAG):
+- [Usage Guide](wiki/USAGE_GUIDE.md): detailed YAML examples, `.env`, multi-tenant runs, sensors, and every CLI command
+- [Wiki Overview](wiki/README.md): architecture and feature summary
+- [UI And API Guide](wiki/UI_API_GUIDE.md): screens, actions, and API examples
+- [Implementation Summary](wiki/IMPLEMENTATION_SUMMARY.md): runtime modules and verification expectations
+- [Technical Architecture](docs/architecture/technical_architecture.md): maintainer-focused deep dive into execution, scheduler, state, storage, UI, and extension points
 
-```yaml
-steps:
-  - name: extract
+## Roadmap
+
+Planned features:
+
+- `piply logs --follow`
+- plugin hooks for custom operators and sensors
+- managed external secret backends
+- richer queue, worker, and artifact metrics
+- UI-safe pipeline editing
+- task groups, conditional branches, and richer mapped-run visualization
+- Optional distributed runner while keeping local mode as the default
+- # Task Priority Support
+
+Introduce optional task priority support.
+
+Goal:
+
+When multiple runnable tasks are available for execution,
+the scheduler should prefer higher-priority tasks.
+
+User-friendly syntax:
+
+tasks:
+
+  extract***:
     type: python
-    function: "extract.main"
 
-  - name: transform
-    type: shell
-    command: "python transform.py"
-    depends_on:
-      - extract
+  transform**:
+    type: python
 
-  - name: load
-    type: dbt
-    command: "run"
-    depends_on:
-      - transform
-```
+  validate*:
+    type: python
 
-Steps execute in dependency order. Independent steps can run in parallel (when using Prefect engine).
+Interpretation:
 
-## Retry Mechanisms
+*** = priority 3
+**  = priority 2
+*   = priority 1
 
-Configure retries at both pipeline and step level:
+Internally normalize task IDs:
 
-```yaml
-pipeline:
-  name: robust_pipeline
-  retries: 1  # Retry entire pipeline once if any step fails
+extract***
+→ extract
 
-  steps:
-    - name: flaky_step
-      type: shell
-      command: "unreliable_command"
-      retries: 3  # Retry this step up to 3 times
-      retry_delay: 120  # Wait 2 minutes between retries
-```
+transform**
+→ transform
 
-Retry failed steps only:
-```bash
-piply run --retry-failed
-```
+Store priority separately.
 
-## Execution Engines
+Equivalent explicit syntax:
 
-### Local (default)
+tasks:
 
-Simple sequential execution. No external dependencies. Perfect for:
-- Quick testing
-- Development
-- Environments without Prefect
-- Most basic pipeline needs
+  extract:
+    priority: 3
 
-```bash
-piply run --engine local
-```
+  transform:
+    priority: 2
 
-### Prefect (optional)
+  validate:
+    priority: 1
 
-Uses Prefect for advanced orchestration. Provides:
-- Flow visualization
-- Scheduling and deployments
-- Error handling and retries
-- Monitoring dashboard
+Both syntaxes should be supported.
 
-**Note**: Prefect requires proper configuration. If you encounter SSL errors, use `--engine local` instead.
+Execution Rules:
 
-To use Prefect:
-```bash
-piply run --engine prefect
-```
+- Higher priority tasks execute first.
+- Only among currently runnable tasks.
+- Dependencies still take precedence.
+- Priority does not bypass dependencies.
+- Equal-priority tasks may execute FIFO or randomly.
 
-Or try auto-selection (will fall back to local if Prefect fails):
-```bash
-piply run --engine auto
-```
+Requirements:
 
-### Engine Comparison
+- Backward compatible.
+- UI should display priority visually.
+- DAG graph should indicate priority.
+- Runtime metadata should persist priority.
+- Dynamic task expansion should inherit priority.
+- Scheduler should sort ready tasks using priority.
 
-| Feature | Local | Prefect |
-|---------|-------|---------|
-| Dependencies | None | Prefect installed |
-| Setup | Zero config | May need `PREFECT_TEST_MODE=1` |
-| Parallel execution | No | Yes (with dependencies) |
-| Scheduling | No | Yes (via Prefect) |
-| Monitoring | Basic logs | Full dashboard |
-| Production ready | Limited | Yes (with Prefect server) |
+Recommended scheduling order:
 
-## Scheduling
+1. Priority DESC
+2. Ready Time ASC
+3. Created Time ASC
+4. Random tie-breaker
 
-For production scheduling, use Prefect deployments:
-
-```bash
-# Create a deployment
-prefect deployment build piply.run:run_pipeline -n my_deployment
-
-# Apply and schedule
-prefect deployment apply my_deployment
-```
-
-Alternatively, use the `schedule` field in YAML with a cron expression. Piply will validate the format but actual scheduling is handled by the execution engine.
-
-## Project Structure
-
-```
-my_project/
-├── piply.yaml           # Pipeline configuration
-├── pipelines/           # Python modules for steps
-│   ├── extract.py
-│   ├── transform.py
-│   └── load.py
-├── dbt/                 # Optional: dbt project
-│   ├── models/
-│   └── dbt_project.yml
-└── data/               # Data files (optional)
-```
-
-## Extending with Custom Steps
-
-Create custom step types by inheriting from `Step`:
-
-```python
-from piply.core.step import Step
-
-class MyCustomStep(Step):
-    def _execute(self, context):
-        # Your custom logic
-        return {"result": "success"}
-
-# Register in plugins/__init__.py
-from piply.plugins.registry import register_step
-register_step("my_custom", MyCustomStep)
-```
-
-## Development
-
-### Running Tests
-
-```bash
-pytest tests/
-```
-
-### Code Style
-
-```bash
-black piply/
-ruff piply/
-```
-
-## License
-
-MIT
-
-## Contributing
-
-Contributions welcome! Please open an issue or PR.
+The Pipelines page supports Grid and List views. The selected view is remembered in the browser.

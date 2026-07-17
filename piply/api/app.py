@@ -1,84 +1,101 @@
-"""
-FastAPI application factory and main entry point.
-"""
+"""FastAPI application factory for the Piply API and UI."""
+
+from __future__ import annotations
+
+import asyncio
 import os
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+import signal
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.middleware.cors import CORSMiddleware
 
-from .config import settings
-from .db import init_db
-from .routes import pipelines, runs, dashboard, ui
-from .utils.pipeline_finder import PipelineDiscovery
+from piply.api.auth import AuthMiddleware
+from piply.core.scheduler import PipelineScheduler
+from piply.core.service import PipelineService
+from piply.settings import PiplySettings, load_settings
+
+from .routes import dashboard, execution, pipelines, runs, ui
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
+def _ui_directory() -> Path:
+    """Return the absolute path to the bundled UI assets."""
+    return Path(__file__).resolve().parent.parent / "ui"
 
-    # Initialize FastAPI
+
+def _build_service(
+    config_path: str | None = None,
+    settings: PiplySettings | None = None,
+) -> PipelineService:
+    """Build the shared service instance from config and environment overrides."""
+    current_settings = settings or load_settings(config_path or os.getenv("PIPLY_CONFIG"))
+    env_config = config_path or (str(current_settings.config_path) if current_settings.config_path else None)
+    env_database = (
+        str(current_settings.database_path)
+        if current_settings.database_path is not None
+        else os.getenv("PIPLY_DATABASE")
+    )
+    return PipelineService(
+        config_path=env_config,
+        database_path=env_database,
+        settings=current_settings,
+    )
+
+
+def create_app(config_path: str | None = None) -> FastAPI:
+    """Create the Piply FastAPI app with routes, templates, and scheduler."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        settings = load_settings(config_path or os.getenv("PIPLY_CONFIG"))
+        service = _build_service(config_path, settings)
+        scheduler = PipelineScheduler(service)
+        app.state.service = service
+        app.state.scheduler = scheduler
+        app.state.settings = settings
+        app.state.templates = Jinja2Templates(directory=str(_ui_directory() / "templates"))
+        scheduler.start()
+
+        async def _shutdown_watcher():
+            while True:
+                if service.store.get_meta("shutdown_requested") == "true":
+                    service.store.set_meta("shutdown_requested", "false")
+                    if os.name == "nt":
+                        os.kill(os.getpid(), signal.CTRL_C_EVENT)
+                    else:
+                        os.kill(os.getpid(), signal.SIGINT)
+                    break
+                await asyncio.sleep(2)
+
+        watcher_task = asyncio.create_task(_shutdown_watcher())
+
+        yield
+
+        watcher_task.cancel()
+        service.shutdown_runtime("Run interrupted because the Piply service shut down.")
+        scheduler.stop()
+
     app = FastAPI(
-        title="Piply API",
-        description="REST API for Piply pipeline orchestration",
-        version="0.1.0"
+        title="Piply",
+        description="Lightweight script orchestration with a modular runtime and professional UI.",
+        version="0.2.0",
+        lifespan=lifespan,
     )
 
-    # Setup UI paths
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    ui_dir = os.path.join(os.path.dirname(current_dir), "ui")
-    templates_dir = os.path.abspath(os.path.join(ui_dir, "templates"))
-    static_dir = os.path.abspath(os.path.join(ui_dir, "static"))
-
-    # Ensure directories exist
-    os.makedirs(templates_dir, exist_ok=True)
-    os.makedirs(static_dir, exist_ok=True)
-
-    # Mount static files
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-    # Setup Jinja2 templates with custom environment to avoid compatibility issues
-    from jinja2 import Environment, FileSystemLoader
-
-    jinja_env = Environment(
-        loader=FileSystemLoader(templates_dir),
-        autoescape=True,
-        cache_size=0  # Disable caching to avoid Jinja2 3.1.6 issues
-    )
-
-    class CustomTemplates:
-        def __init__(self, env):
-            self.env = env
-
-        def TemplateResponse(self, name, context, **kwargs):
-            from starlette.templating import _TemplateResponse
-            template = self.env.get_template(name)
-            return _TemplateResponse(template, context, **kwargs)
-
-    # Make templates available to routes
-    app.state.templates = CustomTemplates(jinja_env)
-
-    # Include routers
+    app.add_middleware(AuthMiddleware)
+    app.mount("/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
+    app.include_router(ui.router)
+    app.include_router(dashboard.router)
+    app.include_router(execution.router)
     app.include_router(pipelines.router)
     app.include_router(runs.router)
-    app.include_router(dashboard.router)
-    app.include_router(ui.router)
-
-    # Startup event
-    @app.on_event("startup")
-    def startup_event():
-        init_db()
-
-    # Exception handlers
-    @app.exception_handler(HTTPException)
-    def http_exception_handler(request: Request, exc: HTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail}
-        )
-
     return app
 
 
-# Create the app instance
-app = create_app()
+def get_app():
+    return create_app()
+
+
+app = get_app()

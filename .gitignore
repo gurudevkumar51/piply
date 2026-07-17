@@ -41,13 +41,20 @@ logs/
 
 # Testing
 .pytest_cache/
+.pytest_tmp/
+pytest_tmp*/
+pytest_basetemp*/
 .coverage
 htmlcov/
 .tox/
+dist/
+build/
+build_tmp/
 
 # Prefect
 .flow/
 .prefect/
-piply-demo/
-piply.db
+piply-demo/.piply/
+piply-demo/*.db
+piply-demo/pipelines/__pycache__/
 piply.db

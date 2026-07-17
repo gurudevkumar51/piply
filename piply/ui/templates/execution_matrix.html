@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}Execution Matrix - Piply{% endblock %}
+
+{% block content %}
+<div class="page-grid">
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Execution Matrix</div>
+            <h1 class="panel-title" style="font-size:1.55rem; margin:0;">Grid view</h1>
+            <p class="page-header-copy" style="margin:8px 0 0;">Tasks as rows, recent pipeline runs as columns, with direct access to logs and retry actions.</p>
+        </div>
+        <form class="filter-bar" method="get" action="/execution-matrix">
+            <select name="pipeline_id">
+                {% for pipeline in matrix.pipelines %}
+                <option value="{{ pipeline.pipeline_id }}" {% if pipeline.pipeline_id == matrix.selected_pipeline_id %}selected{% endif %}>{{ pipeline.title }}</option>
+                {% endfor %}
+            </select>
+            <select name="status">
+                <option value="">Any status</option>
+                {% for status in ["success", "failed", "interrupted", "running", "queued", "cancelled"] %}
+                <option value="{{ status }}" {% if matrix.filters.status == status %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+            </select>
+            <input name="tenant" value="{{ matrix.filters.tenant_id or '' }}" placeholder="tenant">
+            <button class="button secondary" type="submit">Filter</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Run duration trend</h2>
+                <p class="panel-copy">Columns below follow the same left-to-right order.</p>
+            </div>
+            <div class="legend-row">
+                <span class="status-badge success">success</span>
+                <span class="status-badge failed">failed</span>
+                <span class="status-badge interrupted">interrupted</span>
+                <span class="status-badge running">running</span>
+                <span class="status-badge skipped">skipped</span>
+                <span class="status-badge queued">retry</span>
+            </div>
+        </div>
+        <div class="runtime-chart matrix-trend">
+            {% set max_duration = matrix.trend | map(attribute='duration_seconds') | max if matrix.trend else 0 %}
+            {% for point in matrix.trend %}
+            {% set height = 10 + (point.duration_seconds / max_duration * 128 if max_duration else 0) %}
+            <a class="runtime-bar {{ point.status }}" href="/runs/{{ point.run_id }}" style="height: {{ height }}px;" title="{{ point.run_id }} · {{ '%.1fs'|format(point.duration_seconds) }}"></a>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="panel matrix-panel">
+        {% if matrix.runs %}
+        <div class="matrix-scroll">
+            <table class="execution-matrix-table">
+                <thead>
+                    <tr>
+                        <th class="task-col">Task</th>
+                        {% for run in matrix.runs %}
+                        <th>
+                            <a class="mono" href="/runs/{{ run.run_id }}">{{ run.run_id[:6] }}</a>
+                            <span class="matrix-run-status status-badge {{ run.status }}">{{ run.status }}</span>
+                        </th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in matrix.rows %}
+                    <tr>
+                        <th class="task-col">
+                            <div>{{ row.task.title }}</div>
+                            <span class="mono muted">{{ row.task.task_id }}</span>
+                        </th>
+                        {% for cell in row.cells %}
+                        <td>
+                            <button
+                                class="matrix-cell {{ cell.status }}"
+                                title="{{ cell.task_id }} · {{ cell.status }}"
+                                onclick="openMatrixCell('{{ cell.run_id }}', '{{ cell.task_id }}')"
+                            >
+                                <span>{{ cell.status }}</span>
+                                <small>{{ "%.1fs"|format(cell.duration_seconds) if cell.duration_seconds is not none else "-" }}</small>
+                            </button>
+                        </td>
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">No runs match the current matrix filters.</div>
+        {% endif %}
+    </section>
+</div>
+
+<div class="drawer-backdrop" id="matrix-drawer-backdrop" hidden onclick="closeMatrixDrawer()"></div>
+<aside class="side-drawer" id="matrix-drawer" aria-hidden="true">
+    <div class="drawer-header">
+        <div>
+            <div class="detail-label">Task run</div>
+            <h2 class="panel-title" id="matrix-drawer-title">Details</h2>
+        </div>
+        <button class="toolbar-button" type="button" onclick="closeMatrixDrawer()">Close</button>
+    </div>
+    <div id="matrix-drawer-body" class="stack"></div>
+</aside>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function openMatrixCell(runId, taskId) {
+    const drawer = document.getElementById("matrix-drawer");
+    const backdrop = document.getElementById("matrix-drawer-backdrop");
+    const body = document.getElementById("matrix-drawer-body");
+    document.getElementById("matrix-drawer-title").textContent = `${taskId} · ${runId}`;
+    body.innerHTML = '<div class="empty-state">Loading task details...</div>';
+    drawer.setAttribute("aria-hidden", "false");
+    backdrop.hidden = false;
+    try {
+        const payload = await piplyRequest(`/api/runs/${runId}/tasks/${taskId}`);
+        const logs = payload.logs || [];
+        const task = payload.task_run;
+        const output = payload.output;
+        body.innerHTML = `
+            <div class="task-stats">
+                <span class="status-badge ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span>
+                <span class="meta-pill">duration ${escapeHtml(formatDurationSeconds(task.duration_seconds))}</span>
+                <span class="meta-pill">logs ${task.log_count}</span>
+            </div>
+            <div class="inspector-section">
+                <div class="small-kicker">Command</div>
+                <pre class="code-block inspector-code">${escapeHtml(task.command_preview)}</pre>
+            </div>
+            ${output ? `<div class="inspector-section"><div class="small-kicker">Output preview</div><pre class="code-block inspector-code">${escapeHtml(output.preview)}</pre></div>` : ""}
+            ${task.error ? `<p class="footer-note">${escapeHtml(task.error)}</p>` : ""}
+            <div class="card-actions">
+                <a class="button secondary" href="/runs/${runId}">Open run</a>
+                <button class="button ghost" onclick="triggerTask('${payload.run.pipeline_id}', '${taskId}')">Run task</button>
+                ${["failed", "interrupted"].includes(payload.run.status) ? `<button class="button primary" onclick="retryRun('${runId}', 'resume', '${taskId}')">Retry from task</button>` : ""}
+            </div>
+            <div class="log-viewer">
+                ${logs.length ? logs.slice(0, 80).map((line) => `
+                    <div class="log-line">
+                        <time>${escapeHtml(line.time_label)}</time>
+                        <div class="log-task">${escapeHtml(line.task_id || "pipeline")}</div>
+                        <div class="log-message">${escapeHtml(line.message)}</div>
+                    </div>
+                `).join("") : '<div class="empty-state">No logs for this task.</div>'}
+            </div>
+        `;
+    } catch (error) {
+        body.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function closeMatrixDrawer() {
+    document.getElementById("matrix-drawer").setAttribute("aria-hidden", "true");
+    document.getElementById("matrix-drawer-backdrop").hidden = true;
+}
+</script>
+{% endblock %}

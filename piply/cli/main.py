@@ -1,321 +1,680 @@
-import typer
-import os
-import json
-from pathlib import Path
-from typing import List, Optional
-from piply.runner import run_pipeline
-from piply.parser.yaml_parser import load_pipeline
-from piply.engine.local_engine import LocalEngine
-from piply.engine.prefect_engine import PrefectEngine
-from piply.utils.logging import logger, setup_logger
+"""CLI entry points for validating, running, and serving Piply projects."""
 
-app = typer.Typer()
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+from pathlib import Path
+
+import typer
+import uvicorn
+
+from piply.core.loader import ConfigError, discover_config, load_project
+from piply.core.service import PipelineService
+from piply.settings import load_settings
+
+app = typer.Typer(help="Piply: lightweight orchestration for task-based Python workflows.")
+tasks_app = typer.Typer(help="Inspect pipeline tasks.")
+app.add_typer(tasks_app, name="tasks")
+RUN_PARAM_OPTION = typer.Option(
+    None,
+    "--param",
+    help="Run parameter as KEY=VALUE. Repeat for multiple params; JSON values are accepted.",
+)
+TASK_PARAM_OPTION = typer.Option(
+    None,
+    "--param",
+    help="Run parameter as KEY=VALUE. Repeat for multiple params; JSON values are accepted.",
+)
+
+
+def _show_version(value: bool) -> None:
+    """Print the installed Piply version for the top-level CLI option."""
+    if not value:
+        return
+    try:
+        current_version = package_version("mr-piply")
+    except PackageNotFoundError:
+        current_version = "0.1.6"
+    typer.echo(current_version)
+    raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Show the Piply version and exit.",
+        is_eager=True,
+        callback=_show_version,
+    ),
+) -> None:
+    """Piply command-line application."""
+
+
+def _resolve_config(config: str | None) -> Path:
+    if config:
+        return Path(config).resolve()
+    return discover_config()
+
+
+def _server_command(host: str, port: int, reload: bool) -> list[str]:
+    """Build the reusable uvicorn command for foreground and detached start."""
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "piply.api.app:create_app",
+        "--factory",
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
+    if reload:
+        command.append("--reload")
+    return command
+
+
+def _parse_params(param_items: list[str] | None) -> dict[str, object]:
+    """Parse repeated KEY=VALUE CLI params, preserving JSON scalars when supplied."""
+    parsed: dict[str, object] = {}
+    for item in param_items or []:
+        if "=" not in item:
+            raise typer.BadParameter("--param must use KEY=VALUE.")
+        key, raw_value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise typer.BadParameter("--param keys cannot be empty.")
+        try:
+            parsed[key] = json.loads(raw_value)
+        except json.JSONDecodeError:
+            parsed[key] = raw_value
+    return parsed
 
 
 @app.command()
 def init(
-    project_name: Optional[str] = typer.Option(
-        None, "--name", "-n", help="Project name"),
-    engine: str = typer.Option(
-        "prefect", "--engine", "-e", help="Execution engine (prefect or local)")
-):
-    """Initialize a new piply project with a sample piply.yaml."""
-    config_content = f"""
-pipeline:
-  name: {project_name or "my_pipeline"}
-  schedule: "0 0 * * *"  # Daily at midnight (optional)
-  retries: 1
-  timeout: 3600  # seconds (optional)
-  variables:
-    environment: "dev"
+    directory: str = typer.Argument(".", help="Directory to scaffold the project in."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing files."),
+) -> None:
+    target_dir = Path(directory).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
 
-  steps:
-    - name: extract_data
-      type: python
-      function: "pipelines.extract.main"
-      retries: 2
-      retry_delay: 30
+    config_path = target_dir / "piply.yaml"
+    pipelines_dir = target_dir / "pipelines"
+    sensor_inbox_dir = target_dir / "sensor_inbox"
+    extract_path = pipelines_dir / "extract.py"
+    report_path = pipelines_dir / "report.py"
+    validate_path = pipelines_dir / "validate_cli.py"
 
-    - name: transform_data
-      type: shell
-      command: "echo 'Transforming data...'"
-      depends_on:
-        - extract_data
+    if config_path.exists() and not force:
+        raise typer.BadParameter(f"{config_path} already exists. Use --force to overwrite it.")
 
-    - name: load_to_warehouse
-      type: dbt
-      command: "run"
-      models:
-        - "staging"
-        - "marts"
-      depends_on:
-        - transform_data
-"""
-    config_path = Path("piply.yaml")
-    if config_path.exists():
-        overwrite = typer.confirm("piply.yaml already exists. Overwrite?")
-        if not overwrite:
-            typer.echo("Aborted.")
-            raise typer.Abort()
+    pipelines_dir.mkdir(parents=True, exist_ok=True)
+    sensor_inbox_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Piply Workspace",
+                "workspace: .",
+                "variables:",
+                "  scripts_dir: pipelines",
+                "  batch_id: demo-batch",
+                "  conda_env: py312_extract",
+                "defaults:",
+                "  python: python",
+                "  env:",
+                "    PIPLY_ENV: development",
+                "",
+                "secrets:",
+                "  backend: env",
+                "  prefix: PIPLY_SECRET_",
+                "",
+                "connections:",
+                "  local_sensor_db: sqlite:///sensor_demo.db",
+                "  warehouse: ${secret:WAREHOUSE_DSN}",
+                "",
+                "pipelines:",
+                "  extract_flow:",
+                "    title: Extract Flow",
+                "    description: Multi-task starter pipeline with context passing and a downstream trigger.",
+                "    schedule:",
+                "      every: 15m",
+                "    retry:",
+                "      attempts: 2",
+                "      mode: resume",
+                "      delay_seconds: 10",
+                "    max_parallel_tasks: 2",
+                "    triggers_on_success:",
+                "      - report_flow",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: pipelines/extract.py",
+                "        function: extract_data",
+                "        kwargs:",
+                "          records: 120",
+                "",
+                "      transform:",
+                "        type: python",
+                "        path: pipelines/extract.py",
+                "        function: transform_data",
+                "        depends_on: [extract]",
+                "      validate:",
+                "        type: cli",
+                "        command: python {scripts_dir}/validate_cli.py {batch_id}",
+                "        cwd: .",
+                "        depends_on: [transform]",
+                "      publish_manifest:",
+                "        type: cli",
+                "        command: python -c \"print('Publishing manifest for downstream flow...')\"",
+                "        depends_on: [transform]",
+                "  report_flow:",
+                "    title: Report Flow",
+                "    description: Triggered automatically after extract_flow succeeds.",
+                "    tasks:",
+                "      build_report:",
+                "        type: python",
+                "        path: pipelines/report.py",
+                "        function: build_report",
+                "        kwargs:",
+                "          report_name: starter-report",
+                "",
+                "  entity_mapping_examples:",
+                "    title: Entity Mapping Examples",
+                "    description: Disabled reference pipeline showing runtime task expansion with entities.",
+                "    enabled: false",
+                "    entities:",
+                "      report:",
+                "        - payment",
+                "        - adjustment",
+                "        - refund",
+                "    max_parallel_tasks: 3",
+                "    tasks:",
+                "      extract_report:",
+                "        type: python",
+                "        path: pipelines/extract.py",
+                "        function: extract_data",
+                "        kwargs:",
+                "          records: 25",
+                '          report: "{report}"',
+                "      validate_report:",
+                "        type: cli",
+                "        command: python {scripts_dir}/validate_cli.py {report}",
+                "        cwd: .",
+                "        depends_on: [extract_report]",
+                "      summarize_reports:",
+                "        type: python",
+                "        path: pipelines/extract.py",
+                "        function: summarize_reports",
+                "        entities: false",
+                "        depends_on: [validate_report]",
+                "",
+                "  operator_examples:",
+                "    title: Operator Examples",
+                "    description: Disabled reference pipeline showing every built-in operator type.",
+                "    enabled: false",
+                "    tasks:",
+                "      cli_example:",
+                "        type: cli",
+                "        command: python -c \"print('cli operator ok')\"",
+                "      bash_env_example:",
+                "        type: cli",
+                "        shell: bash",
+                "        command: set -a && source .env && set +a && conda run -n {conda_env} python {scripts_dir}/validate_cli.py ${APP_BATCH_ID}",
+                "        cwd: .",
+                "        depends_on: [cli_example]",
+                "      api_example:",
+                "        type: api",
+                "        url: https://example.com/api/ping",
+                "        method: GET",
+                "        expected_status: [200]",
+                "      webhook_example:",
+                "        type: webhook",
+                "        url: https://example.com/webhook",
+                "        method: POST",
+                '        body: \'{"event":"piply-demo"}\'',
+                "        depends_on: [cli_example]",
+                "        on_upstream_failure: continue",
+                "      email_example:",
+                "        type: email",
+                "        smtp_host: ${SMTP_HOST}",
+                "        smtp_user: ${SMTP_USER}",
+                "        smtp_password: ${SMTP_PASSWORD}",
+                "        to: [team@example.com]",
+                "        subject: Piply starter notification",
+                "        body: Starter notification from Piply.",
+                "        depends_on: [cli_example]",
+                "        on_upstream_failure: skip",
+                "      ssh_example:",
+                "        type: ssh",
+                "        host: localhost",
+                "        user: ${SSH_USER}",
+                "        command: echo piply-ssh-ok",
+                "        depends_on: [cli_example]",
+                "        on_upstream_failure: fail",
+                "",
+                "  sensor_examples:",
+                "    title: Sensor Examples",
+                "    description: Disabled reference pipeline showing file, SQL, and API sensors.",
+                "    enabled: false",
+                "    sensors:",
+                "      inbox_files:",
+                "        type: file_sensor",
+                "        path: sensor_inbox",
+                "        pattern: '*.csv'",
+                "        ignore_existing: true",
+                "      inbound_rows:",
+                "        type: sql_sensor",
+                "        connection_ref: local_sensor_db",
+                "        table: inbound_events",
+                "        cursor_column: id",
+                "        ignore_existing: true",
+                "      external_api:",
+                "        type: api_sensor",
+                "        url: https://example.com/api/events",
+                "        method: GET",
+                "        cursor_path: version",
+                "        expected_status: [200]",
+                "        ignore_existing: true",
+                "    tasks:",
+                "      inspect_event:",
+                "        type: cli",
+                "        command: python -c \"print('sensor event received')\"",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-    config_path.write_text(config_content.strip())
-    typer.echo(f"✓ Created {config_path}")
+    extract_path.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import argparse",
+                "import time",
+                "",
+                "",
+                "def parse_args() -> argparse.Namespace:",
+                "    parser = argparse.ArgumentParser()",
+                "    parser.add_argument('--records', type=int, default=100)",
+                "    return parser.parse_args()",
+                "",
+                "",
+                "def extract_data(records: int = 100, report: str = 'default') -> dict[str, object]:",
+                "    print(f'Extracting {records} records for {report}...')",
+                "    for step in range(1, 4):",
+                "        print(f'Chunk {step}/3 complete')",
+                "        time.sleep(0.3)",
+                "    print('Extract complete')",
+                "    return {'records': records, 'chunks': 3, 'report': report}",
+                "",
+                "",
+                "def transform_data(context: dict[str, object]) -> dict[str, object]:",
+                "    extracted = context.get('extract') or {}",
+                "    if not isinstance(extracted, dict):",
+                "        extracted = {}",
+                "    records = int(extracted.get('records') or 0)",
+                "    transformed = {'records': records + 1, 'source': 'extract_flow', 'report': extracted.get('report')}",
+                '    print(f"Transformed payload: {transformed}")',
+                "    return transformed",
+                "",
+                "",
+                "def summarize_reports(context: dict[str, object]) -> dict[str, object]:",
+                "    mapped = context.get('mapped') or {}",
+                "    validate_outputs = mapped.get('validate_report') if isinstance(mapped, dict) else {}",
+                "    if not isinstance(validate_outputs, dict):",
+                "        validate_outputs = {}",
+                "    print(f'Summarized mapped reports: {sorted(validate_outputs)}')",
+                "    return {'reports': sorted(validate_outputs)}",
+                "",
+                "",
+                "def main() -> None:",
+                "    args = parse_args()",
+                "    extract_data(records=args.records)",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    main()",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-    # Create example Python module
-    example_dir = Path("pipelines")
-    example_dir.mkdir(exist_ok=True)
+    report_path.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_report(report_name: str = 'starter-report', context: dict[str, object] | None = None) -> str:",
+                "    context = context or {}",
+                "    upstream = context.get('transform') or context.get('upstream') or {}",
+                "    if isinstance(upstream, dict) and 'transform' in upstream:",
+                "        upstream = upstream['transform']",
+                "    if isinstance(upstream, dict):",
+                "        record_count = upstream.get('records')",
+                "    else:",
+                "        record_count = None",
+                "    print(f'Generating downstream report: {report_name}')",
+                "    if record_count is not None:",
+                "        print(f'Upstream records: {record_count}')",
+                "    print('Report complete.')",
+                "    return report_name",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-    extract_file = example_dir / "extract.py"
-    extract_file.write_text('''
-def main(context):
-    """Extract data from source."""
-    print(f"Extracting data for tenant: {context.tenant}")
-    # Your extraction logic here
-    return {"status": "success", "rows": 1000}
-''')
-    typer.echo(f"✓ Created {extract_file}")
+    validate_path.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import sys",
+                "",
+                "",
+                "def main() -> None:",
+                "    batch_id = sys.argv[1] if len(sys.argv) > 1 else 'manual'",
+                "    print(f'Validating batch {batch_id}')",
+                "    print('Validation complete')",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    main()",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-    typer.echo("\nNext steps:")
-    typer.echo("  1. Edit piply.yaml to customize your pipeline")
-    typer.echo("  2. Run: piply run")
-    typer.echo("  3. Add more steps as needed")
+    typer.echo(f"Created {config_path}")
+    typer.echo(f"Created {extract_path}")
+    typer.echo(f"Created {report_path}")
+    typer.echo(f"Created {validate_path}")
+    typer.echo(f"Created {sensor_inbox_dir}")
+    typer.echo("Run `piply validate` and `piply start` to launch the UI.")
+
+
+@app.command()
+def validate(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    try:
+        config_path = _resolve_config(config)
+        project = load_project(config_path)
+    except (ConfigError, FileNotFoundError) as exc:
+        typer.echo(f"Validation failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Config: {config_path}")
+    typer.echo(f"Project: {project.title}")
+    typer.echo(f"Pipelines: {len(project.pipelines)}")
+    for pipeline in project.pipelines.values():
+        typer.echo(
+            f"  - {pipeline.pipeline_id}: {pipeline.task_count} tasks | triggers {list(pipeline.triggers_on_success) or ['none']}"
+        )
+
+
+@app.command("list")
+def list_pipelines(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    for summary in service.list_pipelines():
+        status = "paused" if summary.paused else "enabled"
+        typer.echo(f"{summary.pipeline_id} [{status}]")
+        typer.echo(f"  {summary.schedule_text}")
+        typer.echo(f"  {summary.task_count} tasks | {summary.execution_summary}")
+        typer.echo(f"  {summary.command_preview}")
+
+
+@tasks_app.command("list")
+def list_tasks(
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    pipeline = service.get_pipeline(pipeline_id)
+    for task in pipeline.tasks.values():
+        deps = ", ".join(task.depends_on) if task.depends_on else "none"
+        typer.echo(f"{task.task_id} [{task.task_type}]")
+        typer.echo(f"  depends_on: {deps}")
+        typer.echo(f"  command: {task.command_preview}")
 
 
 @app.command()
 def run(
-    file: str = typer.Option("piply.yaml", "--file",
-                             "-f", help="Path to pipeline YAML"),
-    engine: str = typer.Option(
-        "local", "--engine", "-e", help="Execution engine (prefect, local, auto; default: local)"),
-    tenant: Optional[str] = typer.Option(
-        None, "--tenant", "-t", help="Run for specific tenant only"),
-    retry_failed: bool = typer.Option(
-        False, "--retry-failed", help="Only retry failed steps")
-):
-    """Run a pipeline."""
-    if not os.path.exists(file):
-        typer.echo(f"Error: File '{file}' not found")
-        raise typer.Exit(1)
-
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier to run."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    tenant: str | None = typer.Option(None, "--tenant", help="Tenant id to attach to this run."),
+    param: list[str] | None = RUN_PARAM_OPTION,
+    wait: bool = typer.Option(
+        True,
+        "--wait/--detach",
+        help="Wait and stream logs in the terminal.",
+    ),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
     try:
-        # Set log level
-        setup_logger(level="INFO")
+        params = _parse_params(param)
+        initial_context = {"params": params} if params else {}
+        run_record = service.trigger_pipeline(
+            pipeline_id,
+            trigger="manual",
+            wait=wait,
+            on_log=typer.echo if wait else None,
+            tenant_id=tenant,
+            initial_context=initial_context,
+        )
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
 
-        typer.echo(f"Loading pipeline from {file}...")
-        pipeline = load_pipeline(file)
+    typer.echo(f"Run ID: {run_record.run_id}")
+    if wait:
+        run_record, _, _ = service.get_run(run_record.run_id)
+        typer.echo(f"Finished with status: {run_record.status}")
+        if run_record.error:
+            typer.echo(run_record.error)
+            raise typer.Exit(code=1)
 
-        # Select engine
-        engine_lower = engine.lower()
-        if engine_lower == "auto":
-            typer.echo("Auto-selecting engine...")
-            try:
-                eng = PrefectEngine()
-                typer.echo("Using Prefect engine")
-            except Exception as e:
-                typer.echo(f"Prefect not available ({e}), using local engine")
-                eng = LocalEngine()
-        elif engine_lower == "prefect":
-            try:
-                eng = PrefectEngine()
-            except Exception as e:
-                typer.echo(f"Warning: Prefect initialization failed: {e}")
-                typer.echo("Falling back to local engine...")
-                eng = LocalEngine()
-        elif engine_lower == "local":
-            eng = LocalEngine()
-        else:
-            typer.echo(
-                f"Error: Unknown engine '{engine}'. Use 'prefect', 'local', or 'auto'")
-            raise typer.Exit(1)
 
-        # Run pipeline
-        try:
-            pipeline.run(eng, tenant=tenant, retry_failed=retry_failed)
-        except FileNotFoundError as e:
-            # Prefect SSL/certificate errors
-            typer.echo(
-                f"\nError: Prefect encountered a configuration issue: {e}")
-            typer.echo(
-                "This usually means Prefect is trying to connect to a server.")
-            typer.echo("Please use the local engine instead:")
-            typer.echo("  piply run --engine local")
-            raise typer.Exit(1)
-        except Exception as e:
-            typer.echo(f"Error: {e}")
-            logger.exception("Pipeline execution failed")
-            raise typer.Exit(1)
+@tasks_app.command("retry")
+def retry_task(
+    run_id: str = typer.Argument(..., help="Failed run identifier."),
+    task_id: str = typer.Argument(..., help="Failed task identifier to retry from."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    mode: str = typer.Option("resume", "--mode", help="Retry mode: resume or startover."),
+    wait: bool = typer.Option(True, "--wait/--detach", help="Wait and stream logs in the terminal."),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"resume", "startover"}:
+        raise typer.BadParameter("--mode must be 'resume' or 'startover'.")
+    try:
+        run_record = service.retry_run(
+            run_id,
+            mode=normalized_mode,  # type: ignore[arg-type]
+            task_id=task_id,
+            wait=wait,
+            on_log=typer.echo if wait else None,
+        )
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
 
-    except Exception as e:
-        typer.echo(f"Error: {e}")
-        logger.exception("Pipeline execution failed")
-        raise typer.Exit(1)
+    typer.echo(f"Run ID: {run_record.run_id}")
+    if wait:
+        run_record, _, _ = service.get_run(run_record.run_id)
+        typer.echo(f"Finished with status: {run_record.status}")
+        if run_record.error:
+            typer.echo(run_record.error)
+            raise typer.Exit(code=1)
 
 
 @app.command()
-def list_dags(
-    directory: str = typer.Option(
-        ".", "--dir", "-d", help="Directory to scan for pipeline files")
-):
-    """List all available pipelines (DAGs)."""
-    typer.echo("\nAvailable Pipelines:")
-    typer.echo("=" * 60)
-
-    # Look for YAML files
-    yaml_files = list(Path(directory).glob("*.yaml")) + \
-        list(Path(directory).glob("*.yml"))
-
-    if not yaml_files:
-        typer.echo("No pipeline YAML files found.")
-        return
-
-    for yaml_file in yaml_files:
-        try:
-            pipeline = load_pipeline(str(yaml_file))
-            status = "✓"
-            typer.echo(f"{status} {pipeline.name:30} ({yaml_file.name})")
-            typer.echo(
-                f"   Steps: {len(pipeline.steps)}, Tenants: {len(pipeline.tenants)}")
-        except Exception as e:
-            typer.echo(f"✗ {yaml_file.name:30} (Error: {e})")
-
-
-@app.command()
-def test(
-    pipeline_file: str = typer.Argument(..., help="Path to pipeline YAML"),
-    tenant: Optional[str] = typer.Option(
-        None, "--tenant", "-t", help="Test with specific tenant")
-):
-    """Test pipeline execution (dry run with local engine)."""
-    typer.echo(f"Testing pipeline: {pipeline_file}")
-
-    try:
-        pipeline = load_pipeline(pipeline_file)
-        typer.echo(f"  Name: {pipeline.name}")
-        typer.echo(f"  Steps: {[s.name for s in pipeline.steps]}")
-        typer.echo(f"  Tenants: {pipeline.tenants or ['none']}")
-
-        # Run with local engine for testing
-        engine = LocalEngine()
-        pipeline.run(engine, tenant=tenant)
-
-        typer.echo("\n✓ Test completed successfully")
-    except Exception as e:
-        typer.echo(f"\n✗ Test failed: {e}")
-        raise typer.Exit(1)
-
-
-@app.command()
-def tasks_list(
-    pipeline_file: str = typer.Argument(..., help="Path to pipeline YAML")
-):
-    """List tasks in a pipeline."""
-    try:
-        pipeline = load_pipeline(pipeline_file)
-        typer.echo(f"\nTasks in pipeline '{pipeline.name}':")
-        typer.echo("=" * 60)
-
-        for i, step in enumerate(pipeline.steps, 1):
-            deps = ", ".join(step.depends_on) if step.depends_on else "none"
-            typer.echo(f"{i}. {step.name}")
-            typer.echo(f"   Type: {step.config.get('type', 'unknown')}")
-            typer.echo(f"   Depends on: {deps}")
-            typer.echo(f"   Retries: {step.retries}")
-            typer.echo()
-    except Exception as e:
-        typer.echo(f"Error: {e}")
-        raise typer.Exit(1)
-
-
-@app.command()
-def tasks_run(
-    pipeline_file: str = typer.Argument(..., help="Path to pipeline YAML"),
-    task: Optional[str] = typer.Option(
-        None, "--task", "-t", help="Run specific task only"),
-    all_tasks: bool = typer.Option(False, "--all", "-a", help="Run all tasks"),
-    engine: str = typer.Option(
-        "local", "--engine", "-e", help="Execution engine")
-):
-    """Run specific tasks or all tasks."""
-    if not task and not all_tasks:
-        typer.echo("Error: Must specify either --task or --all")
-        raise typer.Exit(1)
-
-    try:
-        pipeline = load_pipeline(pipeline_file)
-
-        if task:
-            # Run specific task
-            step = next((s for s in pipeline.steps if s.name == task), None)
-            if not step:
-                typer.echo(f"Error: Task '{task}' not found in pipeline")
-                raise typer.Exit(1)
-
-            typer.echo(f"Running task: {step.name}")
-            if engine.lower() == "prefect":
-                eng = PrefectEngine()
-            else:
-                eng = LocalEngine()
-
-            # Create a minimal pipeline with just this task
-            from piply.core.pipeline import Pipeline as NewPipeline
-            single_pipeline = NewPipeline(
-                name=pipeline.name,
-                steps=[step],
-                tenants=pipeline.tenants
-            )
-            single_pipeline.run(eng)
-        else:
-            # Run all tasks
-            typer.echo("Running all tasks...")
-            if engine.lower() == "prefect":
-                eng = PrefectEngine()
-            else:
-                eng = LocalEngine()
-            pipeline.run(eng)
-
-    except Exception as e:
-        typer.echo(f"Error: {e}")
-        raise typer.Exit(1)
+def runs(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    limit: int = typer.Option(20, "--limit", help="Number of runs to show."),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    for run_record in service.list_runs(limit=limit):
+        typer.echo(
+            f"{run_record.run_id}  {run_record.pipeline_id}  {run_record.status}  {run_record.successful_tasks}/{run_record.task_count} tasks"
+        )
 
 
 @app.command()
 def logs(
-    pipeline_file: str = typer.Argument(..., help="Path to pipeline YAML"),
-    task: Optional[str] = typer.Option(
-        None, "--task", "-t", help="Show logs for specific task"),
-    follow: bool = typer.Option(
-        False, "--follow", "-f", help="Follow log output")
-):
-    """View pipeline logs."""
-    typer.echo("Logs command not yet implemented.")
-    typer.echo("Currently, logs are printed to stdout during execution.")
-    if task:
-        typer.echo(f"Would show logs for task: {task}")
-    else:
-        typer.echo("Would show pipeline logs")
+    run_id: str = typer.Argument(..., help="Run ID to fetch logs for."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        _, _, raw_logs = service.get_run(run_id)
+        # raw logs are returned newest first, we reverse them to print chronologically in terminal
+        for log in reversed(raw_logs):
+            typer.echo(f"[{log.created_at.strftime('%H:%M:%S.%f')[:-3]}] [{log.task_id or 'pipeline'}] {log.message}")
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+
+@tasks_app.command("run")
+def run_task(
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier."),
+    task_id: str = typer.Argument(..., help="Task identifier."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    tenant: str | None = typer.Option(None, "--tenant", help="Tenant id to attach to this task-scoped run."),
+    param: list[str] | None = TASK_PARAM_OPTION,
+    wait: bool = typer.Option(True, "--wait/--detach", help="Wait and stream logs in the terminal."),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        params = _parse_params(param)
+        initial_context = {"params": params} if params else {}
+        run_record = service.trigger_task(
+            pipeline_id,
+            task_id,
+            trigger="task",
+            wait=wait,
+            on_log=typer.echo if wait else None,
+            tenant_id=tenant,
+            initial_context=initial_context,
+        )
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Run ID: {run_record.run_id}")
+    if wait:
+        run_record, _, _ = service.get_run(run_record.run_id)
+        typer.echo(f"Finished with status: {run_record.status}")
+        if run_record.error:
+            typer.echo(run_record.error)
+            raise typer.Exit(code=1)
 
 
 @app.command()
+def pause(
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier to pause."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.set_pipeline_paused(pipeline_id, True)
+        typer.echo(f"Pipeline '{pipeline_id}' scheduled runs paused.")
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def resume(
+    pipeline_id: str = typer.Argument(..., help="Pipeline identifier to resume."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.set_pipeline_paused(pipeline_id, False)
+        typer.echo(f"Pipeline '{pipeline_id}' scheduled runs resumed.")
+    except KeyError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def stop(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    service = PipelineService(config_path=_resolve_config(config))
+    service.store.set_meta("shutdown_requested", "true")
+    typer.echo("Shutdown requested. The background server will exit gracefully within a few seconds.")
+
+
+@app.command()
+def start(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(8000, "--port", help="Bind port."),
+    reload: bool = typer.Option(False, "--reload", help="Enable auto reload."),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run the web server in the background."),
+) -> None:
+    config_path = _resolve_config(config)
+    settings = load_settings(config_path)
+    environment = os.environ.copy()
+    environment["PIPLY_CONFIG"] = str(config_path)
+    if settings.database_path is not None:
+        environment["PIPLY_DATABASE"] = str(settings.database_path)
+
+    if detach:
+        if reload:
+            raise typer.BadParameter("--reload cannot be used with --detach.")
+        log_dir = config_path.parent / ".piply"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "server.log"
+        command = _server_command(host, port, reload=False)
+        popen_kwargs: dict[str, object] = {
+            "args": command,
+            "env": environment,
+            "stdout": log_path.open("a", encoding="utf-8"),
+            "stderr": subprocess.STDOUT,
+            "cwd": str(Path.cwd()),
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+        process = subprocess.Popen(**popen_kwargs)
+        typer.echo(f"Piply started in background on http://{host}:{port}")
+        typer.echo(f"PID: {process.pid}")
+        typer.echo(f"Logs: {log_path}")
+        return
+
+    os.environ["PIPLY_CONFIG"] = str(config_path)
+    if settings.database_path is not None:
+        os.environ["PIPLY_DATABASE"] = str(settings.database_path)
+    typer.echo(f"Using config: {config_path}")
+    typer.echo(f"Starting Piply on http://{host}:{port}")
+    uvicorn.run("piply.api.app:create_app", factory=True, host=host, port=port, reload=reload)
+
+
+@app.command(hidden=True)
 def ui(
-    host: str = typer.Option("0.0.0.0", "--host", "-h",
-                             help="Host to bind to"),
-    port: int = typer.Option(8000, "--port", "-p", help="Port to bind to"),
-    reload: bool = typer.Option(
-        False, "--reload", "-r", help="Enable auto-reload for development")
-):
-    """Start the Piply web UI server."""
-    import uvicorn
-    from piply.api.app import app as fastapi_app
-
-    typer.echo(f"Starting Piply UI server on http://{host}:{port}")
-    typer.echo("Press Ctrl+C to stop")
-
-    uvicorn.run(
-        fastapi_app,
-        host=host,
-        port=port,
-        reload=reload
-    )
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(8000, "--port", help="Bind port."),
+    reload: bool = typer.Option(False, "--reload", help="Enable auto reload."),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run the web server in the background."),
+) -> None:
+    start(config=config, host=host, port=port, reload=reload, detach=detach)
 
 
 if __name__ == "__main__":
