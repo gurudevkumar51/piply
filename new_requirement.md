@@ -394,3 +394,15 @@ Every new feature should align with Piply's core philosophy:
 * **Lightweight** — avoid unnecessary infrastructure or heavy dependencies.
 * **Backward compatible** — existing pipelines should continue to work without modification.
 * **Observable and reliable** — provide clear logs, metrics, health status, and recovery mechanisms.
+
+
+## UI Requirement
+- In run page & graph view downstream pipelines are not visible, Ideally it should be shown as DAG view with running/failed/success/skipped/queued status, on click redirect to that pipeline run page
+- 
+
+
+## Important
+
+- backfill: rememebr all config of any run for backfill in future.
+- Pipeline page: view should be similar to Airflow Dag page
+- in run page downstream pipeline is not visible. 
