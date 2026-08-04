@@ -1,328 +1,247 @@
-# Feature Request: Runtime Recovery, UI Improvements, Documentation & Technical Architecture Guide
+# Piply – Pending Requirement Summary
+## 1. Pipeline Architecture
+In Pipeline Templates & Deployments
 
-## Objective
+Introduced an optional deployment architecture while maintaining full backward compatibility.
 
-Improve runtime reliability, scheduler state management, UI usability, and project maintainability.
+Requirements:
+Maintain compatibility with dynamic task expansion.
+variables, env & all other settings/policies, inherit from deployment
+Provide migration strategy and updated documentation.
 
-Additionally create deep technical documentation that allows future developers to understand and modify the project safely.
+## 2. Runtime Reliability
+Startup & Shutdown Recovery
 
----
+Implement robust runtime recovery to prevent stale execution states.
 
-# 1. Runtime State Recovery
+Requirements
+Graceful shutdown handling.
+Mark running pipelines/tasks as Interrupted (or another terminal state).
+Prevent orphaned RUNNING records.
+Startup reconciliation for interrupted executions.
+Accurate scheduler health detection.
+Automated tests for:
+Ctrl+C
+scheduler restart
+crash recovery
+unexpected termination.
+## 3. Scheduler Improvements
+Task Priority
 
-## Current Problem
-
-When a running pipeline is interrupted using Ctrl+C:
-
-* Pipeline execution shold stop.
-* Running tasks remain shows in RUNNING state.
-* Running pipeline remains shows in RUNNING state.
-* After restart, stale RUNNING records remain visible.
-* Scheduler indicator remains green.
-
-This causes state inconsistency.
-
----
-
-## Requirements
-
-### Graceful Shutdown
-
-Implement proper shutdown handling.
-
-When shutdown occurs:
-
-* Stop scheduling new work.
-* Stop accepting new executions.
-* Persist final state.
-* Mark active runs appropriately.
-
-Recommended terminal state:
-
-* INTERRUPTED
-
-Alternative acceptable states:
-
-* ABORTED
-* CANCELLED
-
-No task should remain permanently RUNNING.
-
----
-
-### Startup Recovery
-
-On application startup:
-
-* Detect orphaned runs.
-* Detect orphaned tasks.
-* Reconcile state.
-* Convert stale RUNNING records into terminal state.
-* Restore system consistency.
-
----
-
-### Scheduler Health
-
-Scheduler status indicator must reflect actual scheduler state.
+Support execution priority for runnable tasks.
 
 Requirements:
 
-* Green only when scheduler is active.
-* Red/gray when scheduler is inactive.
-* Detect scheduler crashes.
-* Detect scheduler shutdown.
-* Automatically update UI.
+Explicit priority configuration.
+Optional shorthand notation.
+Scheduler executes higher-priority runnable tasks first.
+Dependency order must always take precedence.
+Display priority in UI and DAG.
+Task & Pipeline Timeout
 
----
-
-### Testing
-
-Add automated tests for:
-
-* Ctrl+C interruption
-* Unexpected process termination
-* Scheduler crash
-* Scheduler restart
-* State recovery
-
----
-
-# 2. Pipeline Details Page Improvements
-
-Page:
-
-Pipeline Details
-
-Current issue:
-
-Two metadata sections appear before DAG graph.
-
-This reduces DAG visibility.
+Add configurable execution timeout.
 
 Requirements:
 
-* Merge metadata sections into a single section.
-* Reduce vertical space.
-* Improve information density.
-* Make DAG graph visible earlier.
-* Preserve responsiveness.
+Task-level timeout.
+Future pipeline-level timeout.
+Graceful process termination.
+Timeout status tracking.
+Timeout reason in logs.
+Configurable kill grace period.
+UI support.
+## 4. Pipeline Operations
+Dry Run
 
----
+Implement execution preview without running tasks.
 
-# 3. Run Details Page Improvements
+Display:
 
-## Button Label
+DAG
+execution order
+resolved variables
+expanded entities
+interpolated commands.
+Log Streaming
 
-Current:
+Add real-time log streaming.
 
-Rerun Run
+piply logs --follow
 
-Replace with:
+Support filtering by:
 
-Re-Run
+pipeline
+run
+task
 
-Apply consistently across the application.
+Optional colored output.
 
----
+Retention & Cleanup
 
-## Task Focus Section
+Implement runtime cleanup.
 
-Current issue:
-
-Consumes excessive screen space.
+piply prune
 
 Requirements:
 
-* Make collapsible.
-* Make expandable.
-* Preserve state.
-* Do not reload DAG data.
-* Improve graph viewing area.
-* Support smaller screens.
+remove old runs
+remove logs
+remove artifacts
+configurable retention
+automatic SQLite VACUUM.
+## 5. Monitoring & Observability
+Prometheus Metrics
 
----
+Expose runtime metrics through:
 
-# 4. Documentation Updates
-
-Update all existing documentation.
+GET /metrics
 
 Include:
 
-* YAML specification
-* Runtime architecture
-* Scheduler behavior
-* Recovery mechanism
-* UI documentation
-* State lifecycle
-* Retry lifecycle
-* Task execution lifecycle
-* Pipeline execution lifecycle
+run counts
+success/failure counts
+running tasks
+queue size
+scheduler health
+execution duration.
+Runtime Diagnostics
 
-Include examples.
+Add a diagnostics page displaying:
 
----
+scheduler health
+workers
+running tasks
+queue size
+sensor health
+reconciliation status
+scheduler heartbeat.
+Sensor Health
 
-# 5. Create Deep Technical Architecture Documentation
+Improve visibility into sensor failures.
 
-Create a dedicated technical document intended for future maintainers and contributors.
+Requirements:
 
-Goal:
+log polling failures
+display latest error
+maintain sensor health status
+surface scheduler polling issues.
+## 6. User Interface
+Pipeline Page
 
-Allow someone unfamiliar with the project to quickly understand the complete architecture and safely perform major future changes.
+Improve Pipeline listing page.
 
-Suggested file:
+Requirements:
 
-docs/architecture/technical_architecture.md
+Airflow-like DAG listing experience.
+Show last execution date/time.
+Reduce card size.
+Remove unnecessary summary/details from grid view.
+Run Details
 
----
+Improve run visualization.
 
-## Document Requirements
+Requirements:
 
-### High-Level Architecture
+Display downstream pipelines in DAG.
+Show downstream execution status.
+Allow navigation to downstream pipeline run.
+Preserve graph visibility on smaller screens.
+Pipeline Details
 
-Explain:
+Improve information density.
 
-* System overview
-* Core concepts
-* Execution flow
+Requirements:
 
-Include diagrams where useful.
+Merge metadata sections.
+Reduce vertical spacing.
+Prioritize DAG visibility.
+## 7. Execution Features
+Conditional Task Execution
 
----
-
-### Project Structure
-
-Document complete repository structure.
+Support lightweight conditional execution.
 
 Example:
 
-* backend
-* frontend
-* scheduler
-* execution engine
-* models
-* services
-* API layer
-* UI layer
-* persistence layer
-* utilities
+run_if: "{report} == 'payment'"
 
-Explain purpose of every major module.
+Avoid introducing a complex expression language.
 
----
+Execution Preview UI
 
-### Execution Architecture
+Provide a visual preview before execution.
 
-Explain:
+Display:
 
-Pipeline
-→ Run
-→ Task
-→ Executor
+expanded tasks
+DAG
+resolved variables
+execution order.
+Artifact Browser
 
-Include lifecycle details.
+Allow browsing and downloading:
 
----
+generated files
+outputs
+manifests
+execution artifacts.
+## 8. Backfill
 
-### Scheduler Architecture
+Implement intelligent backfill support.
 
-Explain:
+Requirements:
 
-* scheduling process
-* schedule registration
-* trigger handling
-* execution dispatching
+Preserve complete runtime configuration for every execution.
+Allow future backfill using the original execution configuration.
+Retain variables, schedules, selectors and runtime settings.
+## 9. Documentation
 
----
+Complete documentation updates covering:
 
-### Runtime State Management
+YAML specification
+runtime architecture
+scheduler lifecycle
+task lifecycle
+pipeline lifecycle
+recovery process
+retry lifecycle
+UI documentation
+execution examples.
+## 10. Technical Architecture Guide
 
-Explain:
+Create a comprehensive maintainer guide covering:
 
-* task states
-* run states
-* state transitions
-* recovery process
+system architecture
+project structure
+scheduler
+execution engine
+runtime state management
+database architecture
+API architecture
+frontend architecture
+DAG generation
+extensibility
+development workflow
+testing
+deployment
+architecture diagrams.
+## 11. Performance Improvements
 
----
+Improve runtime efficiency by:
 
-### Database Architecture
+eliminating duplicate database queries
+rate-limiting runtime reconciliation
+reducing unnecessary database scans during dashboard/API requests.
 
-Explain:
+## 12. print task name in all logs
 
-* schema overview
-* tables
-* relationships
-* indexes
+## 13. In pipeline page give option to short by upcoming run, Filter by running
 
-Include ER diagrams if possible.
+## 14. The biggest problem, if any task of downstream pipeline fails in between, I have to rerun all upstream pipline again to rerun that task. because downstream pipelines uses, upstream variables.
 
----
+## 15. I experience one problem, Downstream pipeline doesn't carry upstream pipeline environment variables. 
 
-### API Architecture
+## 16. UI: In pipeline page, show the pipelines in group, like if a pipeline template deployed for multiple tenate then show those pipelines together. As of now by default it shorts by alphabetical order.
 
-Explain:
+## 17. in run page graph view downstream pipeline is not visibles.
 
-* API layers
-* endpoints
-* request flow
-* response flow
-
----
-
-### Frontend Architecture
-
-Explain:
-
-* page structure
-* components
-* state management
-* graph rendering
-
----
-
-### Dependency Graph Architecture
-
-Explain:
-
-* DAG creation
-* dependency resolution
-* graph rendering
-
----
-
-### Extensibility Guide
-
-Explain how future developers can safely add:
-
-* new task types
-* new executors
-* new sensors
-* new schedulers
-* new UI components
-* new runtime states
-
----
-
-### Development Guide
-
-Document:
-
-* local setup
-* testing
-* debugging
-* build process
-* deployment process
-
----
-
-# Deliverables
-
-* Runtime recovery implementation
-* UI improvements
-* Scheduler health improvements
-* Automated tests
-* Updated user documentation
-* New deep technical architecture documentation
-* Architecture diagrams where appropriate
+## 18. UI: As of now UI is more confusing

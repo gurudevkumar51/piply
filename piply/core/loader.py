@@ -77,6 +77,24 @@ def _expand_string(value: str, env_values: dict[str, str] | None = None) -> str:
     return BRACE_TOKEN_PATTERN.sub(replace_brace, expanded)
 
 
+def _expand_env_only(value: str, env_values: dict[str, str] | None = None) -> str:
+    """Expand environment tokens but leave ``{name}`` placeholders in place.
+
+    ``run_if`` expressions are resolved at execution time so that a value can be
+    substituted as a quoted literal. Expanding the braces here would turn
+    ``"{report} == 'payment'"`` into ``payment == 'payment'``, where ``payment``
+    parses as a bare name instead of a string.
+    """
+    merged_env = dict(os.environ)
+    merged_env.update(env_values or {})
+
+    def replace_env(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2) or match.group(3) or ""
+        return merged_env.get(name, match.group(0))
+
+    return ENV_TOKEN_PATTERN.sub(replace_env, value)
+
+
 def _expand_value(value: Any, env_values: dict[str, str] | None = None) -> Any:
     """Expand env-backed strings inside nested config values."""
     if isinstance(value, str):
@@ -313,6 +331,98 @@ def _parse_retry_policy(raw_value: Any, pipeline_id: str) -> RetryPolicy:
     if delay_seconds < 0:
         raise ConfigError(f"Pipeline '{pipeline_id}' retry delay_seconds must be zero or greater")
     return RetryPolicy(attempts=attempts, mode=mode, delay_seconds=delay_seconds)
+
+
+def _parse_duration_seconds(raw_value: Any, label: str) -> int | None:
+    """Parse a timeout value from seconds or a compact duration string."""
+    if raw_value in (None, "", False):
+        return None
+    if isinstance(raw_value, bool):
+        raise ConfigError(f"{label} must be a positive duration, not a boolean")
+    if isinstance(raw_value, int | float):
+        seconds = int(raw_value)
+    else:
+        text = str(raw_value).strip().lower()
+        match = re.fullmatch(r"(\d+)(ms|s|m|h)?", text)
+        if not match:
+            raise ConfigError(f"{label} must be a duration such as 30, 30s, 5m, or 1h")
+        value = int(match.group(1))
+        unit = match.group(2) or "s"
+        if unit == "ms":
+            seconds = max(1, round(value / 1000))
+        elif unit == "m":
+            seconds = value * 60
+        elif unit == "h":
+            seconds = value * 3600
+        else:
+            seconds = value
+    if seconds <= 0:
+        raise ConfigError(f"{label} must be greater than zero")
+    return seconds
+
+
+PRIORITY_ALIASES = {
+    "lowest": -2,
+    "low": -1,
+    "normal": 0,
+    "default": 0,
+    "medium": 0,
+    "high": 1,
+    "higher": 2,
+    "highest": 3,
+    "critical": 5,
+}
+
+
+def _parse_priority(raw_value: Any, label: str) -> int:
+    """Parse an explicit numeric priority, a named level, or star shorthand."""
+    if raw_value in (None, "", False):
+        return 0
+    if isinstance(raw_value, bool):
+        raise ConfigError(f"{label} priority must be a number, a named level, or star shorthand")
+    if isinstance(raw_value, int | float):
+        return int(raw_value)
+    text = str(raw_value).strip()
+    if text and set(text) == {"*"}:
+        return len(text)
+    if text.lower() in PRIORITY_ALIASES:
+        return PRIORITY_ALIASES[text.lower()]
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise ConfigError(
+            f"{label} priority must be a number, a named level "
+            f"({', '.join(sorted(PRIORITY_ALIASES))}), or star shorthand like ***"
+        ) from exc
+
+
+def _normalize_task_priority_suffixes(raw_tasks: dict[str, Any], pipeline_id: str) -> dict[str, Any]:
+    """Strip ``*`` suffixes from task ids and fold them into an explicit priority.
+
+    ``extract***`` is shorthand for a task named ``extract`` with priority 3. The
+    id is normalized here, before dependency validation and entity expansion, so
+    the rest of the loader only ever sees the clean id. An explicit ``priority``
+    key on the task always wins over the suffix.
+    """
+    normalized: dict[str, Any] = {}
+    for raw_task_id, raw_task in raw_tasks.items():
+        task_id = str(raw_task_id)
+        stripped = task_id.rstrip("*")
+        star_count = len(task_id) - len(stripped)
+        if star_count == 0:
+            normalized[task_id] = raw_task
+            continue
+        if not stripped:
+            raise ConfigError(f"Pipeline '{pipeline_id}' has a task id made only of '*' characters")
+        if stripped in normalized:
+            raise ConfigError(
+                f"Pipeline '{pipeline_id}' task '{stripped}' is declared twice once the '*' priority suffix is removed"
+            )
+        if isinstance(raw_task, dict):
+            raw_task = copy.deepcopy(raw_task)
+            raw_task.setdefault("priority", star_count)
+        normalized[stripped] = raw_task
+    return normalized
 
 
 def _parse_depends_on(raw_value: Any, label: str) -> tuple[str, ...]:
@@ -730,6 +840,41 @@ def _parse_task(
         f"Pipeline '{pipeline_id}' task '{task_id}'",
     )
     enabled = bool(raw_task.get("enabled", True))
+    priority = _parse_priority(raw_task.get("priority"), f"Pipeline '{pipeline_id}' task '{task_id}'")
+    timeout_seconds = _parse_duration_seconds(
+        raw_task.get("timeout_seconds", raw_task.get("timeout")),
+        f"Pipeline '{pipeline_id}' task '{task_id}' timeout",
+    )
+    kill_grace_period_seconds = (
+        _parse_duration_seconds(
+            raw_task.get("kill_grace_period_seconds", raw_task.get("kill_grace_period")),
+            f"Pipeline '{pipeline_id}' task '{task_id}' kill_grace_period",
+        )
+        or 5
+    )
+    run_if = raw_task.get("run_if")
+    # Keep the pre-interpolation form of every field that can contain a
+    # {variable}. A downstream or replayed run re-renders these against the
+    # inherited variables, which is what lets a downstream pipeline be retried
+    # without re-running the upstream pipeline that supplied them.
+    variable_templates = {
+        key: copy.deepcopy(raw_task[key])
+        for key in ("command", "args", "kwargs", "url", "body", "headers", "subject", "to", "host", "user")
+        if key in raw_task and raw_task[key] is not None
+    }
+    if "subject" in variable_templates:
+        variable_templates["email_subject"] = variable_templates.pop("subject")
+    if "body" in variable_templates and task_type == "email":
+        variable_templates["email_body"] = variable_templates.pop("body")
+    if "to" in variable_templates:
+        variable_templates["email_to"] = variable_templates.pop("to")
+    artifact_paths = tuple(
+        _expand_string(str(item), env_values)
+        for item in _ensure_list(
+            raw_task.get("artifacts", raw_task.get("artifact_paths")),
+            f"Pipeline '{pipeline_id}' task '{task_id}' artifacts",
+        )
+    )
 
     task_env = dict(inherited_env)
     task_env.update(
@@ -789,11 +934,17 @@ def _parse_task(
                 depends_on=depends_on,
                 on_upstream_failure=on_upstream_failure,
                 enabled=enabled,
+                priority=priority,
+                timeout_seconds=timeout_seconds,
+                kill_grace_period_seconds=kill_grace_period_seconds,
+                run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
+                artifact_paths=artifact_paths,
                 call=callable_text,
                 args=tuple(raw_args),
                 kwargs={str(key): value for key, value in raw_kwargs.items()},
                 cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values) or workspace,
                 env=task_env,
+                variable_templates=variable_templates,
             )
         path_value = raw_task.get("path") or raw_task.get("script")
         if not path_value:
@@ -814,11 +965,17 @@ def _parse_task(
             depends_on=depends_on,
             on_upstream_failure=on_upstream_failure,
             enabled=enabled,
+            priority=priority,
+            timeout_seconds=timeout_seconds,
+            kill_grace_period_seconds=kill_grace_period_seconds,
+            run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
+            artifact_paths=artifact_paths,
             path=path,
             python=_expand_string(str(raw_task.get("python") or default_python), env_values),
             args=tuple(raw_args),
             cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values),
             env=task_env,
+            variable_templates=variable_templates,
         )
 
     if task_type == "cli":
@@ -842,16 +999,18 @@ def _parse_task(
             depends_on=depends_on,
             on_upstream_failure=on_upstream_failure,
             enabled=enabled,
+            priority=priority,
+            timeout_seconds=timeout_seconds,
+            kill_grace_period_seconds=kill_grace_period_seconds,
+            run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
+            artifact_paths=artifact_paths,
             path=resolved_path,
             command=None if command is None else _expand_string(str(command), env_values),
             shell=shell_name,
             args=tuple(raw_args),
             cwd=_resolve_path(raw_task.get("cwd"), workspace, env_values),
             env=task_env,
-            variable_templates={
-                "command": None if command is None else str(command),
-                "args": raw_task.get("args", []),
-            },
+            variable_templates=variable_templates,
         )
 
     if task_type == "api" or task_type == "webhook":
@@ -877,6 +1036,11 @@ def _parse_task(
             depends_on=depends_on,
             on_upstream_failure=on_upstream_failure,
             enabled=enabled,
+            priority=priority,
+            timeout_seconds=timeout_seconds,
+            kill_grace_period_seconds=kill_grace_period_seconds,
+            run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
+            artifact_paths=artifact_paths,
             url=_expand_string(str(url), env_values),
             method=method,
             headers=headers,
@@ -887,6 +1051,7 @@ def _parse_task(
                 f"Pipeline '{pipeline_id}' task '{task_id}' expected_status",
             ),
             env=task_env,
+            variable_templates=variable_templates,
         )
 
     if task_type == "email":
@@ -898,6 +1063,11 @@ def _parse_task(
             depends_on=depends_on,
             on_upstream_failure=on_upstream_failure,
             enabled=enabled,
+            priority=priority,
+            timeout_seconds=timeout_seconds,
+            kill_grace_period_seconds=kill_grace_period_seconds,
+            run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
+            artifact_paths=artifact_paths,
             smtp_host=_expand_string(str(raw_task.get("smtp_host") or "localhost"), env_values),
             smtp_port=int(raw_task.get("smtp_port") or 587),
             smtp_user=_expand_string(str(raw_task.get("smtp_user", "")), env_values) or None,
@@ -906,6 +1076,7 @@ def _parse_task(
             email_subject=_expand_string(str(raw_task.get("subject") or "Piply Notification"), env_values),
             email_body=_expand_string(str(raw_task.get("body") or ""), env_values),
             env=task_env,
+            variable_templates=variable_templates,
         )
 
     host = raw_task.get("host")
@@ -920,6 +1091,11 @@ def _parse_task(
         depends_on=depends_on,
         on_upstream_failure=on_upstream_failure,
         enabled=enabled,
+        priority=priority,
+        timeout_seconds=timeout_seconds,
+        kill_grace_period_seconds=kill_grace_period_seconds,
+        run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
+        artifact_paths=artifact_paths,
         host=_expand_string(str(host), env_values),
         user=None if raw_task.get("user") is None else _expand_string(str(raw_task.get("user")), env_values),
         port=int(raw_task.get("port", 22)),
@@ -928,6 +1104,7 @@ def _parse_task(
         ssh_binary=_expand_string(str(raw_task.get("ssh_binary") or "ssh"), env_values),
         connect_timeout=int(raw_task.get("connect_timeout", 8)),
         env=task_env,
+        variable_templates=variable_templates,
     )
 
 
@@ -972,9 +1149,11 @@ def load_project(
     root_entities = _parse_entities(raw_data.get("entities"), "entities", root_values)
 
     default_python = _expand_string(str(defaults.get("python") or sys.executable), root_values)
-    default_env = {
-        str(key): _expand_string(str(value), root_values)
-        for key, value in _ensure_mapping(defaults.get("env"), "defaults.env").items()
+    # Kept unexpanded so each pipeline can resolve it against its own variables.
+    # A shared default such as DBT_CLIENT: "{tenant}" is only useful if every
+    # deployment renders it with that deployment's tenant.
+    raw_default_env = {
+        str(key): str(value) for key, value in _ensure_mapping(defaults.get("env"), "defaults.env").items()
     }
 
     raw_pipelines = _normalize_pipeline_definitions(raw_data)
@@ -1007,6 +1186,10 @@ def load_project(
             default_max_parallel_tasks=effective_default_max_parallel_tasks,
             explicit_max_parallel_tasks=raw_pipeline.get("max_parallel_tasks"),
         )
+        pipeline_timeout_seconds = _parse_duration_seconds(
+            raw_pipeline.get("timeout_seconds", raw_pipeline.get("timeout")),
+            f"Pipeline '{pipeline_id}' timeout",
+        )
         retry_policy = _parse_retry_policy(raw_pipeline.get("retry"), pipeline_id)
 
         title = _expand_string(
@@ -1023,7 +1206,7 @@ def load_project(
         if max_concurrent_runs < 1:
             raise ConfigError(f"Pipeline '{pipeline_id}' must have max_concurrent_runs greater than zero")
 
-        pipeline_env = dict(default_env)
+        pipeline_env = {key: _expand_string(value, pipeline_values) for key, value in raw_default_env.items()}
         pipeline_env.update(
             {
                 str(key): _expand_string(str(value), pipeline_values)
@@ -1051,6 +1234,7 @@ def load_project(
             raw_tasks = _build_single_task_pipeline(raw_pipeline)
         if not isinstance(raw_tasks, dict) or not raw_tasks:
             raise ConfigError(f"Pipeline '{pipeline_id}' must define a non-empty tasks mapping")
+        raw_tasks = _normalize_task_priority_suffixes(raw_tasks, pipeline_id)
 
         task_entity_maps = {
             str(task_id): _parse_entities(
@@ -1130,6 +1314,7 @@ def load_project(
             max_concurrent_runs=max_concurrent_runs,
             parallelizable=parallelizable,
             max_parallel_tasks=max_parallel_tasks,
+            timeout_seconds=pipeline_timeout_seconds,
             triggers_on_success=triggers_on_success,
             retry_policy=retry_policy,
             sensors=sensors,

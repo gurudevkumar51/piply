@@ -8,8 +8,11 @@ import inspect
 import io
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -74,6 +77,8 @@ class TaskRunner:
                 cwd=task.working_directory,
                 env=task.env,
                 task_id=task.task_id,
+                timeout_seconds=task.timeout_seconds,
+                kill_grace_period_seconds=task.kill_grace_period_seconds,
             )
 
         if task.task_type == "cli":
@@ -86,6 +91,8 @@ class TaskRunner:
                 env=task.env,
                 task_id=task.task_id,
                 shell=use_shell,
+                timeout_seconds=task.timeout_seconds,
+                kill_grace_period_seconds=task.kill_grace_period_seconds,
             )
 
         if task.task_type == "api" or task.task_type == "webhook":
@@ -128,6 +135,8 @@ class TaskRunner:
         env: dict[str, str],
         task_id: str,
         shell: bool = False,
+        timeout_seconds: int | None = None,
+        kill_grace_period_seconds: int = 5,
     ) -> TaskExecutionResult:
         """Run a local process and stream its merged stdout/stderr."""
         environment = os.environ.copy()
@@ -142,6 +151,7 @@ class TaskRunner:
         try:
             output_lines: list[str] = []
             output_size = 0
+            timed_out = False
             process = subprocess.Popen(
                 command,
                 cwd=None if cwd is None else str(cwd),
@@ -155,16 +165,69 @@ class TaskRunner:
             if self.register_process is not None:
                 self.register_process(process)
             assert process.stdout is not None
-            for line in process.stdout:
-                if self.is_cancelled and self.is_cancelled():
+
+            line_queue: queue.Queue[str] = queue.Queue()
+            reader_done = threading.Event()
+            stdout_stream = process.stdout
+
+            def _read_output() -> None:
+                try:
+                    for item in stdout_stream:
+                        line_queue.put(item)
+                except (ValueError, OSError):  # pragma: no cover - stream closed during kill
+                    pass
+                finally:
+                    reader_done.set()
+
+            reader = threading.Thread(target=_read_output, daemon=True)
+            reader.start()
+            deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+
+            def _drain_queue() -> None:
+                nonlocal output_size
+                while True:
+                    try:
+                        line = line_queue.get_nowait()
+                    except queue.Empty:
+                        return
+                    stripped_line = line.rstrip()
+                    if output_size < 262_144:
+                        output_lines.append(stripped_line)
+                        output_size += len(stripped_line.encode("utf-8")) + 1
+                    self.emit(stripped_line, task_id=task_id)
+
+            while True:
+                _drain_queue()
+
+                if self.is_cancelled and self.is_cancelled() and process.poll() is None:
                     process.terminate()
-                stripped_line = line.rstrip()
-                if output_size < 262_144:
-                    output_lines.append(stripped_line)
-                    output_size += len(stripped_line.encode("utf-8")) + 1
-                self.emit(stripped_line, task_id=task_id)
+                if deadline is not None and time.monotonic() >= deadline and process.poll() is None:
+                    timed_out = True
+                    self.emit(
+                        f"Task timed out after {timeout_seconds} seconds; terminating process.",
+                        task_id=task_id,
+                    )
+                    process.terminate()
+                    try:
+                        process.wait(timeout=kill_grace_period_seconds)
+                    except subprocess.TimeoutExpired:
+                        self.emit(
+                            f"Task did not stop within the {kill_grace_period_seconds}s kill grace period; killing it.",
+                            task_id=task_id,
+                        )
+                        process.kill()
+                    break
+                if process.poll() is not None and reader_done.is_set() and line_queue.empty():
+                    break
+                time.sleep(0.02)
+
+            reader.join(timeout=1)
+            _drain_queue()
 
             exit_code = process.wait()
+            if timed_out:
+                message = f"Task timed out after {timeout_seconds} seconds."
+                return TaskExecutionResult(status="timed_out", exit_code=exit_code, error=message)
             if self.is_cancelled and self.is_cancelled():
                 self.emit("Task cancelled.", task_id=task_id)
                 return TaskExecutionResult(status="cancelled")
@@ -214,13 +277,7 @@ class TaskRunner:
                 str(task.path),
                 *(str(item) for item in task.args),
             ]
-            return self._run_subprocess(
-                command=command,
-                cwd=task.working_directory,
-                env=task.env,
-                task_id=task.task_id,
-            )
-        if suffix == ".ps1":
+        elif suffix == ".ps1":
             command = [
                 "powershell",
                 "-ExecutionPolicy",
@@ -229,17 +286,15 @@ class TaskRunner:
                 str(task.path),
                 *(str(item) for item in task.args),
             ]
-            return self._run_subprocess(
-                command=command,
-                cwd=task.working_directory,
-                env=task.env,
-                task_id=task.task_id,
-            )
+        else:
+            command = [str(task.path), *(str(item) for item in task.args)]
         return self._run_subprocess(
-            command=[str(task.path), *(str(item) for item in task.args)],
+            command=command,
             cwd=task.working_directory,
             env=task.env,
             task_id=task.task_id,
+            timeout_seconds=task.timeout_seconds,
+            kill_grace_period_seconds=task.kill_grace_period_seconds,
         )
 
     def _load_callable(self, task: TaskDefinition):
@@ -274,6 +329,33 @@ class TaskRunner:
             callable_object = getattr(callable_object, attribute_name)
         return callable_object
 
+    def _call_with_timeout(self, callable_object, task: TaskDefinition):
+        """Invoke a callable, raising TimeoutError when the task timeout elapses.
+
+        Python threads cannot be force-killed, so an over-running callable is
+        abandoned on a daemon thread while the task itself is marked timed out.
+        """
+        if task.timeout_seconds is None:
+            return self._invoke_callable(callable_object, task)
+
+        box: dict[str, object] = {}
+
+        def _invoke() -> None:
+            try:
+                box["value"] = self._invoke_callable(callable_object, task)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
+                box["error"] = exc
+
+        worker = threading.Thread(target=_invoke, daemon=True, name=f"piply-call-{task.task_id}")
+        worker.start()
+        worker.join(timeout=task.timeout_seconds)
+        if worker.is_alive():
+            raise TimeoutError(f"Task timed out after {task.timeout_seconds} seconds.")
+        error = box.get("error")
+        if isinstance(error, BaseException):
+            raise error
+        return box.get("value")
+
     def _run_python_call_task(self, task: TaskDefinition) -> TaskExecutionResult:
         """Run one imported Python callable and capture its printed output."""
         stdout_buffer = io.StringIO()
@@ -282,7 +364,14 @@ class TaskRunner:
         try:
             callable_object = self._load_callable(task)
             with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                result = self._invoke_callable(callable_object, task)
+                result = self._call_with_timeout(callable_object, task)
+        except TimeoutError as exc:
+            for output in [stdout_buffer.getvalue().rstrip(), stderr_buffer.getvalue().rstrip()]:
+                for line in output.splitlines():
+                    self.emit(line, task_id=task.task_id)
+            message = str(exc)
+            self.emit(message, task_id=task.task_id)
+            return TaskExecutionResult(status="timed_out", exit_code=None, error=message)
         except Exception as exc:
             stdio_output = [
                 stdout_buffer.getvalue().rstrip(),
@@ -359,7 +448,7 @@ class TaskRunner:
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=task.connect_timeout) as response:
+            with urllib.request.urlopen(request, timeout=task.timeout_seconds or task.connect_timeout) as response:
                 payload = response.read().decode("utf-8", errors="replace")
                 status_code = response.getcode()
                 preview = payload[:400] if payload else "<empty>"
@@ -441,4 +530,6 @@ class TaskRunner:
             cwd=task.working_directory,
             env=task.env,
             task_id=task.task_id,
+            timeout_seconds=task.timeout_seconds,
+            kill_grace_period_seconds=task.kill_grace_period_seconds,
         )

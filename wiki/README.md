@@ -6,18 +6,33 @@ Piply is a lightweight DAG runner for script-heavy teams. It keeps the runtime s
 
 - multiple pipelines in one workspace
 - multiple tasks per pipeline
-- dependency-aware execution
+- dependency-aware execution with task priority
+- task and pipeline execution timeouts
+- lightweight conditional execution with `run_if`
+- declared artifacts, browsable and downloadable from the run page
 - metadata-driven entity expansion for reusable task templates
 - optional pipeline templates and deployments for tenant/environment reuse
 - automatic schedule backfill through a durable internal queue
 - graceful shutdown and startup recovery for interrupted runs
 - pipeline-to-pipeline triggers
-- pipeline-to-pipeline context passing (JSON outputs)
-- file, SQL, and API sensors
+- pipeline-to-pipeline context, variable, and environment passing
+- per-run configuration snapshots, so a downstream run can be retried alone
+- file, SQL, and API sensors with health tracking
 - reusable SQL connections and explicit secret references
 - retries, logs, and run history
-- queue and local worker metrics
+- dry-run previews, live log streaming, and retention pruning
+- Prometheus metrics and a runtime diagnostics page
 - packaged UI, API, and CLI
+
+Full reference material now lives in `docs/`:
+
+- [YAML Specification](../docs/YAML_SPECIFICATION.md)
+- [Runtime Lifecycles](../docs/LIFECYCLES.md)
+- [UI Guide](../docs/UI_GUIDE.md)
+- [Execution Examples](../docs/EXAMPLES.md)
+- [Migration Guide](../docs/MIGRATION.md)
+- [Technical Architecture](../docs/architecture/technical_architecture.md)
+- [Future Features](../docs/FUTURE_FEATURES.md)
 
 ## Architecture
 
@@ -91,10 +106,16 @@ Each pipeline can define:
 - `variables`
 - `entities`
 
+Each pipeline can also define `timeout` and `env` / `env_files`.
+
 Each task can also define:
 
 - `entities`
 - `on_upstream_failure` (`skip`, `fail`, `continue`)
+- `priority` (integer, `high`/`low`/..., `"***"`, or an `extract***:` id suffix)
+- `timeout` and `kill_grace_period`
+- `run_if` for lightweight conditional execution
+- `artifacts` glob patterns describing the files the task produces
 - `shell` for CLI command tasks that need `bash`, `cmd`, `powershell`, or `pwsh`
 
 ## Variables And Shell Commands
@@ -434,11 +455,10 @@ Additional operator pages:
 
 ## Roadmap Pointers
 
-- `piply logs --follow`
-- managed secret-manager plugins
-- plugin hooks for custom operators
-- task groups, conditional branches, and richer matrix controls
-- optional distributed runner
+Proposed features, ranked by value against cost, with the reasoning for
+what is deliberately *not* planned: [Future Features](../docs/FUTURE_FEATURES.md).
 
 See `USAGE_GUIDE.md` for full YAML examples and every CLI command.
+See `../docs/YAML_SPECIFICATION.md` for the complete config reference.
+See `../docs/LIFECYCLES.md` for scheduler, task, retry, and recovery lifecycles.
 See `../docs/architecture/technical_architecture.md` for the deep maintainer guide.

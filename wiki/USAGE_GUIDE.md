@@ -544,7 +544,57 @@ piply tasks retry <run_id> transform --mode resume --config piply-demo/piply.yam
 
 ## 12. Sensors
 
-Sensors poll external state and enqueue a pipeline or one task when something changes.
+Sensors poll external state and enqueue a pipeline or one task when something
+changes. Sensors only poll while the server is running (`piply start`); the
+scheduler polls each one on every tick.
+
+A complete, copy-pasteable config with all three sensor types side by side is in
+[Execution Examples §10](../docs/EXAMPLES.md#10-sensors), including the log
+output each one produces and what happens when a sensor fails.
+
+```bash
+piply start          # sensors begin polling
+piply diagnostics    # per-sensor status, poll counts, last error
+```
+
+`ignore_existing: true` records the current state on the first poll without
+firing, so starting the server does not immediately trigger a run for data that
+was already there. Set it to `false` to treat everything present at startup as
+new.
+
+Each sensor also accepts `task_id: <task>` to run a single task instead of the
+whole pipeline, and `enabled: false` to park it without deleting it.
+
+### What a fired sensor looks like
+
+```
+Triggered by sensor 'inbox'.
+Detected new files: /srv/app/inbox/orders.csv
+```
+
+```
+Triggered by sensor 'new_rows'.
+Detected new rows in inbound_events from cursor 1 to 2.
+```
+
+```
+Triggered by sensor 'feed'.
+Detected API sensor change at https://example.com/api/events from cursor 1 to 2.
+```
+
+### When a sensor fails
+
+A failed poll is recorded, never raised. One unreachable source cannot stop the
+other sensors or crash the scheduler:
+
+```
+Sensors     : 2 healthy, 1 failing, 0 idle
+  FAILING inventory/warehouse: OperationalError: could not connect to host
+```
+
+The same data is on the Diagnostics page, at `GET /api/sensors`, and as the
+`piply_sensor_health` metric (`0` when the last poll failed). Passwords in
+connection strings and URLs are redacted everywhere a sensor is displayed.
 
 ### File Sensor
 
@@ -637,7 +687,55 @@ sensors:
     ignore_existing: true
 ```
 
-If `cursor_path` is omitted, Piply hashes the response body and triggers when it changes.
+If `cursor_path` is omitted, Piply looks for a `cursor`, `version`, `updated_at`,
+`last_modified`, `id`, or `count` field, then falls back to hashing the response
+body and triggering when the hash changes.
+
+### Connecting a SQL sensor to an external database
+
+`sql_sensor` is the one place Piply talks to your database directly. Declare the
+connection once at the root and reference it by name:
+
+```yaml
+connections:
+  warehouse: ${secret:WAREHOUSE_DSN}
+  reporting: postgresql://piply:${PGPASSWORD}@db.internal:5432/reporting
+  local: sqlite:///app.db
+
+pipelines:
+  on_new_claims:
+    sensors:
+      claims:
+        type: sql_sensor
+        connection_ref: warehouse
+        table: claims
+        cursor_column: claim_id
+        where: "status = 'new'"
+    tasks:
+      process:
+        type: cli
+        command: python process_claims.py
+```
+
+| Scheme | Driver to install |
+| --- | --- |
+| `sqlite`, `sqlite3`, `sqlite+pysqlite` | built in |
+| `postgres`, `postgresql`, `postgresql+psycopg` | `pip install psycopg` |
+| `postgresql+psycopg2` | `pip install psycopg2` |
+| `mysql`, `mysql+pymysql`, `mariadb`, `mariadb+pymysql` | `pip install pymysql` |
+| `mysql+mysqlconnector` | `pip install mysql-connector-python` |
+| `mssql`, `mssql+pyodbc`, `sqlserver`, `odbc` | `pip install pyodbc` |
+
+Drivers are imported lazily and are **not** Piply dependencies, so the package
+stays light. Install only what you use. A missing driver or an unsupported
+scheme marks that sensor `failing` with the reason rather than crashing.
+
+`table` and `cursor_column` must be plain identifiers and are validated before
+being interpolated into SQL. `where` is passed through as written, so keep it
+literal rather than building it from untrusted input.
+
+> **Note:** this is about *your* database. Piply's own runtime state always
+> lives in a local SQLite file — see *Runtime storage* at the end of section 13.
 
 ## 13. Secrets And Connections
 
@@ -702,6 +800,112 @@ tasks:
     type: api
     url: https://example.com/hook
     token: ${secret:API_TOKEN}
+```
+
+### Runtime storage: where Piply keeps its own state
+
+Two different things get called "the database", and they are unrelated.
+
+**Runs, task runs, logs, task outputs, artifact records, the trigger queue,
+sensor cursors, and scheduler metadata** live in the metadata store. Two
+backends are supported, selected by `PIPLY_DATABASE`:
+
+```bash
+# Default: SQLite, no configuration needed
+#   -> <config-dir>/.piply/piply.db
+
+PIPLY_DATABASE=/var/lib/piply/piply.db                        # SQLite, explicit path
+PIPLY_DATABASE=postgresql://piply:secret@db:5432/piply        # PostgreSQL
+```
+
+PostgreSQL is opt-in and needs a driver:
+
+```bash
+pip install "mr-piply[postgres]"
+```
+
+The schema is created and migrated automatically either way, and nothing in a
+`piply.yaml` changes. `piply start` prints which backend is in use:
+
+```
+Runtime database: postgresql://piply:***@db:5432/piply  (PostgreSQL)
+```
+
+Differences worth knowing: `piply backup`/`restore` are SQLite-only (use
+`pg_dump`/`pg_restore` for PostgreSQL), `piply prune` skips `VACUUM` on
+PostgreSQL because autovacuum handles it, and diagnostics report a database size
+of 0 for a server store. Run **one** Piply instance per database in both cases.
+
+In practice:
+
+- back up the SQLite file (or the whole `.piply/` directory to include the WAL),
+  or use `pg_dump` for PostgreSQL
+- run **one** Piply instance per database; ownership is tracked per process and
+  writes are serialised in-process
+- use `piply prune` to bound growth
+
+**In Docker the default location is ephemeral.** With no volume mounted,
+`/app/.piply/piply.db` lives in the container's writable layer and is destroyed
+each time the container is replaced, so a redeploy starts with empty history.
+`piply start` prints the path it will use so this is visible immediately:
+
+```
+Runtime database: /app/.piply/piply.db  (default location; set PIPLY_DATABASE to move it)
+```
+
+Mount a volume and point `PIPLY_DATABASE` at it:
+
+```yaml
+services:
+  piply:
+    environment:
+      PIPLY_DATABASE: /var/lib/piply/piply.db
+      PIPLY_ARTIFACTS_DIR: /var/lib/piply-artifacts
+    volumes:
+      - piply-state:/var/lib/piply
+      - piply-artifacts:/var/lib/piply-artifacts
+
+volumes:
+  piply-state:
+  piply-artifacts:
+```
+
+If the image runs as a non-root user, `mkdir` and `chown` those paths in the
+Dockerfile before `USER`, otherwise a fresh named volume is root-owned and the
+app cannot write to it. Full details in
+[YAML Specification §11](../docs/YAML_SPECIFICATION.md#11-runtime-storage-and-external-databases).
+
+### Backup and restore
+
+```bash
+piply backup /backups                    # timestamped file in that directory
+piply backup /backups/before-deploy.db   # explicit filename
+piply restore /backups/before-deploy.db  # stop the server first
+```
+
+`backup` uses SQLite's online backup API, so it is safe to run against a live
+server. `restore` keeps the file it displaces as `piply.db.replaced`.
+
+**Your databases** are reached two ways: from a `sql_sensor` (see section 12),
+or from inside a task, which is usually the right layer since your code already
+has the client, pooling, and migrations:
+
+```yaml
+secrets:
+  backend: env
+
+pipelines:
+  warehouse_load:
+    env:
+      DATABASE_URL: ${secret:WAREHOUSE_DSN}
+    tasks:
+      load:
+        type: python
+        path: jobs/load.py        # reads os.environ["DATABASE_URL"]
+      dbt_run:
+        type: cli
+        command: dbt run --project-dir warehouse
+        depends_on: [load]
 ```
 
 ## 14. Runtime Metrics
@@ -841,6 +1045,92 @@ piply logs <run_id> --config piply-demo/piply.yaml
 
 Python script and CLI subprocess stdout/stderr are written to the run log as task-scoped lines. Piply sets `PYTHONUNBUFFERED=1` for subprocess tasks so normal `print(...)` output appears without waiting for process exit. The run detail page loads the full run log; `/api/runs/{run_id}/logs` remains paginated for very large logs.
 
+### `piply plan`
+
+Preview a run without executing anything: DAG stages, execution order, resolved
+variables, expanded entities, and every interpolated command.
+
+```bash
+piply plan --config piply-demo/piply.yaml            # every pipeline
+piply plan extract_flow --config piply-demo/piply.yaml
+piply plan extract_flow --param batch=2026-07-01 --json
+```
+
+Tasks that would be skipped are shown with the reason, and any command still
+holding an unresolved `{placeholder}` is reported as a warning.
+
+### `piply logs --follow`
+
+Stream new log lines as they are written. Each line is rendered as
+`[time] [pipeline] [task] message`, with the task name coloured.
+
+```bash
+piply logs --follow
+piply logs --follow --pipeline extract_flow
+piply logs --follow --task validate
+piply logs <run_id> --follow --no-color --limit 50 --interval 0.5
+```
+
+### `piply artifacts`
+
+List the files a run declared and produced.
+
+```bash
+piply artifacts <run_id>
+piply artifacts <run_id> --task build_report
+```
+
+### `piply backfill`
+
+Replay one historic run with the exact configuration it captured, or queue every
+scheduled slot in a past window.
+
+```bash
+piply backfill <run_id>                    # replay one run
+piply backfill <run_id> --wait
+piply backfill nightly_report --from 2026-07-01T00:00:00 --to 2026-07-08T00:00:00
+```
+
+Replaying is how a downstream run is repaired without re-running the upstream
+pipeline that supplied its variables.
+
+### `piply prune`
+
+Delete history beyond the retention window and reclaim disk with `VACUUM`.
+
+```bash
+piply prune --dry-run
+piply prune --run-days 14 --log-days 7 --max-runs 100
+piply prune --yes --no-vacuum
+```
+
+Defaults come from `PIPLY_RETENTION_RUN_DAYS`, `PIPLY_RETENTION_LOG_DAYS`, and
+`PIPLY_RETENTION_MAX_RUNS_PER_PIPELINE`. Active runs are never removed.
+
+### `piply backup` / `piply restore`
+
+Snapshot and restore the runtime database.
+
+```bash
+piply backup /backups                    # timestamped file in that directory
+piply backup /backups/before-deploy.db   # explicit filename
+piply restore /backups/before-deploy.db --yes
+```
+
+`backup` uses SQLite's online backup API, so it is safe against a running
+server. Stop the server before `restore`. The displaced database is kept
+alongside the new one as `piply.db.replaced`.
+
+### `piply diagnostics`
+
+Print scheduler health, running tasks, sensor health, recovery state, and
+storage usage.
+
+```bash
+piply diagnostics
+piply diagnostics --json
+```
+
 ### `piply pause` / `piply resume`
 
 Pause or resume schedule dispatch.
@@ -908,9 +1198,126 @@ GET  /api/logs
 ## 18. UI Pages
 
 - Dashboard: run summary, runtime trend, active pipelines, failures, queue/worker metrics.
-- Pipelines: pipeline cards, trigger actions, schedule state.
-- Pipeline detail: DAG, denser merged metadata, selected-node details, retry/run task actions.
+- Pipelines: Airflow-style listing grouped by template, sortable by upcoming or last run, filterable by running/failed/scheduled/paused.
+- Pipeline detail: DAG first, one merged metadata strip, selected-node details, retry/run task actions, and an execution preview drawer.
+- Run detail: run DAG including downstream pipeline nodes, task focus panel, log filtering, artifact browser, Re-Run, retry-from-task, and Replay config.
 - Execution Matrix: task rows by run columns.
-- Run detail: collapsible task-focus panel, log filtering, Re-Run action, retry-from-task, and long output preview drawer.
 - Logs: cross-run log search.
+- Diagnostics: scheduler health, running tasks, sensor health, reconciliation state, storage and retention.
 - Settings: schedules, runtime settings, queue metrics, worker metrics.
+
+See [../docs/UI_GUIDE.md](../docs/UI_GUIDE.md) for the full walkthrough.
+
+## 19. Execution Control Keys
+
+Options that change *how* a task runs rather than *what* it runs. All are
+optional and all default to the pre-existing behaviour.
+
+```yaml
+pipelines:
+  nightly:
+    enabled: true                # false hides the pipeline from the scheduler
+    tags: [tier1, ingest]        # shown as chips, searchable on the listing page
+    max_concurrent_runs: 1       # how many runs of this pipeline may overlap
+    timeout: 30m                 # ceiling for the whole run
+    env_file: .env.production    # one extra env file
+    env_files:                   # or several
+      - .env.shared
+      - .env.local
+    tasks:
+      heavy_query:
+        type: cli
+        command: python query.py
+        priority: high           # 5 | high | "***" | or an id suffix, see below
+        timeout: 5m              # ceiling for this task
+        kill_grace_period: 10    # seconds between terminate and kill
+        enabled: true
+```
+
+### Priority
+
+Reorders tasks that are *already runnable*. Dependencies always win.
+
+```yaml
+tasks:
+  extract***:      # id stays "extract", priority 3
+    type: cli
+    command: python extract.py
+  transform**:     # priority 2
+    type: cli
+    command: python transform.py
+  cleanup:
+    type: cli
+    priority: low  # -1; also: lowest low normal high higher highest critical
+    command: python cleanup.py
+```
+
+### Timeouts
+
+`timeout` accepts `30`, `30s`, `5m`, `1h`, or `500ms`. On expiry Piply logs the
+reason, terminates the process, waits `kill_grace_period` (default 5s), then
+kills it. The task ends `timed_out` and so does the run.
+
+For `api` and `webhook` tasks the value is used as the HTTP timeout. For python
+*callable* tasks the call runs on a worker thread; Python cannot force a thread
+to stop, so the task is marked `timed_out` and the thread is abandoned as a
+daemon.
+
+### Conditional execution
+
+```yaml
+tasks:
+  payment_only:
+    type: cli
+    run_if: "{report} == 'payment'"
+    command: python export.py --kind payment
+```
+
+Supported: literals, `{placeholders}`, `==`, `!=`, `in`, `not in`, `and`, `or`,
+`not`, and list literals. Anything else raises and fails the task loudly rather
+than skipping it silently. A false condition marks the task `skipped`; the run
+can still succeed.
+
+### Artifacts
+
+```yaml
+tasks:
+  build:
+    type: python
+    path: jobs/build.py
+    cwd: .
+    artifacts:
+      - "out/*.csv"
+      - "out/manifest.json"
+```
+
+Globs resolve against the task working directory. Files are recorded, not
+copied. Browse them on the run page or with `piply artifacts <run_id>`.
+Downloads are restricted to paths the run recorded, inside the workspace, the
+config directory, or `PIPLY_ARTIFACTS_DIR`.
+
+### SSH and sensor extras
+
+`ssh` tasks and remote `file_sensor`s accept `ssh_binary` when `ssh` is not on
+`PATH`, and `connect_timeout` to bound the handshake. `BatchMode=yes` is always
+passed, so a key needing an interactive passphrase fails instead of hanging.
+`sql_sensor` supports `where` to narrow the cursor query and `task_id` to run a
+single task instead of the whole pipeline.
+
+## 20. Complete Reference
+
+This guide is a walkthrough. For the exhaustive list of every key, every alias,
+every legacy shape, and every environment variable, see the specification.
+
+| Topic | Where |
+| --- | --- |
+| Every config key, with defaults | [YAML Specification](../docs/YAML_SPECIFICATION.md) |
+| Aliases and legacy config shapes | [YAML Specification §11](../docs/YAML_SPECIFICATION.md#11-aliases-and-legacy-keys) |
+| Runtime environment variables | [YAML Specification §10](../docs/YAML_SPECIFICATION.md#10-environment-variables) |
+| Templates and deployments migration | [Migration Guide](../docs/MIGRATION.md) |
+| Scheduler, task, retry, recovery lifecycles | [Runtime Lifecycles](../docs/LIFECYCLES.md) |
+| Backfill and retention | [Runtime Lifecycles §7](../docs/LIFECYCLES.md#7-backfill) |
+| Every UI page | [UI Guide](../docs/UI_GUIDE.md) |
+| Runnable examples for each feature | [Execution Examples](../docs/EXAMPLES.md) |
+| Internals, for maintainers | [Technical Architecture](../docs/architecture/technical_architecture.md) |
+| Ideas not built yet | [Future Features](../docs/FUTURE_FEATURES.md) |

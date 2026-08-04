@@ -50,6 +50,10 @@ def get_run(request: Request, run_id: str) -> RunDetailResponse:
         task_runs=[TaskRunResponse.from_record(item) for item in payload["task_runs"]],
         logs=[LogResponse.from_record(item) for item in payload["logs"]],
         upcoming_runs=[UpcomingRunResponse(**item) for item in payload["upcoming_runs"]],
+        downstream=payload["downstream"],
+        upstream=payload["upstream"],
+        artifacts=payload["artifacts"],
+        has_run_config=bool(payload["has_run_config"]),
     )
 
 

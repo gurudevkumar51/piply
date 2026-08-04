@@ -72,7 +72,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         authorization = request.headers.get("Authorization", "")
-        is_ui_path = not request.url.path.startswith("/api")
+        # /metrics is scraped by machines, so it accepts the API bearer token
+        # even though it does not live under /api. It still requires auth.
+        is_ui_path = not request.url.path.startswith("/api") and request.url.path != "/metrics"
         basic_valid = _valid_basic_auth(authorization, settings)
         bearer_valid = _valid_bearer_token(authorization, settings)
 

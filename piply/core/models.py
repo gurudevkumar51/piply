@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-RunStatus = Literal["queued", "running", "success", "failed", "cancelled", "interrupted"]
-TaskStatus = Literal["queued", "running", "success", "failed", "skipped", "cancelled", "interrupted"]
+RunStatus = Literal["queued", "running", "success", "failed", "skipped", "cancelled", "interrupted", "timed_out"]
+TaskStatus = Literal["queued", "running", "success", "failed", "skipped", "cancelled", "interrupted", "timed_out"]
 TriggerType = Literal["manual", "schedule", "api", "pipeline", "retry", "sensor", "task"]
 TaskType = Literal["python", "cli", "api", "ssh", "email", "webhook"]
 RetryMode = Literal["startover", "resume"]
@@ -94,7 +94,13 @@ class SensorDefinition:
 
     @property
     def summary(self) -> str:
-        """Return a compact summary used in logs and future UI views."""
+        """Return a compact summary used in logs and UI views.
+
+        Credentials embedded in a connection string or URL are redacted, since
+        this string reaches the Diagnostics page, the sensor API, and run logs.
+        """
+        from piply.core.sql_adapters import mask_connection_secret
+
         if self.sensor_type == "file_sensor":
             if self.is_remote:
                 identity = "@".join(part for part in [self.ssh_user, self.ssh_host] if part) or "<missing host>"
@@ -103,8 +109,10 @@ class SensorDefinition:
                 target = self.path_source or (str(self.path) if self.path is not None else "<missing path>")
             return f"file_sensor {target} [{self.pattern}]"
         if self.sensor_type == "api_sensor":
-            return f"api_sensor {self.method.upper()} {self.url or '<missing url>'}"
-        database = self.connection or (str(self.database) if self.database is not None else "<missing database>")
+            return f"api_sensor {self.method.upper()} {mask_connection_secret(self.url) or '<missing url>'}"
+        database = mask_connection_secret(self.connection) or (
+            str(self.database) if self.database is not None else "<missing database>"
+        )
         table = self.table or "<missing table>"
         return f"sql_sensor {database}:{table}"
 
@@ -120,6 +128,11 @@ class TaskDefinition:
     depends_on: tuple[str, ...] = ()
     on_upstream_failure: UpstreamFailureBehavior = "skip"
     enabled: bool = True
+    priority: int = 0
+    timeout_seconds: int | None = None
+    kill_grace_period_seconds: int = 5
+    run_if: str | None = None
+    artifact_paths: tuple[str, ...] = ()
     path: Path | None = None
     python: str | None = None
     call: str | None = None
@@ -220,6 +233,7 @@ class PipelineDefinition:
     max_concurrent_runs: int = 1
     parallelizable: bool = False
     max_parallel_tasks: int = 4
+    timeout_seconds: int | None = None
     triggers_on_success: tuple[str, ...] = ()
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     sensors: dict[str, SensorDefinition] = field(default_factory=dict)
@@ -348,6 +362,9 @@ class TaskRunRecord:
     status: TaskStatus
     position: int
     command_preview: str
+    priority: int = 0
+    timeout_seconds: int | None = None
+    run_if: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     exit_code: int | None = None
@@ -452,6 +469,8 @@ class PipelineSummary:
     max_parallel_tasks: int
     task_count: int
     trigger_targets: tuple[str, ...]
+    timeout_seconds: int | None = None
+    triggered_by: tuple[str, ...] = ()
     latest_task_states: dict[str, TaskStatus] = field(default_factory=dict)
     last_run: RunRecord | None = None
     active_runs: int = 0

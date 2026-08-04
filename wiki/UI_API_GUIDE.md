@@ -65,11 +65,17 @@ Behavior:
 - `GET /`
 - `GET /pipelines`
 - `GET /pipelines/{pipeline_id}`
-- `GET /execution-matrix`
-- `GET /logs`
-- `GET /settings`
 - `GET /runs`
 - `GET /runs/{run_id}`
+- `GET /execution-matrix`
+- `GET /logs`
+- `GET /diagnostics`
+- `GET /settings`
+
+The pipelines listing is an Airflow-style table with template grouping, sorting
+by name / upcoming run / last run, and filtering by running, failed, scheduled,
+or paused. See [../docs/UI_GUIDE.md](../docs/UI_GUIDE.md) for the page-by-page
+walkthrough.
 
 ## DAG UI Features
 
@@ -84,7 +90,10 @@ Pipeline and run pages currently support:
 - edge labels
 - live node colors
 - live task duration labels
+- per-node priority, timeout, and conditional badges
+- downstream pipeline nodes (dashed) with their own status, on the run page
 - selected-task action panel
+- a usable graph height on narrow screens
 
 Pipeline detail page actions:
 
@@ -93,6 +102,8 @@ Pipeline detail page actions:
 - delete pipeline
 - override CLI commands for one manual run
 - run a selected task with its upstream dependencies
+- open the execution preview drawer: resolved variables, expanded entities,
+  execution order, and every interpolated command, without running anything
 
 Run detail page actions:
 
@@ -103,6 +114,9 @@ Run detail page actions:
 - filter logs by selected task
 - collapse or expand the task-focus panel without reloading DAG data
 - open long task output previews in a side drawer
+- show or hide downstream pipeline nodes, and navigate to a downstream run
+- browse and download artifacts the run produced
+- replay the run with the exact configuration it captured
 
 ## API Routes
 
@@ -345,10 +359,29 @@ Pipeline task responses include entity metadata when a task came from a reusable
 
 Static tasks keep these fields empty, so existing API clients continue to work.
 
+## Observability And Operations Endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /metrics` | Prometheus exposition: run/task counts, queue depth, scheduler health, durations, sensor health |
+| `GET /api/diagnostics` | scheduler, workers, running tasks, sensors, reconciliation, storage |
+| `GET /api/sensors` | per-sensor health with the latest error |
+| `GET /api/pipelines/{id}/preview` | dry-run preview |
+| `POST /api/pipelines/{id}/preview` | dry-run preview with params, overrides, or a source run |
+| `GET /api/runs/{id}/artifacts` | files the run produced |
+| `GET /api/runs/{id}/artifacts/download` | download one recorded artifact |
+| `GET /api/runs/{id}/config` | the runtime configuration snapshot captured for the run |
+| `POST /api/runs/{id}/backfill` | replay the run with its original configuration |
+| `POST /api/pipelines/{id}/backfill` | queue every scheduled slot in a window |
+| `POST /api/maintenance/prune` | apply the retention policy |
+| `GET /api/logs/stream` | incremental log tail for follow mode |
+
+`/metrics` accepts the API bearer token as well as Basic auth, so a Prometheus
+scraper does not need UI credentials.
+
 ## Current Gaps And Planned Additions
 
-- `piply logs --follow`
-- plugin hooks for custom operators
-- artifact retention policies for large task outputs
+- plugin hooks for custom operators and sensors
+- UI-safe pipeline editing
 - richer matrix/task-group UI controls
 - optional distributed runner while local mode remains the default

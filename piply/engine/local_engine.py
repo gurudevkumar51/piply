@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
+import re
 import threading
 import traceback
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
+from piply.core.artifacts import collect_task_artifacts
 from piply.core.context import RuntimeTaskContext
 from piply.core.graph import topological_order
 from piply.core.models import PipelineDefinition, RunRecord, TaskDefinition
@@ -14,6 +17,95 @@ from piply.core.store import RunStore
 from .base import BaseEngine, CompletionCallback, LogCallback
 from .heartbeat import RunHeartbeat
 from .task_runner import TaskExecutionResult, TaskRunner
+
+
+def _task_sort_key(index_by_task_id: dict[str, int], task: TaskDefinition) -> tuple[int, int, str]:
+    """Sort runnable tasks by priority while preserving config order as a tie-breaker."""
+    return (-task.priority, index_by_task_id.get(task.task_id, 0), task.task_id)
+
+
+_CONDITION_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}")
+
+
+def _resolve_condition_placeholders(expression: str, values: dict[str, object]) -> str:
+    """Replace ``{name}`` placeholders with quoted literals before parsing.
+
+    This keeps the documented ``run_if: "{report} == 'payment'"`` form working
+    without introducing a full expression language: placeholders are substituted
+    as data, never as code.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        value: object = values
+        for part in name.split("."):
+            if isinstance(value, dict) and part in value:
+                value = value[part]
+            else:
+                value = None
+                break
+        if value is None:
+            return "None"
+        if isinstance(value, bool | int | float):
+            return repr(value)
+        return repr(str(value))
+
+    return _CONDITION_PLACEHOLDER.sub(_replace, expression)
+
+
+def safe_condition_eval(expression: str, values: dict[str, object]) -> bool:
+    """Evaluate a small boolean expression for task conditions.
+
+    Only literals, names, comparisons, membership tests, and boolean operators
+    are supported. Anything else raises so a typo fails loudly instead of
+    silently skipping a task.
+    """
+    resolved = _resolve_condition_placeholders(expression, values)
+    try:
+        tree = ast.parse(resolved, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid run_if expression '{expression}'.") from exc
+
+    def eval_node(node: ast.AST) -> object:
+        if isinstance(node, ast.Expression):
+            return eval_node(node.body)
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return values.get(node.id)
+        if isinstance(node, ast.BoolOp):
+            items = [bool(eval_node(item)) for item in node.values]
+            if isinstance(node.op, ast.And):
+                return all(items)
+            if isinstance(node.op, ast.Or):
+                return any(items)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return not bool(eval_node(node.operand))
+        if isinstance(node, ast.Compare):
+            left = eval_node(node.left)
+            for operator, comparator in zip(node.ops, node.comparators, strict=True):
+                right = eval_node(comparator)
+                if isinstance(operator, ast.Eq):
+                    passed = left == right
+                elif isinstance(operator, ast.NotEq):
+                    passed = left != right
+                elif isinstance(operator, ast.In):
+                    passed = left in right if isinstance(right, list | tuple | set | str | dict) else False
+                elif isinstance(operator, ast.NotIn):
+                    passed = left not in right if isinstance(right, list | tuple | set | str | dict) else True
+                else:
+                    raise ValueError(f"Unsupported run_if operator in '{expression}'.")
+                if not passed:
+                    return False
+                left = right
+            return True
+        if isinstance(node, ast.List):
+            return [eval_node(item) for item in node.elts]
+        if isinstance(node, ast.Tuple):
+            return tuple(eval_node(item) for item in node.elts)
+        raise ValueError(f"Unsupported run_if expression '{expression}'.")
+
+    return bool(eval_node(tree))
 
 
 class LocalEngine(BaseEngine):
@@ -119,6 +211,13 @@ class LocalEngine(BaseEngine):
                 )
 
         first_error: str | None = None
+        pipeline_timed_out = threading.Event()
+        pipeline_watchdog = self._start_pipeline_watchdog(
+            pipeline,
+            runner,
+            cancel_event,
+            pipeline_timed_out,
+        )
 
         try:
             if pipeline.execution_mode == "parallel" and pipeline.max_parallel_tasks > 1:
@@ -142,8 +241,16 @@ class LocalEngine(BaseEngine):
                     cancel_event,
                 )
 
-            failed_tasks = [task_id for task_id, status in task_statuses.items() if status == "failed"]
-            if cancel_event.is_set():
+            failed_tasks = [task_id for task_id, status in task_statuses.items() if status in {"failed", "timed_out"}]
+            timed_out_tasks = [task_id for task_id, status in task_statuses.items() if status == "timed_out"]
+            if pipeline_timed_out.is_set():
+                timeout_error = f"Pipeline timed out after {pipeline.timeout_seconds} seconds."
+                self._mark_pending_tasks_timed_out(pipeline, run_id, store, runner, task_statuses)
+                store.finish_run(run_id, status="timed_out", exit_code=1, error=first_error or timeout_error)
+                final_run = store.get_run(run_id)
+                if final_run is not None and on_failure is not None:
+                    on_failure(pipeline, final_run)
+            elif cancel_event.is_set():
                 self._mark_pending_tasks_cancelled(pipeline, run_id, store, runner, task_statuses)
                 store.finish_run(
                     run_id,
@@ -152,7 +259,8 @@ class LocalEngine(BaseEngine):
                     error="Run cancelled by user.",
                 )
             elif failed_tasks:
-                store.finish_run(run_id, status="failed", exit_code=1, error=first_error)
+                run_status = "timed_out" if timed_out_tasks else "failed"
+                store.finish_run(run_id, status=run_status, exit_code=1, error=first_error)
                 final_run = store.get_run(run_id)
                 if final_run is not None and on_failure is not None:
                     on_failure(pipeline, final_run)
@@ -176,11 +284,36 @@ class LocalEngine(BaseEngine):
             runner.emit(traceback.format_exc().rstrip())
             store.finish_run(run_id, status="failed", exit_code=1, error=str(exc))
         finally:
+            if pipeline_watchdog is not None:
+                pipeline_watchdog.cancel()
             heartbeat.stop()
             with self._lock:
                 self._threads.pop(run_id, None)
                 self._cancel_events.pop(run_id, None)
                 self._active_processes.pop(run_id, None)
+
+    def _start_pipeline_watchdog(
+        self,
+        pipeline: PipelineDefinition,
+        runner: TaskRunner,
+        cancel_event: threading.Event,
+        timed_out_flag: threading.Event,
+    ) -> threading.Timer | None:
+        """Arm a timer that cancels the run when the pipeline-level timeout elapses."""
+        if pipeline.timeout_seconds is None:
+            return None
+
+        def _on_timeout() -> None:
+            if cancel_event.is_set():
+                return
+            timed_out_flag.set()
+            runner.emit(f"Pipeline timed out after {pipeline.timeout_seconds} seconds; stopping remaining work.")
+            cancel_event.set()
+
+        timer = threading.Timer(pipeline.timeout_seconds, _on_timeout)
+        timer.daemon = True
+        timer.start()
+        return timer
 
     def _execute_sequential(
         self,
@@ -194,14 +327,25 @@ class LocalEngine(BaseEngine):
     ) -> str | None:
         """Execute tasks one at a time in topological order."""
         first_error: str | None = None
-        for task in topological_order(pipeline):
+        pending = {task_id for task_id in pipeline.tasks if task_id not in task_statuses}
+        index_by_task_id = {task.task_id: index for index, task in enumerate(topological_order(pipeline))}
+        while pending:
             if cancel_event.is_set():
                 break
-            if task.task_id in task_statuses:
-                continue
+            ready = [
+                pipeline.tasks[task_id]
+                for task_id in pending
+                if all(dependency in task_statuses for dependency in pipeline.tasks[task_id].depends_on)
+            ]
+            if not ready:
+                break
+            task = sorted(ready, key=lambda item: _task_sort_key(index_by_task_id, item))[0]
+            pending.remove(task.task_id)
             result = self._run_or_skip_task(task, pipeline, run_id, store, runner, context, task_statuses)
             if result.status == "failed" and first_error is None:
                 first_error = result.error or f"Task {task.task_id} failed"
+            if result.status == "timed_out" and first_error is None:
+                first_error = result.error or f"Task {task.task_id} timed out"
         return first_error
 
     def _execute_parallel(
@@ -218,6 +362,7 @@ class LocalEngine(BaseEngine):
         first_error: str | None = None
         pending = {task_id for task_id in pipeline.tasks if task_id not in task_statuses}
         in_flight: dict[Future[TaskExecutionResult], TaskDefinition] = {}
+        index_by_task_id = {task.task_id: index for index, task in enumerate(topological_order(pipeline))}
 
         with ThreadPoolExecutor(max_workers=pipeline.max_parallel_tasks) as executor:
             while pending or in_flight:
@@ -237,17 +382,29 @@ class LocalEngine(BaseEngine):
 
                 scheduled_this_round = False
 
-                for task_id in list(pending):
+                available_slots = max(0, pipeline.max_parallel_tasks - len(in_flight))
+                ready_tasks = [
+                    pipeline.tasks[task_id]
+                    for task_id in pending
+                    if all(dependency in task_statuses for dependency in pipeline.tasks[task_id].depends_on)
+                ]
+                for task in sorted(ready_tasks, key=lambda item: _task_sort_key(index_by_task_id, item)):
+                    if available_slots <= 0:
+                        break
                     if cancel_event.is_set():
                         break
-                    task = pipeline.tasks[task_id]
-                    if any(dependency not in task_statuses for dependency in task.depends_on):
-                        continue
 
-                    pending.remove(task_id)
+                    pending.remove(task.task_id)
                     scheduled_this_round = True
 
                     dependency_statuses = [task_statuses[item] for item in task.depends_on]
+                    condition_result = self._evaluate_run_if(task, pipeline, run_id, store, runner, context)
+                    if condition_result is not None:
+                        result = condition_result
+                        task_statuses[task.task_id] = result.status
+                        if result.status == "failed" and first_error is None:
+                            first_error = result.error or f"Task {task.task_id} failed"
+                        continue
                     if not task.enabled:
                         result = self._skip_task(
                             task,
@@ -276,6 +433,7 @@ class LocalEngine(BaseEngine):
                     in_flight[executor.submit(self._execute_task, task, pipeline, run_id, store, runner, context)] = (
                         task
                     )
+                    available_slots -= 1
 
                 if not in_flight and not scheduled_this_round:
                     break
@@ -298,6 +456,8 @@ class LocalEngine(BaseEngine):
                     self._capture_successful_output(task, run_id, store, runner, context, result)
                     if result.status == "failed" and first_error is None:
                         first_error = result.error or f"Task {task.task_id} failed"
+                    if result.status == "timed_out" and first_error is None:
+                        first_error = result.error or f"Task {task.task_id} timed out"
 
         return first_error
 
@@ -313,6 +473,10 @@ class LocalEngine(BaseEngine):
     ) -> TaskExecutionResult:
         """Run one task in sequential mode or mark it skipped."""
         dependency_statuses = [task_statuses.get(item) for item in task.depends_on]
+        condition_result = self._evaluate_run_if(task, pipeline, run_id, store, runner, context)
+        if condition_result is not None:
+            task_statuses[task.task_id] = condition_result.status
+            return condition_result
         if not task.enabled:
             result = self._skip_task(task, run_id, store, runner, "Task disabled in config.")
             task_statuses[task.task_id] = result.status
@@ -418,6 +582,31 @@ class LocalEngine(BaseEngine):
         output_record = store.record_task_output(run_id, task.task_id, result.output)
         if output_record.preview:
             runner.emit(f"Output captured: {output_record.preview}", task_id=task.task_id)
+        self._capture_artifacts(task, run_id, store, runner)
+
+    def _capture_artifacts(
+        self,
+        task: TaskDefinition,
+        run_id: str,
+        store: RunStore,
+        runner: TaskRunner,
+    ) -> None:
+        """Record the files a task declared as artifacts so the UI can browse them."""
+        if not task.artifact_paths:
+            return
+        artifacts = collect_task_artifacts(task.task_id, task.artifact_paths, task.working_directory)
+        if not artifacts:
+            runner.emit(
+                f"No files matched the declared artifacts: {', '.join(task.artifact_paths)}",
+                task_id=task.task_id,
+            )
+            return
+        store.record_task_artifacts(run_id, task.task_id, [item.as_dict() for item in artifacts])
+        runner.emit(
+            f"Captured {len(artifacts)} artifact(s): {', '.join(item.name for item in artifacts[:5])}"
+            + (" ..." if len(artifacts) > 5 else ""),
+            task_id=task.task_id,
+        )
 
     def _cancel_task(
         self,
@@ -448,6 +637,27 @@ class LocalEngine(BaseEngine):
         task_context = RuntimeTaskContext(self._context_for_task(task, pipeline, context))
         return runner.for_context(task_context).run(task)
 
+    def _evaluate_run_if(
+        self,
+        task: TaskDefinition,
+        pipeline: PipelineDefinition,
+        run_id: str,
+        store: RunStore,
+        runner: TaskRunner,
+        context: RuntimeTaskContext,
+    ) -> TaskExecutionResult | None:
+        """Return a skip/failure result when a task-level condition blocks execution."""
+        if not task.run_if:
+            return None
+        task_context = self._context_for_task(task, pipeline, context)
+        try:
+            should_run = safe_condition_eval(task.run_if, task_context)
+        except ValueError as exc:
+            return self._fail_task(task, run_id, store, runner, str(exc))
+        if should_run:
+            return None
+        return self._skip_task(task, run_id, store, runner, f"Skipped because run_if evaluated false: {task.run_if}")
+
     def _context_for_task(
         self,
         task: TaskDefinition,
@@ -474,6 +684,22 @@ class LocalEngine(BaseEngine):
                 continue
             task_context[dependency.template_id] = task_context[dependency_id]
         return task_context
+
+    def _mark_pending_tasks_timed_out(
+        self,
+        pipeline: PipelineDefinition,
+        run_id: str,
+        store: RunStore,
+        runner: TaskRunner,
+        task_statuses: dict[str, str],
+    ) -> None:
+        """Mark tasks that never finished as timed out after a pipeline timeout."""
+        reason = f"Task stopped because the pipeline timed out after {pipeline.timeout_seconds} seconds."
+        for task in pipeline.tasks.values():
+            if task_statuses.get(task.task_id) in {None, "queued", "running", "cancelled"}:
+                runner.emit(reason, task_id=task.task_id)
+                task_statuses[task.task_id] = "timed_out"
+        store.mark_unfinished_tasks_timed_out(run_id, reason)
 
     def _mark_pending_tasks_cancelled(
         self,

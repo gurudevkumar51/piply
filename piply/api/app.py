@@ -17,7 +17,7 @@ from piply.core.scheduler import PipelineScheduler
 from piply.core.service import PipelineService
 from piply.settings import PiplySettings, load_settings
 
-from .routes import dashboard, execution, pipelines, runs, ui
+from .routes import dashboard, execution, maintenance, observability, pipelines, runs, ui
 
 
 def _ui_directory() -> Path:
@@ -32,11 +32,12 @@ def _build_service(
     """Build the shared service instance from config and environment overrides."""
     current_settings = settings or load_settings(config_path or os.getenv("PIPLY_CONFIG"))
     env_config = config_path or (str(current_settings.config_path) if current_settings.config_path else None)
-    env_database = (
-        str(current_settings.database_path)
-        if current_settings.database_path is not None
-        else os.getenv("PIPLY_DATABASE")
-    )
+    if current_settings.database_dsn is not None:
+        env_database: str | None = current_settings.database_dsn
+    elif current_settings.database_path is not None:
+        env_database = str(current_settings.database_path)
+    else:
+        env_database = os.getenv("PIPLY_DATABASE")
     return PipelineService(
         config_path=env_config,
         database_path=env_database,
@@ -89,6 +90,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(ui.router)
     app.include_router(dashboard.router)
     app.include_router(execution.router)
+    app.include_router(observability.router)
+    # Registered before the pipeline/run routers so its explicit sub-paths are
+    # not shadowed by their `{pipeline_id}` / `{run_id}` wildcards.
+    app.include_router(maintenance.router)
     app.include_router(pipelines.router)
     app.include_router(runs.router)
     return app

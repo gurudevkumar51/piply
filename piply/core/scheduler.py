@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from datetime import datetime, timezone
 
@@ -19,15 +20,27 @@ class PipelineScheduler:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Start the scheduler thread when it is not already running."""
+        """Start the scheduler thread when it is not already running.
+
+        Taking ownership also reconciles anything the previous scheduler left
+        behind, so a restart after a crash never leaves orphaned RUNNING rows.
+        """
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        recovered = self.service.recover_interrupted_executions()
         current = datetime.now(timezone.utc)
-        self.service.store.set_meta("scheduler_running", "true")
-        self.service.store.set_meta("scheduler_state", "running")
-        self.service.store.set_meta("scheduler_last_error", "")
-        self.service.store.set_meta("scheduler_heartbeat", current.isoformat())
+        self.service.store.set_meta_many(
+            {
+                "scheduler_last_error": "",
+                "scheduler_owner_pid": str(os.getpid()),
+                "scheduler_started_at": current.isoformat(),
+                "scheduler_recovered_runs": str(len(recovered)),
+                "scheduler_heartbeat": current.isoformat(),
+                "scheduler_running": "true",
+                "scheduler_state": "running",
+            }
+        )
         self._thread = threading.Thread(
             target=self._run_loop,
             daemon=True,
@@ -39,9 +52,13 @@ class PipelineScheduler:
         """Stop the scheduler thread and update the heartbeat flag."""
         self._stop_event.set()
         current = datetime.now(timezone.utc)
-        self.service.store.set_meta("scheduler_running", "false")
-        self.service.store.set_meta("scheduler_state", "stopped")
-        self.service.store.set_meta("scheduler_heartbeat", current.isoformat())
+        self.service.store.set_meta_many(
+            {
+                "scheduler_heartbeat": current.isoformat(),
+                "scheduler_running": "false",
+                "scheduler_state": "stopped",
+            }
+        )
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
 
@@ -51,10 +68,16 @@ class PipelineScheduler:
             try:
                 self.tick()
             except Exception as exc:  # pragma: no cover - defensive thread crash handling
-                self.service.store.set_meta("scheduler_running", "false")
-                self.service.store.set_meta("scheduler_state", "crashed")
-                self.service.store.set_meta("scheduler_last_error", str(exc) or exc.__class__.__name__)
-                self.service.store.set_meta("scheduler_heartbeat", datetime.now(timezone.utc).isoformat())
+                # Written as one transaction so a reader never sees "crashed"
+                # without the reason that caused it.
+                self.service.store.set_meta_many(
+                    {
+                        "scheduler_last_error": str(exc) or exc.__class__.__name__,
+                        "scheduler_heartbeat": datetime.now(timezone.utc).isoformat(),
+                        "scheduler_running": "false",
+                        "scheduler_state": "crashed",
+                    }
+                )
                 break
             self._stop_event.wait(self.poll_interval)
 

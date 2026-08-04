@@ -10,10 +10,13 @@
       success: { fill: "rgba(27, 156, 96, 0.12)", stroke: "rgba(27, 156, 96, 0.74)", dot: "#1b9c60" },
       running: { fill: "rgba(57, 117, 255, 0.14)", stroke: "rgba(57, 117, 255, 0.78)", dot: "#3975ff" },
       failed: { fill: "rgba(217, 90, 90, 0.13)", stroke: "rgba(217, 90, 90, 0.76)", dot: "#d95a5a" },
+      timed_out: { fill: "rgba(217, 90, 90, 0.16)", stroke: "rgba(160, 48, 48, 0.8)", dot: "#a03030" },
       interrupted: { fill: "rgba(232, 155, 44, 0.14)", stroke: "rgba(184, 95, 22, 0.78)", dot: "#b85f16" },
       cancelled: { fill: "rgba(106, 94, 156, 0.12)", stroke: "rgba(106, 94, 156, 0.74)", dot: "#6a5e9c" },
       skipped: { fill: "rgba(123, 140, 166, 0.11)", stroke: "rgba(123, 140, 166, 0.64)", dot: "#7b8ca6" },
       queued: { fill: "rgba(232, 155, 44, 0.12)", stroke: "rgba(232, 155, 44, 0.7)", dot: "#e89b2c" },
+      pending: { fill: "rgba(123, 140, 166, 0.09)", stroke: "rgba(123, 140, 166, 0.55)", dot: "#9aa8bd" },
+      "-": { fill: "rgba(123, 140, 166, 0.07)", stroke: "rgba(123, 140, 166, 0.45)", dot: "#b7c1cf" },
     };
     return palette[status] || palette.queued;
   }
@@ -378,6 +381,11 @@
       rect.setAttribute("fill", palette.fill);
       rect.setAttribute("stroke", palette.stroke);
       rect.setAttribute("stroke-width", isSelected ? "3" : "2");
+      // Downstream pipelines are drawn with a dashed border so the boundary
+      // between "tasks in this run" and "another pipeline" stays obvious.
+      if (node.task_type === "pipeline") {
+        rect.setAttribute("stroke-dasharray", "6 4");
+      }
       group.appendChild(rect);
 
       const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -406,7 +414,19 @@
       stateLabel.setAttribute("x", "16");
       stateLabel.setAttribute("y", "70");
       stateLabel.setAttribute("class", "dag-state-label");
-      stateLabel.textContent = node.status;
+      // Priority and timeout are execution-affecting settings, so they belong
+      // on the node itself rather than only in the side panel.
+      const badges = [node.status];
+      if (node.priority) {
+        badges.push(`priority ${node.priority}`);
+      }
+      if (node.timeout_seconds) {
+        badges.push(`timeout ${node.timeout_seconds}s`);
+      }
+      if (node.run_if) {
+        badges.push("conditional");
+      }
+      stateLabel.textContent = badges.join(" | ");
       group.appendChild(stateLabel);
 
       const durationText = durationLabel(node.duration_seconds);

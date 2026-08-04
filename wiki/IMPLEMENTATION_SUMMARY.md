@@ -186,7 +186,12 @@ Current verification expectations:
 - `piply tasks retry`
 - `piply run`
 - `piply runs`
-- `piply logs`
+- `piply logs` (including `--follow` with pipeline/run/task filters and color)
+- `piply plan` (dry run: DAG, order, variables, entities, interpolated commands)
+- `piply prune` (retention cleanup with SQLite VACUUM)
+- `piply backfill` (replay one run, or fill a schedule window)
+- `piply artifacts`
+- `piply diagnostics`
 - `piply pause`
 - `piply resume`
 - `piply start`
@@ -196,9 +201,8 @@ Current verification expectations:
 
 ## Upcoming Commands And Todos
 
-- `piply logs --follow`
 - managed secret-manager plugins
-- plugin hooks for custom operators
-- artifact retention policies for large outputs
+- plugin hooks for custom operators and sensors
+- UI-safe pipeline editing
 - matrix expansion shortcuts and task groups
 - optional distributed runner

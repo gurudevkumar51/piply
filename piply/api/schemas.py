@@ -38,6 +38,33 @@ class TriggerRunRequest(BaseModel):
     tenant_id: str | None = None
 
 
+class PreviewRequest(BaseModel):
+    """PreviewRequest carries the values a dry run should resolve against."""
+
+    params: dict[str, object] = Field(default_factory=dict)
+    command_overrides: dict[str, str] = Field(default_factory=dict)
+    tenant_id: str | None = None
+    source_run_id: str | None = None
+
+
+class BackfillScheduleRequest(BaseModel):
+    """BackfillScheduleRequest selects the historic window to materialize."""
+
+    start: datetime
+    end: datetime
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class PruneRequest(BaseModel):
+    """PruneRequest optionally overrides the configured retention window."""
+
+    run_retention_days: int | None = Field(default=None, ge=0)
+    log_retention_days: int | None = Field(default=None, ge=0)
+    max_runs_per_pipeline: int | None = Field(default=None, ge=0)
+    dry_run: bool = False
+    vacuum: bool = True
+
+
 class RunResponse(BaseModel):
     """RunResponse exposes the run-level state returned by the API."""
 
@@ -110,6 +137,11 @@ class TaskResponse(BaseModel):
     enabled: bool
     command_preview: str
     on_upstream_failure: str
+    priority: int = 0
+    timeout_seconds: int | None = None
+    kill_grace_period_seconds: int = 5
+    run_if: str | None = None
+    artifact_paths: list[str] = Field(default_factory=list)
     shell: str | None = None
     template_id: str | None = None
     entity_key: str | None = None
@@ -127,6 +159,11 @@ class TaskResponse(BaseModel):
             enabled=definition.enabled,
             command_preview=definition.command_preview,
             on_upstream_failure=definition.on_upstream_failure,
+            priority=definition.priority,
+            timeout_seconds=definition.timeout_seconds,
+            kill_grace_period_seconds=definition.kill_grace_period_seconds,
+            run_if=definition.run_if,
+            artifact_paths=list(definition.artifact_paths),
             shell=definition.shell,
             template_id=definition.template_id,
             entity_key=definition.entity_key,
@@ -144,6 +181,9 @@ class TaskRunResponse(BaseModel):
     status: str
     position: int
     command_preview: str
+    priority: int = 0
+    timeout_seconds: int | None = None
+    run_if: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     exit_code: int | None = None
@@ -166,6 +206,9 @@ class TaskRunResponse(BaseModel):
             status=record.status,
             position=record.position,
             command_preview=record.command_preview,
+            priority=record.priority,
+            timeout_seconds=record.timeout_seconds,
+            run_if=record.run_if,
             started_at=record.started_at,
             finished_at=record.finished_at,
             exit_code=record.exit_code,
@@ -351,6 +394,9 @@ class SchedulerResponse(BaseModel):
     label: str | None = None
     heartbeat: str | None = None
     heartbeat_age_seconds: float | None = None
+    owner_pid: int | None = None
+    owner_alive: bool | None = None
+    started_at: str | None = None
     last_error: str | None = None
     config_path: str
     database_path: str
@@ -383,12 +429,16 @@ class DashboardResponse(BaseModel):
 
 
 class RunDetailResponse(BaseModel):
-    """RunDetailResponse adds task runs and logs to one run summary."""
+    """RunDetailResponse adds task runs, logs, and pipeline lineage to one run."""
 
     run: RunResponse
     task_runs: list[TaskRunResponse]
     logs: list[LogResponse]
     upcoming_runs: list[UpcomingRunResponse] = Field(default_factory=list)
+    downstream: list[dict[str, object]] = Field(default_factory=list)
+    upstream: dict[str, object] | None = None
+    artifacts: list[dict[str, object]] = Field(default_factory=list)
+    has_run_config: bool = False
 
 
 class TaskDetailResponse(BaseModel):

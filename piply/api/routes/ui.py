@@ -53,18 +53,98 @@ def logout_page(request: Request) -> Response:
     )
 
 
+def _pipeline_group_key(summary) -> tuple[str, str]:
+    """Return the grouping id and label for one pipeline summary.
+
+    Deployments of the same template belong together, which matters when one
+    template is deployed once per tenant.
+    """
+    if summary.template_id:
+        return f"template:{summary.template_id}", f"Template: {summary.template_id}"
+    if summary.tags:
+        return f"tag:{summary.tags[0]}", f"Tag: {summary.tags[0]}"
+    return "standalone", "Standalone pipelines"
+
+
 @router.get("/pipelines", response_class=HTMLResponse)
 def pipelines_page(request: Request) -> HTMLResponse:
     """Render the pipeline list page."""
     service = _service(request)
+    summaries = service.list_pipelines()
+
+    groups: dict[str, dict[str, object]] = {}
+    for summary in summaries:
+        group_id, group_label = _pipeline_group_key(summary)
+        group = groups.setdefault(
+            group_id,
+            {"group_id": group_id, "label": group_label, "template_id": summary.template_id, "pipelines": []},
+        )
+        group["pipelines"].append(summary)  # type: ignore[union-attr]
+
+    # Multi-deployment templates first, then everything else alphabetically.
+    ordered_groups = sorted(
+        groups.values(),
+        key=lambda item: (
+            0 if len(item["pipelines"]) > 1 and item["group_id"] != "standalone" else 1,  # type: ignore[arg-type]
+            str(item["label"]).lower(),
+        ),
+    )
+
+    payloads = [
+        {
+            "pipeline_id": summary.pipeline_id,
+            "title": summary.title,
+            "description": summary.description,
+            "group_id": _pipeline_group_key(summary)[0],
+            "template_id": summary.template_id,
+            "deployment_id": summary.deployment_id,
+            "tags": list(summary.tags),
+            "enabled": summary.enabled,
+            "paused": summary.paused,
+            "schedule_text": summary.schedule_text,
+            "next_run_at": None if summary.next_run_at is None else summary.next_run_at.isoformat(),
+            "next_run_label": summary.next_run_label,
+            "task_count": summary.task_count,
+            "active_runs": summary.active_runs,
+            "trigger_targets": list(summary.trigger_targets),
+            "triggered_by": list(summary.triggered_by),
+            "last_run_status": summary.last_run.status if summary.last_run else None,
+            "last_run_id": summary.last_run.run_id if summary.last_run else None,
+            "last_run_at": (
+                (summary.last_run.started_at or summary.last_run.created_at).isoformat() if summary.last_run else None
+            ),
+            "last_run_duration_seconds": summary.last_run.duration_seconds if summary.last_run else None,
+        }
+        for summary in summaries
+    ]
+
     return _templates(request).TemplateResponse(
         request,
         "pipelines.html",
         {
             "project": service.project,
-            "pipelines": service.list_pipelines(),
+            "pipelines": summaries,
+            "pipeline_payloads": payloads,
+            "groups": ordered_groups,
             "scheduler": service.scheduler_snapshot(),
             "page": "pipelines",
+        },
+    )
+
+
+@router.get("/diagnostics", response_class=HTMLResponse)
+def diagnostics_page(request: Request) -> HTMLResponse:
+    """Render the runtime diagnostics page."""
+    service = _service(request)
+    payload = service.diagnostics()
+    return _templates(request).TemplateResponse(
+        request,
+        "diagnostics.html",
+        {
+            "project": service.project,
+            "diagnostics": payload,
+            "scheduler": payload["scheduler"],
+            "page": "diagnostics",
         },
     )
 
@@ -84,6 +164,10 @@ def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
             "task_type": task.task_type,
             "depends_on": list(task.depends_on),
             "command_preview": task.command_preview,
+            "priority": task.priority,
+            "timeout_seconds": task.timeout_seconds,
+            "run_if": task.run_if,
+            "artifact_paths": list(task.artifact_paths),
         }
         for task in detail["pipeline"].tasks.values()
     ]
@@ -113,6 +197,9 @@ def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
             "status": task.status,
             "position": task.position,
             "command_preview": task.command_preview,
+            "priority": task.priority,
+            "timeout_seconds": task.timeout_seconds,
+            "run_if": task.run_if,
             "depends_on": list(task.depends_on),
             "log_count": task.log_count,
             "duration_seconds": task.duration_seconds,
@@ -190,6 +277,9 @@ def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
             "status": task.status,
             "position": task.position,
             "command_preview": task.command_preview,
+            "priority": task.priority,
+            "timeout_seconds": task.timeout_seconds,
+            "run_if": task.run_if,
             "depends_on": list(task.depends_on),
             "log_count": task.log_count,
             "duration_seconds": task.duration_seconds,
@@ -232,6 +322,10 @@ def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
             "log_payloads": log_payloads,
             "upcoming_runs": payload["upcoming_runs"],
             "upcoming_run_payloads": upcoming_run_payloads,
+            "downstream": payload["downstream"],
+            "upstream": payload["upstream"],
+            "artifacts": payload["artifacts"],
+            "has_run_config": payload["has_run_config"],
             "scheduler": service.scheduler_snapshot(),
             "page": "runs",
         },
