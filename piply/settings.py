@@ -119,6 +119,7 @@ class PiplySettings:
     queue_dispatch_batch_size: int
     queue_dispatch_stale_seconds: int
     upcoming_run_preview_count: int
+    pipeline_run_history_count: int
     reconcile_interval_seconds: int
     retention_run_days: int
     retention_log_days: int
@@ -199,6 +200,10 @@ def load_settings(
         1,
         _parse_int(merged_env.get("PIPLY_UPCOMING_RUN_PREVIEW_COUNT"), 8),
     )
+    pipeline_run_history_count = max(
+        1,
+        min(20, _parse_int(merged_env.get("PIPLY_PIPELINE_RUN_HISTORY_COUNT"), 5)),
+    )
     reconcile_interval_seconds = max(
         0,
         _parse_int(merged_env.get("PIPLY_RECONCILE_INTERVAL_SECONDS"), 15),
@@ -230,6 +235,7 @@ def load_settings(
         queue_dispatch_batch_size=queue_dispatch_batch_size,
         queue_dispatch_stale_seconds=queue_dispatch_stale_seconds,
         upcoming_run_preview_count=upcoming_run_preview_count,
+        pipeline_run_history_count=pipeline_run_history_count,
         reconcile_interval_seconds=reconcile_interval_seconds,
         retention_run_days=retention_run_days,
         retention_log_days=retention_log_days,

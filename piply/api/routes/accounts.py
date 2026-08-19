@@ -1,0 +1,240 @@
+"""Sign-in, sign-out, and user administration."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel, Field
+
+from piply.api.auth import SESSION_COOKIE, require_permission, resolve_user
+from piply.core.auth import PERMISSIONS, AuthError, constant_time_equals, issue_session
+
+router = APIRouter(tags=["accounts"])
+
+
+def _service(request: Request):
+    """Resolve the shared PipelineService from the app state."""
+    return request.app.state.service
+
+
+def _user_payload(user) -> dict[str, object]:
+    """Return one account as JSON, never including secrets."""
+    return {
+        "username": user.username,
+        "role": user.role,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "last_login_at": user.last_login_at,
+        "permissions": {pipeline_id: sorted(actions) for pipeline_id, actions in user.permissions.items()},
+    }
+
+
+def _safe_next(target: str | None) -> str:
+    """Return a redirect target that cannot leave this site.
+
+    Only same-site absolute paths are allowed. A protocol-relative value such
+    as ``//evil.example`` is a URL to another host, so it is rejected along
+    with anything that is not a plain path.
+    """
+    if not target or not target.startswith("/") or target.startswith("//") or target.startswith("/\\"):
+        return "/"
+    return target
+
+
+def _require_admin(request: Request):
+    """Raise unless the caller is an administrator."""
+    service = _service(request)
+    if not service.auth_required:
+        return None
+    user = resolve_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Only administrators can manage users.")
+    return user
+
+
+# --- Sign in and out ---------------------------------------------------------
+
+
+@router.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, next: str = "/", error: str | None = None) -> HTMLResponse:
+    """Render the sign-in form."""
+    service = _service(request)
+    if resolve_user(request) is not None:
+        return RedirectResponse(url=_safe_next(next), status_code=303)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "project": service.project,
+            "next": next or "/",
+            "error": error,
+            "scheduler": {"state": "", "running": False, "label": "", "config_path": ""},
+            "page": "login",
+        },
+    )
+
+
+@router.post("/login")
+def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+):
+    """Verify credentials and start a session."""
+    service = _service(request)
+    if service.login_retry_after(username):
+        return RedirectResponse(
+            url="/login?error=Too+many+failed+attempts.+Try+again+in+a+few+minutes.",
+            status_code=303,
+        )
+    user = service.authenticate(username, password)
+    session_name = None if user is None else user.username
+
+    if user is None:
+        # Fall back to the env-var admin so an install that enabled auth before
+        # user accounts existed can still sign in through the form.
+        settings = request.app.state.settings
+        if (
+            settings.auth_username
+            and settings.auth_password
+            and constant_time_equals(username, settings.auth_username)
+            and constant_time_equals(password, settings.auth_password)
+        ):
+            session_name = settings.auth_username
+    if session_name is None:
+        return RedirectResponse(url="/login?error=Invalid+username+or+password", status_code=303)
+
+    response = RedirectResponse(url=_safe_next(next), status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        issue_session(service.store, session_name),
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return response
+
+
+@router.get("/logout")
+def logout(request: Request):
+    """Clear the session cookie and return to the sign-in form."""
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@router.get("/api/me", response_model=dict[str, object])
+def whoami(request: Request) -> dict[str, object]:
+    """Return the current account and what it may do."""
+    service = _service(request)
+    user = resolve_user(request)
+    if user is None:
+        return {"authenticated": False, "auth_required": service.auth_required}
+    return {"authenticated": True, "auth_required": service.auth_required, **_user_payload(user)}
+
+
+# --- User administration -----------------------------------------------------
+
+
+class CreateUserRequest(BaseModel):
+    """Payload for creating an account."""
+
+    username: str
+    password: str = Field(min_length=8)
+    role: str = "user"
+    permissions: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class UpdateUserRequest(BaseModel):
+    """Payload for changing an account."""
+
+    password: str | None = Field(default=None, min_length=8)
+    role: str | None = None
+    is_active: bool | None = None
+
+
+class PermissionRequest(BaseModel):
+    """Payload for granting pipeline actions."""
+
+    pipeline_id: str
+    actions: list[str] = Field(default_factory=list)
+
+
+@router.get("/api/users", response_model=list[dict[str, object]])
+def list_users(request: Request) -> list[dict[str, object]]:
+    """List every account."""
+    _require_admin(request)
+    return [_user_payload(item) for item in _service(request).list_users()]
+
+
+@router.post("/api/users", response_model=dict[str, object])
+def create_user(request: Request, payload: CreateUserRequest) -> dict[str, object]:
+    """Create one account."""
+    _require_admin(request)
+    try:
+        user = _service(request).create_user(
+            payload.username,
+            payload.password,
+            role=payload.role,
+            permissions=dict(payload.permissions),
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _user_payload(user)
+
+
+@router.patch("/api/users/{username}", response_model=dict[str, object])
+def update_user(request: Request, username: str, payload: UpdateUserRequest) -> dict[str, object]:
+    """Change one account's password, role, or active flag."""
+    _require_admin(request)
+    try:
+        user = _service(request).update_user(
+            username,
+            password=payload.password,
+            role=payload.role,
+            is_active=payload.is_active,
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _user_payload(user)
+
+
+@router.delete("/api/users/{username}")
+def delete_user(request: Request, username: str) -> dict[str, str]:
+    """Delete one account."""
+    _require_admin(request)
+    try:
+        _service(request).delete_user(username)
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "deleted", "username": username}
+
+
+@router.post("/api/users/{username}/permissions", response_model=dict[str, object])
+def set_permission(request: Request, username: str, payload: PermissionRequest) -> dict[str, object]:
+    """Grant or clear pipeline actions for a user."""
+    _require_admin(request)
+    try:
+        user = _service(request).grant_permission(username, payload.pipeline_id, payload.actions)
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _user_payload(user)
+
+
+@router.get("/api/permissions", response_model=dict[str, object])
+def describe_permissions(request: Request) -> dict[str, object]:
+    """Describe the permission vocabulary, for building UIs."""
+    require_permission(request, "view")
+    return {
+        "actions": list(PERMISSIONS),
+        "wildcard_pipeline": "*",
+        "notes": {
+            "view": "See the pipeline, its runs, and its logs.",
+            "edit": "Change or delete the pipeline. Implies view.",
+            "run": "Trigger, retry, and cancel runs. Implies view.",
+        },
+    }

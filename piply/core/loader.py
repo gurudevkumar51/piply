@@ -20,6 +20,7 @@ from piply.pipeline.expander import (
 )
 from piply.settings import load_settings
 
+from .conditions import ConditionError, evaluate_value
 from .models import (
     PipelineDefinition,
     ProjectDefinition,
@@ -195,14 +196,34 @@ def _normalize_pipeline_definitions(raw_data: dict[str, Any]) -> dict[str, dict[
     return pipeline_definitions
 
 
+def _render_variable_value(value: Any) -> str:
+    """Render a resolved variable as the string the rest of the loader expects."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    return str(value)
+
+
 def _parse_variables(raw_value: Any, label: str, env_values: dict[str, str]) -> dict[str, str]:
-    """Parse reusable config variables and allow earlier variables in later values."""
+    """Parse reusable config variables and allow earlier variables in later values.
+
+    A value may be conditional, either inline (``true if env == "dev" else false``)
+    or as an explicit ``{if:, then:, else:}`` mapping. Conditions see the
+    environment plus every variable defined before them, so ordering matters the
+    same way it already does for plain interpolation.
+    """
     raw_variables = _ensure_mapping(raw_value, label)
     variables: dict[str, str] = {}
     scoped_values = dict(env_values)
     for raw_key, raw_variable in raw_variables.items():
         key = str(raw_key)
-        variables[key] = _expand_string(str(raw_variable), scoped_values | variables)
+        context = scoped_values | variables
+        try:
+            resolved = evaluate_value(raw_variable, context, f"{label}.{key}")
+        except ConditionError as exc:
+            raise ConfigError(str(exc)) from exc
+        variables[key] = _expand_string(_render_variable_value(resolved), context)
     return variables
 
 
@@ -423,6 +444,40 @@ def _normalize_task_priority_suffixes(raw_tasks: dict[str, Any], pipeline_id: st
             raw_task.setdefault("priority", star_count)
         normalized[stripped] = raw_task
     return normalized
+
+
+def _parse_notify(raw_value: Any, pipeline_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Parse a pipeline ``notify`` block into failure and success recipients.
+
+    A bare list is the common case and means "on failure", because that is what
+    people actually want to be told about.
+    """
+    if raw_value in (None, "", False):
+        return (), ()
+
+    def _emails(value: Any, label: str) -> tuple[str, ...]:
+        if value in (None, "", False):
+            return ()
+        items = value if isinstance(value, list) else [value]
+        addresses: list[str] = []
+        for item in items:
+            address = str(item).strip()
+            if not address:
+                continue
+            if "@" not in address:
+                raise ConfigError(f"{label} contains an invalid email address '{address}'")
+            addresses.append(address)
+        return tuple(addresses)
+
+    label = f"Pipeline '{pipeline_id}' notify"
+    if isinstance(raw_value, list | str):
+        return _emails(raw_value, label), ()
+    if not isinstance(raw_value, dict):
+        raise ConfigError(f"{label} must be a list of addresses or a mapping")
+    return (
+        _emails(raw_value.get("on_failure"), f"{label}.on_failure"),
+        _emails(raw_value.get("on_success"), f"{label}.on_success"),
+    )
 
 
 def _parse_depends_on(raw_value: Any, label: str) -> tuple[str, ...]:
@@ -1068,7 +1123,12 @@ def _parse_task(
             kill_grace_period_seconds=kill_grace_period_seconds,
             run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
             artifact_paths=artifact_paths,
-            smtp_host=_expand_string(str(raw_task.get("smtp_host") or "localhost"), env_values),
+            # Left unset when absent, so the task inherits the central SMTP
+            # settings. Defaulting to localhost here would silently override
+            # them on every task.
+            smtp_host=(
+                None if raw_task.get("smtp_host") is None else _expand_string(str(raw_task["smtp_host"]), env_values)
+            ),
             smtp_port=int(raw_task.get("smtp_port") or 587),
             smtp_user=_expand_string(str(raw_task.get("smtp_user", "")), env_values) or None,
             smtp_password=_expand_string(str(raw_task.get("smtp_password", "")), env_values) or None,
@@ -1275,6 +1335,9 @@ def load_project(
             task.template_id = task_spec.template_id if task_spec.template_id != task_spec.runtime_id else None
             task.entity_key = task_spec.entity_key
             task.entity_values = dict(task_spec.entity_values)
+            # An entity's '*' suffix raises the priority of the tasks generated
+            # for it, on top of whatever the task template already declared.
+            task.priority += task_spec.priority
             tasks[task_id] = task
 
         _validate_task_graph(pipeline_id, tasks)
@@ -1298,6 +1361,8 @@ def load_project(
         if pipeline_id in triggers_on_success:
             raise ConfigError(f"Pipeline '{pipeline_id}' cannot trigger itself on success")
 
+        notify_on_failure, notify_on_success = _parse_notify(raw_pipeline.get("notify"), pipeline_id)
+
         pipelines[pipeline_id] = PipelineDefinition(
             pipeline_id=pipeline_id,
             title=title,
@@ -1316,6 +1381,8 @@ def load_project(
             max_parallel_tasks=max_parallel_tasks,
             timeout_seconds=pipeline_timeout_seconds,
             triggers_on_success=triggers_on_success,
+            notify_on_failure=notify_on_failure,
+            notify_on_success=notify_on_success,
             retry_policy=retry_policy,
             sensors=sensors,
         )

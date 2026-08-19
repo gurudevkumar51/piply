@@ -396,4 +396,100 @@ If picking up this list, this order front-loads value and keeps each step small:
 
 ### Suggestion by Guru:
 
-1. UI: Pipeline page: every pipeline show last 5 run in Dot format, every DOT will represent a Run & on click on dot redirect to that particular run page.
+1. UI: Pipeline page: every pipeline show last 5 run in Dots with color code, every DOT will represent a Run & on click on dot redirect to that particular run page.
+2. In Run page there is no filter or short options available
+3. Conditional Values in Pipeline Configuration:
+Review the current Piply implementation and documentation to determine whether conditional expressions are already supported for variables, task properties, or other YAML values.
+
+If this feature already exists:
+
+Document the supported syntax clearly.
+Provide examples showing how to use environment/context values in conditions.
+Ensure the documentation explains supported operators, data types, and limitations.
+
+If it is not currently supported, implement a lightweight conditional-value feature without introducing a complex expression language.
+
+Example requirement:
+
+variables:
+  active_browser: true if env == "dev" else false
+
+Or provide a similarly simple, standard syntax that fits the existing Piply YAML design.
+
+The feature should support conditions based on existing Piply context such as:
+
+Environment
+Variables
+Deployment variables
+Runtime context
+
+Keep the implementation lightweight and safe. Do not introduce a general-purpose scripting/expression engine unless required.
+4. Enhance entity-based runtime task generation to support execution priority using `*` suffixes.
+
+Example:
+
+```yaml
+entities:
+  report:
+    - payment*
+    - adjustment**
+    - refund
+```
+
+Higher `*` count means higher priority. When multiple generated tasks are ready for parallel execution, execute higher-priority entities first; tasks with the same priority can be selected in any order.
+
+5. Enhance the Runs page to clearly show pipeline execution lineage.
+
+Currently, the Runs page displays only the pipeline name, making it difficult to understand why a pipeline was executed when pipelines can trigger other pipelines.
+
+Support multi-level pipeline lineage, for example:
+
+Pipeline Deployment → Pipeline A → Pipeline B → Pipeline C
+
+For every triggered run, show its upstream/parent pipeline and make the relationship easy to understand at a glance.
+
+Requirements:
+
+Clearly distinguish manually/scheduled runs from pipeline-triggered runs.
+Show the immediate upstream pipeline for triggered runs.
+Preserve multi-level lineage so users can trace the complete execution chain.
+Make the UI easy to scan without adding excessive complexity to the Runs page.
+Prefer a concise visual indicator such as Triggered by: Pipeline A or a lineage/parent column.
+Clicking the upstream pipeline/run should allow the user to navigate to its details.
+
+The goal is to make the Runs page understandable even when pipelines are reused and chained across multiple levels.
+
+6. Improve the Pipeline Graph View to maximize the DAG graph area.
+
+* Make the **Task Focus** panel more compact by default and **collapsible/expandable** for detailed information.
+* Make the **Pipeline Metadata** section **collapsible/expandable** as well.
+* Keep essential information visible while collapsed.
+* When these sections are collapsed, automatically provide significantly more space for the **Task Graph**.
+* Maintain the current functionality and overall UI style.
+
+Goal: **maximize graph visibility while keeping detailed information easily accessible on demand.**
+
+7. Authentication & Authorization
+
+Update the authentication/authorization documentation and implementation:
+
+* Create a default **admin user** during initial setup.
+* Admin can **create and manage users**.
+* Admin can assign pipelines to users with permissions such as:
+
+  * **View only**
+  * **Edit/Update**
+  * **Run/Execute**
+* Ensure users can access only the pipelines and actions permitted to them.
+
+8. SMTP & Pipeline Alerts
+
+Add an **SMTP configuration** section in Settings:
+
+* Allow administrators to configure SMTP server details.
+* Use the configured SMTP for:
+
+  * Pipeline success/failure notifications.
+  * Email/alert tasks within pipelines.
+* Keep SMTP configuration centralized so all pipelines can reuse the same settings.
+

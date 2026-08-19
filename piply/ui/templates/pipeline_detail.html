@@ -26,8 +26,24 @@
         </div>
     </section>
 
-    <!-- One merged metadata strip instead of a hero block plus a detail grid. -->
-    <section class="panel tight-panel">
+    <!-- One merged metadata strip, collapsible so the DAG can take the space. -->
+    <section class="panel tight-panel collapsible" id="metadata-panel">
+        <div class="collapsible-header">
+            <button type="button" class="collapse-toggle" id="metadata-toggle"
+                    aria-expanded="true" aria-controls="metadata-body"
+                    onclick="toggleMetadataPanel()">
+                <span class="collapse-caret" aria-hidden="true">&#9662;</span>
+                <span class="small-kicker">Pipeline metadata</span>
+            </button>
+            <!-- Stays visible when collapsed, so the essentials are never hidden. -->
+            <div class="collapsed-summary">
+                <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
+                <span class="meta-pill">{{ pipeline.schedule_text }}</span>
+                <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+                <span class="meta-pill">{{ pipeline.execution_summary }}</span>
+            </div>
+        </div>
+        <div class="collapsible-body" id="metadata-body">
         <div class="hero-meta">
             <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
             <span class="meta-pill">{{ pipeline.schedule_text }}</span>
@@ -63,6 +79,7 @@
             {% endfor %}
         </div>
         {% endif %}
+        </div>
     </section>
 
     <section class="panel">
@@ -78,9 +95,10 @@
                 <span class="status-badge timed_out">timed out</span>
                 <span class="status-badge interrupted">interrupted</span>
                 <span class="status-badge skipped">skipped</span>
+                <button class="toolbar-button" id="pipeline-focus-toggle" type="button" onclick="togglePipelineFocusPanel()">Hide task focus</button>
             </div>
         </div>
-        <div class="dag-operator-grid">
+        <div class="dag-operator-grid" id="pipeline-dag-grid">
             <div class="dag-shell">
                 <div class="dag-stage" id="dag-stage"></div>
             </div>
@@ -384,6 +402,42 @@ async function refreshPipelineDetail() {
     }
 }
 
+// Collapsing metadata and the task focus panel hands the space to the DAG,
+// which is the reason to be on this page. Both choices persist per browser.
+const METADATA_KEY = "piply.pipelineMetadataOpen";
+const FOCUS_KEY = "piply.pipelineFocusOpen";
+
+function applyMetadataState(open, { persist = true } = {}) {
+    const panel = document.getElementById("metadata-panel");
+    const toggle = document.getElementById("metadata-toggle");
+    if (!panel || !toggle) return;
+    panel.classList.toggle("collapsed", !open);
+    toggle.setAttribute("aria-expanded", String(open));
+    if (persist) window.localStorage.setItem(METADATA_KEY, open ? "true" : "false");
+}
+
+function toggleMetadataPanel() {
+    const panel = document.getElementById("metadata-panel");
+    applyMetadataState(panel.classList.contains("collapsed"));
+}
+
+function applyPipelineFocusState(open, { persist = true, rerender = true } = {}) {
+    const grid = document.getElementById("pipeline-dag-grid");
+    const button = document.getElementById("pipeline-focus-toggle");
+    if (!grid || !button) return;
+    grid.classList.toggle("inspector-collapsed", !open);
+    button.textContent = open ? "Hide task focus" : "Show task focus";
+    button.classList.toggle("active", !open);
+    if (persist) window.localStorage.setItem(FOCUS_KEY, open ? "true" : "false");
+    // The SVG is laid out to its container, so it has to be redrawn.
+    if (rerender) renderPipelineDag();
+}
+
+function togglePipelineFocusPanel() {
+    const grid = document.getElementById("pipeline-dag-grid");
+    applyPipelineFocusState(grid.classList.contains("inspector-collapsed"));
+}
+
 function renderPreview(preview) {
     const summary = [
         `${preview.runnable_task_count}/${preview.task_count} tasks would run`,
@@ -470,6 +524,9 @@ function runFromPreview() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    // Metadata starts collapsed so the graph leads; the focus panel starts open.
+    applyMetadataState(window.localStorage.getItem(METADATA_KEY) === "true", { persist: false });
+    applyPipelineFocusState(window.localStorage.getItem(FOCUS_KEY) !== "false", { persist: false, rerender: false });
     syncPipelineDagTasks(latestTaskRunPayloads);
     focusPipelineTask(selectedPipelineTaskId, false);
     if (pipelinePageActive) {

@@ -333,6 +333,114 @@ def test_artifacts_sensor_health_and_meta_on_postgres(tmp_path: Path, dsn: str) 
     assert service.store.get_meta("a") == "3"
 
 
+def test_accounts_and_permissions_on_postgres(tmp_path: Path, dsn: str) -> None:
+    """Accounts, grants, and the SMTP settings round-trip on Postgres.
+
+    ``users`` and ``user_permissions`` use a composite ``ON CONFLICT`` target
+    and an integer-backed boolean, both of which behave differently enough
+    between the two backends to be worth proving against a real server.
+    """
+    service = PipelineService(config_path=_project(tmp_path, SIMPLE), database_path=dsn)
+
+    admin = service.create_user("root", "root-secret", role="admin")
+    assert admin.role == "admin"
+    assert admin.can("run", "flow") is True
+
+    alice = service.create_user("alice", "alice-secret", permissions={"flow": "view,run"})
+    assert alice.can("view", "flow") is True
+    assert alice.can("edit", "flow") is False
+
+    # Re-granting the same pipeline updates in place rather than duplicating.
+    alice = service.grant_permission("alice", "flow", "view")
+    assert alice.can("run", "flow") is False
+    assert [user.username for user in service.list_users()] == ["alice", "root"]
+
+    assert service.authenticate("alice", "alice-secret") is not None
+    assert service.authenticate("alice", "wrong") is None
+    assert service.authenticate("nobody", "alice-secret") is None
+
+    # is_active is stored as an integer; deactivating must actually block login.
+    service.update_user("alice", is_active=False)
+    assert service.authenticate("alice", "alice-secret") is None
+
+    # The last-admin guard reads back the integer flag correctly.
+    with pytest.raises(Exception) as excinfo:
+        service.delete_user("root")
+    assert "only active admin" in str(excinfo.value)
+
+    # Grants are cleared in the same transaction as the account rather than by
+    # a foreign key, so recreating the username must not inherit old access.
+    service.delete_user("alice")
+    assert [user.username for user in service.list_users()] == ["root"]
+    recreated = service.create_user("alice", "fresh-secret")
+    assert recreated.can("view", "flow") is False
+
+    saved = service.save_smtp_settings({"host": "smtp.example.com", "port": 2525, "password": "s3cret"})
+    assert saved["configured"] is True
+    assert saved["password_set"] is True
+    assert "s3cret" not in str(saved)
+    # A blank password on a later edit keeps the stored one.
+    saved = service.save_smtp_settings({"host": "smtp2.example.com", "password": ""})
+    assert saved["host"] == "smtp2.example.com"
+    assert saved["password_set"] is True
+
+
+def test_run_history_filters_and_sorting_on_postgres(tmp_path: Path, dsn: str) -> None:
+    """The window-function history, filters, sorts, and lineage work on Postgres."""
+    config = "\n".join(
+        [
+            'version: "1"',
+            "title: History Test",
+            "workspace: workspace",
+            "pipelines:",
+            "  upstream:",
+            "    triggers_on_success: [downstream]",
+            "    tasks:",
+            "      emit: {type: cli, command: echo emitted}",
+            "  downstream:",
+            "    tasks:",
+            "      consume: {type: cli, command: echo consumed}",
+        ]
+    )
+    service = PipelineService(config_path=_project(tmp_path, config), database_path=dsn)
+    for _ in range(3):
+        service.trigger_pipeline("upstream", wait=True)
+
+    for _ in range(60):
+        if len(service.list_runs(pipeline_id="downstream")) >= 3:
+            break
+        time.sleep(0.2)
+
+    # ROW_NUMBER() OVER (PARTITION BY ...) drives the pipeline-row status dots.
+    history = service.store.recent_runs_by_pipeline(limit=2)
+    assert set(history) == {"upstream", "downstream"}
+    assert len(history["upstream"]) == 2
+    assert all(record.pipeline_id == "upstream" for record in history["upstream"])
+
+    # "trigger" is a keyword and has to stay quoted in both the filter and the sort.
+    assert len(service.list_runs(trigger="manual")) == 3
+    assert len(service.list_runs(trigger="pipeline")) == 3
+    assert len(service.list_runs(trigger="manual,pipeline")) == 6
+    assert len(service.list_runs(status="success")) == 6
+    assert service.list_runs(status="failed") == []
+    assert len(service.list_runs(pipeline_id="downstream", trigger="pipeline")) == 3
+
+    for sort in [*RunStore.RUN_SORTS, "duration_desc", "duration_asc", "bogus_key"]:
+        assert len(service.list_runs(sort=sort)) == 6, sort
+
+    ascending = service.list_runs(sort="started_asc")
+    descending = service.list_runs(sort="started_desc")
+    assert [run.run_id for run in ascending] == [run.run_id for run in reversed(descending)]
+
+    # Lineage walks parent_run_id one generation at a time.
+    downstream_runs = service.list_runs(pipeline_id="downstream")
+    lineage = service.lineage_for_runs(downstream_runs)
+    assert len(lineage) == 3
+    for run in downstream_runs:
+        chain = lineage[run.run_id]
+        assert [step["pipeline_id"] for step in chain] == ["upstream"]
+
+
 def test_backup_command_refuses_a_server_store(tmp_path: Path, dsn: str) -> None:
     """`piply backup` explains that a server store needs its own tooling."""
     store = RunStore(dsn)

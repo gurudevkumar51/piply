@@ -2,60 +2,135 @@
 
 {% block title %}Runs - Piply{% endblock %}
 
+{% macro trigger_chip(value) -%}
+<span class="trigger-chip {{ value }}" title="Triggered by {{ value }}">{{ value }}</span>
+{%- endmacro %}
+
 {% block content %}
 <div class="page-grid">
-    <section class="hero">
-        <div class="eyebrow">Run history</div>
-        <h1 class="hero-headline">Every execution keeps its <span>task results and raw logs</span>.</h1>
-        <p class="hero-copy">
-            Runs are persisted with task counts, downstream triggers, and operator output so you can debug the flow instead of guessing what happened.
-        </p>
-        <div class="hero-meta">
-            <span class="meta-pill">database {{ scheduler.database_path }}</span>
-            <span class="meta-pill">heartbeat {{ scheduler.heartbeat or "waiting" }}</span>
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Run history</div>
+            <h1 class="panel-title" style="font-size:1.55rem; margin:0;">
+                {{ runs|length }} run{{ '' if runs|length == 1 else 's' }}
+            </h1>
+            <p class="page-header-copy" style="margin:6px 0 0;">
+                Manual launches, scheduled runs, and pipeline-triggered runs share one stream.
+                Triggered runs show the chain that led to them.
+            </p>
+        </div>
+        <div class="run-stats-row">
+            <span class="meta-pill">scheduler {% if scheduler.running %}live{% else %}{{ scheduler.state }}{% endif %}</span>
         </div>
     </section>
 
-    <section class="panel">
-        <div class="panel-header">
-            <div>
-                <h2 class="panel-title">Execution timeline</h2>
-                <p class="panel-copy">Manual launches, scheduled runs, and downstream pipeline triggers all land in the same history stream.</p>
-            </div>
-        </div>
+    <section class="panel tight-panel">
+        <form class="listing-toolbar" method="get" action="/runs" id="run-filters">
+            <select name="pipeline_id" class="toolbar-input" aria-label="Filter by pipeline" onchange="this.form.submit()">
+                <option value="">All pipelines</option>
+                {% for item in pipelines %}
+                <option value="{{ item.pipeline_id }}" {% if filters.pipeline_id == item.pipeline_id %}selected{% endif %}>
+                    {{ item.title }}
+                </option>
+                {% endfor %}
+            </select>
+
+            <select name="status" class="toolbar-input" aria-label="Filter by status" onchange="this.form.submit()">
+                <option value="">Any status</option>
+                <option value="failed,timed_out,interrupted" {% if filters.status == 'failed,timed_out,interrupted' %}selected{% endif %}>
+                    Failure-like
+                </option>
+                {% for value in run_statuses %}
+                <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+            </select>
+
+            <select name="trigger" class="toolbar-input" aria-label="Filter by trigger" onchange="this.form.submit()">
+                <option value="">Any trigger</option>
+                {% for value in trigger_types %}
+                <option value="{{ value }}" {% if filters.trigger == value %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+            </select>
+
+            <label class="toolbar-check">From
+                <input type="date" name="date_from" class="toolbar-input" value="{{ filters.date_from }}" onchange="this.form.submit()">
+            </label>
+            <label class="toolbar-check">To
+                <input type="date" name="date_to" class="toolbar-input" value="{{ filters.date_to }}" onchange="this.form.submit()">
+            </label>
+
+            <select name="sort" class="toolbar-input" aria-label="Sort runs" onchange="this.form.submit()">
+                <option value="started_desc" {% if filters.sort == 'started_desc' %}selected{% endif %}>Newest first</option>
+                <option value="started_asc" {% if filters.sort == 'started_asc' %}selected{% endif %}>Oldest first</option>
+                <option value="duration_desc" {% if filters.sort == 'duration_desc' %}selected{% endif %}>Longest first</option>
+                <option value="duration_asc" {% if filters.sort == 'duration_asc' %}selected{% endif %}>Shortest first</option>
+                <option value="pipeline" {% if filters.sort == 'pipeline' %}selected{% endif %}>Pipeline name</option>
+                <option value="status" {% if filters.sort == 'status' %}selected{% endif %}>Status</option>
+                <option value="trigger" {% if filters.sort == 'trigger' %}selected{% endif %}>Trigger</option>
+            </select>
+
+            <select name="limit" class="toolbar-input" aria-label="How many runs" onchange="this.form.submit()">
+                {% for value in [50, 100, 200, 500] %}
+                <option value="{{ value }}" {% if filters.limit == value %}selected{% endif %}>{{ value }} rows</option>
+                {% endfor %}
+            </select>
+
+            <noscript><button class="button primary tiny-button" type="submit">Apply</button></noscript>
+            <a class="button ghost tiny-button" href="/runs">Reset</a>
+        </form>
 
         {% if runs %}
         <div class="table-wrap">
-            <table class="data-table">
+            <table class="data-table runs-table">
                 <thead>
                     <tr>
-                        <th>Run ID</th>
+                        <th>Run</th>
                         <th>Pipeline</th>
                         <th>Status</th>
-                        <th>Trigger</th>
+                        <th>Trigger &amp; lineage</th>
                         <th>Tasks</th>
                         <th>Started</th>
-                        <th>Finished</th>
+                        <th>Duration</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for run in runs %}
+                    {% set chain = lineage.get(run.run_id, []) %}
                     <tr>
                         <td><a class="mono" href="/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
                         <td><a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_title }}</a></td>
                         <td><span class="status-badge {{ run.status }}">{{ run.status }}</span></td>
-                        <td class="mono">{{ run.trigger }}</td>
+                        <td>
+                            <div class="lineage-cell">
+                                {{ trigger_chip(run.trigger) }}
+                                {% if chain %}
+                                <span class="lineage-chain">
+                                    {% for ancestor in chain %}
+                                        {% if ancestor.available %}
+                                        <a class="lineage-step {{ ancestor.status }}"
+                                           href="/runs/{{ ancestor.run_id }}"
+                                           title="{{ ancestor.pipeline_title }} — {{ ancestor.status }} (run {{ ancestor.run_id }})">{{ ancestor.pipeline_title }}</a>
+                                        {% else %}
+                                        <span class="lineage-step deleted" title="Run {{ ancestor.run_id }} is no longer stored">{{ ancestor.pipeline_title }}</span>
+                                        {% endif %}
+                                        <span class="lineage-arrow">&rarr;</span>
+                                    {% endfor %}
+                                    <span class="lineage-step current" title="This run">{{ run.pipeline_title }}</span>
+                                </span>
+                                {% endif %}
+                            </div>
+                        </td>
                         <td>{{ run.successful_tasks }}/{{ run.task_count }}</td>
-                        <td>{{ run.started_at or run.created_at }}</td>
-                        <td>{{ run.finished_at or "-" }}</td>
+                        <td class="nowrap">{{ (run.started_at or run.created_at).astimezone().strftime('%Y-%m-%d %H:%M') }}</td>
+                        <td class="nowrap">{% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</td>
                         <td>
                             <div class="table-actions">
-                                <a class="button ghost" href="/runs/{{ run.run_id }}">Open</a>
+                                <a class="button ghost tiny-button" href="/runs/{{ run.run_id }}">Open</a>
                                 {% if run.status in ['queued', 'running'] %}
-                                <button class="button warn" onclick="cancelRun('{{ run.run_id }}')">Cancel</button>
+                                <button class="button warn tiny-button" onclick="cancelRun('{{ run.run_id }}')">Cancel</button>
                                 {% else %}
-                                <button class="button ghost" onclick="deleteRun('{{ run.run_id }}')">Delete</button>
+                                <button class="button ghost tiny-button" onclick="deleteRun('{{ run.run_id }}')">Delete</button>
                                 {% endif %}
                             </div>
                         </td>
@@ -65,7 +140,10 @@
             </table>
         </div>
         {% else %}
-        <div class="empty-state">No runs recorded yet. Start one from the pipelines page to begin building history.</div>
+        <div class="empty-state">
+            No runs match these filters.
+            <a href="/runs">Clear them</a> to see the full history.
+        </div>
         {% endif %}
     </section>
 </div>

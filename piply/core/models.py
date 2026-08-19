@@ -235,6 +235,10 @@ class PipelineDefinition:
     max_parallel_tasks: int = 4
     timeout_seconds: int | None = None
     triggers_on_success: tuple[str, ...] = ()
+    #: Email recipients for run outcomes, delivered through the central SMTP
+    #: settings so no pipeline needs its own server configuration.
+    notify_on_failure: tuple[str, ...] = ()
+    notify_on_success: tuple[str, ...] = ()
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     sensors: dict[str, SensorDefinition] = field(default_factory=dict)
 
@@ -472,6 +476,8 @@ class PipelineSummary:
     timeout_seconds: int | None = None
     triggered_by: tuple[str, ...] = ()
     latest_task_states: dict[str, TaskStatus] = field(default_factory=dict)
+    #: Newest first. Rendered as the run-history dots on the pipeline listing.
+    recent_runs: tuple[RunRecord, ...] = ()
     last_run: RunRecord | None = None
     active_runs: int = 0
     retry_summary: str = "No automatic retry"

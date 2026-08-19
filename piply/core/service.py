@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -20,9 +21,22 @@ from piply.engine.base import BaseEngine
 from piply.engine.local_engine import LocalEngine
 from piply.settings import PiplySettings, load_settings
 
+from .auth import (
+    ALL_PIPELINES,
+    ROLES,
+    AuthError,
+    LoginThrottle,
+    User,
+    generate_password,
+    hash_password,
+    normalize_permissions,
+    normalize_username,
+    verify_password,
+)
 from .dialects import is_postgres_dsn
 from .graph import upstream_closure
 from .loader import discover_config, load_project
+from .mailer import build_message, load_smtp_settings, save_smtp_settings, send_message
 from .models import (
     PipelineDefinition,
     PipelineSummary,
@@ -129,6 +143,11 @@ class PipelineService:
         self._accept_new_work = True
         self._shutdown_reason: str | None = None
         self._last_reconcile_monotonic = 0.0
+        #: Failed sign-in tracking, kept in memory alongside the single process.
+        self.login_throttle = LoginThrottle()
+        #: Hashed once so an unknown username costs the same as a wrong password
+        #: without paying for a second key derivation on every failed attempt.
+        self._timing_decoy_hash = hash_password(secrets.token_hex(16))
         self.recover_interrupted_executions()
         self.reload_project(force=True)
 
@@ -284,7 +303,10 @@ class PipelineService:
         self.reconcile_runtime_health()
         project = self.project
         paused_ids = self.store.list_paused_pipeline_ids()
-        latest_runs = self.store.latest_runs_by_pipeline()
+        # One windowed query supplies both the run-history dots and the latest
+        # run, so this stays at three queries regardless of pipeline count.
+        recent_runs = self.store.recent_runs_by_pipeline(self.settings.pipeline_run_history_count)
+        latest_runs = {pipeline_id: runs[0] for pipeline_id, runs in recent_runs.items() if runs}
         active_counts = self.store.active_run_counts_by_pipeline()
         task_states = self.store.task_states_for_runs([run.run_id for run in latest_runs.values()])
         upstream_map = self.upstream_pipeline_map()
@@ -317,6 +339,7 @@ class PipelineService:
                         {} if last_run is None else task_states.get(last_run.run_id, {})  # type: ignore[arg-type]
                     ),
                     last_run=last_run,
+                    recent_runs=tuple(recent_runs.get(pipeline.pipeline_id, ())),
                     active_runs=active_counts.get(pipeline.pipeline_id, 0),
                     retry_summary=pipeline.retry_policy.summary,
                     template_id=pipeline.template_id,
@@ -688,18 +711,22 @@ class PipelineService:
         pipeline_id: str | None = None,
         status: str | None = None,
         tenant_id: str | None = None,
+        trigger: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        sort: str = "started_desc",
         limit: int = 50,
     ) -> list[RunRecord]:
-        """Return recent runs with optional filters."""
+        """Return recent runs with optional filters and sort order."""
         self.reconcile_runtime_health()
         return self.store.list_runs(
             pipeline_id=pipeline_id,
             status=status,
             tenant_id=tenant_id,
+            trigger=trigger,
             created_after=created_after,
             created_before=created_before,
+            sort=sort,
             limit=limit,
         )
 
@@ -777,6 +804,63 @@ class PipelineService:
                 }
             )
         return links
+
+    #: How far up a trigger chain to walk before giving up. Chains are short in
+    #: practice; the cap only guards against a cycle in corrupted data.
+    MAX_LINEAGE_DEPTH = 12
+
+    def lineage_for_runs(self, runs: list[RunRecord]) -> dict[str, list[dict[str, object]]]:
+        """Return the full ancestor chain for each run, root first.
+
+        Walks one generation at a time across every run at once, so the cost is
+        one query per level of depth rather than one per run.
+        """
+        parents_by_run: dict[str, str] = {
+            run.run_id: run.parent_run_id for run in runs if run.parent_run_id is not None
+        }
+        known: dict[str, dict[str, object]] = {}
+
+        frontier = list(dict.fromkeys(parents_by_run.values()))
+        for _ in range(self.MAX_LINEAGE_DEPTH):
+            missing = [run_id for run_id in frontier if run_id not in known]
+            if not missing:
+                break
+            fetched = self.store.runs_by_ids(missing)
+            known.update(fetched)
+            frontier = [
+                str(item["parent_run_id"])
+                for item in fetched.values()
+                if item.get("parent_run_id") and str(item["parent_run_id"]) not in known
+            ]
+            if not frontier:
+                break
+
+        lineage: dict[str, list[dict[str, object]]] = {}
+        for run in runs:
+            chain: list[dict[str, object]] = []
+            cursor = run.parent_run_id
+            seen: set[str] = set()
+            while cursor and cursor not in seen and len(chain) < self.MAX_LINEAGE_DEPTH:
+                seen.add(cursor)
+                ancestor = known.get(cursor)
+                if ancestor is None:
+                    # The parent was pruned; record the reference so the chain
+                    # is honest about being incomplete rather than silently short.
+                    chain.append(
+                        {
+                            "run_id": cursor,
+                            "pipeline_id": run.parent_pipeline_id,
+                            "pipeline_title": run.parent_pipeline_id or cursor,
+                            "status": "deleted",
+                            "trigger": None,
+                            "available": False,
+                        }
+                    )
+                    break
+                chain.append({**ancestor, "available": True})
+                cursor = ancestor.get("parent_run_id")  # type: ignore[assignment]
+            lineage[run.run_id] = list(reversed(chain))
+        return lineage
 
     def upstream_run_link(self, run: RunRecord) -> dict[str, object] | None:
         """Return the parent run that triggered this one, when there is one."""
@@ -1367,8 +1451,55 @@ class PipelineService:
                 queued.append(slot)
         return queued
 
+    def notify_run_outcome(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Email the configured recipients about a finished run.
+
+        Delivery uses the central SMTP settings, so a pipeline only lists who to
+        tell, never how to reach the mail server. A delivery failure is logged
+        against the run and never changes its status.
+        """
+        recipients = pipeline.notify_on_success if run.status == "success" else pipeline.notify_on_failure
+        if not recipients:
+            return
+
+        settings = load_smtp_settings(self.store)
+        if not settings.configured:
+            self.store.append_log(
+                run.run_id,
+                "Run notification skipped: no SMTP server is configured under Settings.",
+                stream="stderr",
+            )
+            return
+
+        duration = "unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s"
+        body = "\n".join(
+            [
+                f"Pipeline : {pipeline.title} ({pipeline.pipeline_id})",
+                f"Run      : {run.run_id}",
+                f"Status   : {run.status}",
+                f"Trigger  : {run.trigger}",
+                f"Tasks    : {run.successful_tasks}/{run.task_count} succeeded",
+                f"Duration : {duration}",
+                *([f"Error    : {run.error}"] if run.error else []),
+            ]
+        )
+        try:
+            send_message(
+                settings,
+                build_message(
+                    settings,
+                    to=list(recipients),
+                    subject=f"[Piply] {pipeline.title} {run.status}",
+                    body=body,
+                ),
+            )
+            self.store.append_log(run.run_id, f"Run notification sent to {', '.join(recipients)}.")
+        except Exception as exc:  # noqa: BLE001 - a mail failure must not fail the run
+            self.store.append_log(run.run_id, f"Run notification failed: {exc}", stream="stderr")
+
     def _handle_pipeline_success(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Trigger downstream pipelines after a successful run completes."""
+        self.notify_run_outcome(pipeline, run)
         wait_for_pipeline_triggers = self._should_wait_for_pipeline_triggers()
         if not pipeline.triggers_on_success:
             self.drain_trigger_queue(
@@ -1417,6 +1548,7 @@ class PipelineService:
 
     def _handle_pipeline_failure(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Schedule an automatic retry when the pipeline retry policy allows it."""
+        self.notify_run_outcome(pipeline, run)
         retry_policy = pipeline.retry_policy
         if not retry_policy.enabled or run.status != "failed":
             self.drain_trigger_queue(limit=20)
@@ -1688,6 +1820,210 @@ class PipelineService:
                 results.append(entry)
         return sorted(results, key=lambda item: (item["status"] != "failing", str(item["sensor_key"])))
 
+    def get_smtp_settings(self) -> dict[str, object]:
+        """Return the central SMTP configuration, without the password."""
+        return load_smtp_settings(self.store).public_dict()
+
+    def save_smtp_settings(self, values: dict[str, object]) -> dict[str, object]:
+        """Persist central SMTP configuration and return the safe view of it."""
+        return save_smtp_settings(self.store, values).public_dict()
+
+    def send_test_email(self, recipient: str) -> str:
+        """Send one test message so an admin can confirm the settings work."""
+        settings = load_smtp_settings(self.store)
+        if not settings.configured:
+            raise ValueError("No SMTP server is configured.")
+        send_message(
+            settings,
+            build_message(
+                settings,
+                to=[recipient],
+                subject="[Piply] SMTP test message",
+                body=f"This is a test message from Piply ({self.project.title}).",
+            ),
+        )
+        return f"Test message sent to {recipient} via {settings.host}."
+
+    # --- Users and permissions ---------------------------------------------
+
+    def bootstrap_admin(self) -> tuple[str, str] | None:
+        """Create the initial admin account when none exists.
+
+        Only runs when authentication has been switched on. An existing install
+        that never enabled auth keeps working with no accounts and no login
+        page, which is what backward compatibility requires here.
+
+        Returns ``(username, password)`` exactly once, on the run that creates
+        it, so the caller can show the generated password. The password is
+        never stored in clear text and cannot be retrieved again.
+        """
+        if not self.settings.auth_enabled or self.store.count_users() > 0:
+            return None
+        if self.settings.auth_username and self.settings.auth_password:
+            # PIPLY_AUTH_USERNAME/PASSWORD already define an administrator, so
+            # generating a second one would be surprising and unnecessary.
+            return None
+
+        username = normalize_username(os.environ.get("PIPLY_ADMIN_USERNAME") or "admin")
+        password = os.environ.get("PIPLY_ADMIN_PASSWORD") or generate_password()
+        self.store.upsert_user(username, password_hash=hash_password(password), role="admin", is_active=True)
+        self.store.set_meta("admin_bootstrapped_at", datetime.now(timezone.utc).isoformat())
+        return username, password
+
+    def get_user(self, username: str) -> User | None:
+        """Return one account, or None."""
+        record = self.store.get_user_record(normalize_username(username))
+        if record is None:
+            return None
+        return User(
+            username=str(record["username"]),
+            role=str(record["role"]),
+            is_active=bool(record["is_active"]),
+            created_at=record["created_at"],  # type: ignore[arg-type]
+            last_login_at=record["last_login_at"],  # type: ignore[arg-type]
+            permissions=dict(record["permissions"]),  # type: ignore[arg-type]
+        )
+
+    def list_users(self) -> list[User]:
+        """Return every account."""
+        return [
+            User(
+                username=str(item["username"]),
+                role=str(item["role"]),
+                is_active=bool(item["is_active"]),
+                created_at=item["created_at"],  # type: ignore[arg-type]
+                last_login_at=item["last_login_at"],  # type: ignore[arg-type]
+                permissions=dict(item["permissions"]),  # type: ignore[arg-type]
+            )
+            for item in self.store.list_user_records()
+        ]
+
+    def authenticate(self, username: str, password: str) -> User | None:
+        """Return the account when the credentials are valid and active.
+
+        Repeated failures lock the username out for a few minutes. Verification
+        is intentionally slow, so an unthrottled endpoint would be both a
+        guessing risk and a way to exhaust CPU.
+        """
+        try:
+            normalized = normalize_username(username)
+        except AuthError:
+            return None
+        if self.login_throttle.retry_after(normalized):
+            return None
+
+        record = self.store.get_user_record(normalized)
+        if record is None or not record["is_active"]:
+            # Still hash, so a missing user and a wrong password take the same
+            # time and cannot be told apart by an attacker.
+            verify_password(password, self._timing_decoy_hash)
+            self.login_throttle.record_failure(normalized)
+            return None
+        if not verify_password(password, str(record["password_hash"])):
+            self.login_throttle.record_failure(normalized)
+            return None
+
+        self.login_throttle.record_success(normalized)
+        self.store.touch_user_login(normalized)
+        return self.get_user(normalized)
+
+    def login_retry_after(self, username: str) -> int:
+        """Return the remaining lockout in seconds for a username, else 0."""
+        try:
+            return self.login_throttle.retry_after(normalize_username(username))
+        except AuthError:
+            return 0
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        role: str = "user",
+        permissions: dict[str, object] | None = None,
+    ) -> User:
+        """Create one account with optional initial grants."""
+        normalized = normalize_username(username)
+        if role not in ROLES:
+            raise AuthError(f"Role must be one of: {', '.join(ROLES)}.")
+        if self.store.get_user_record(normalized) is not None:
+            raise AuthError(f"User '{normalized}' already exists.")
+        self.store.upsert_user(normalized, password_hash=hash_password(password), role=role, is_active=True)
+        for pipeline_id, actions in (permissions or {}).items():
+            self.grant_permission(normalized, str(pipeline_id), actions)
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def update_user(
+        self,
+        username: str,
+        *,
+        password: str | None = None,
+        role: str | None = None,
+        is_active: bool | None = None,
+    ) -> User:
+        """Update one account's password, role, or active flag."""
+        normalized = normalize_username(username)
+        if self.store.get_user_record(normalized) is None:
+            raise AuthError(f"Unknown user '{normalized}'.")
+        if role is not None and role not in ROLES:
+            raise AuthError(f"Role must be one of: {', '.join(ROLES)}.")
+        if (role and role != "admin") or is_active is False:
+            self._ensure_another_admin_remains(normalized)
+        self.store.upsert_user(
+            normalized,
+            password_hash=hash_password(password) if password else None,
+            role=role,
+            is_active=is_active,
+        )
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def delete_user(self, username: str) -> None:
+        """Delete one account, refusing to remove the last active admin."""
+        normalized = normalize_username(username)
+        self._ensure_another_admin_remains(normalized)
+        if not self.store.delete_user(normalized):
+            raise AuthError(f"Unknown user '{normalized}'.")
+
+    def _ensure_another_admin_remains(self, username: str) -> None:
+        """Refuse a change that would leave the install with no way in."""
+        current = self.get_user(username)
+        if current is None or not current.is_admin or not current.is_active:
+            return
+        other_admins = [
+            item for item in self.list_users() if item.is_admin and item.is_active and item.username != username
+        ]
+        if not other_admins:
+            raise AuthError("This is the only active admin. Promote another admin first.")
+
+    def grant_permission(self, username: str, pipeline_id: str, actions: object) -> User:
+        """Grant pipeline actions to a user. Use '*' for every pipeline."""
+        normalized = normalize_username(username)
+        if self.store.get_user_record(normalized) is None:
+            raise AuthError(f"Unknown user '{normalized}'.")
+        if pipeline_id != ALL_PIPELINES and pipeline_id not in self.project.pipelines:
+            raise AuthError(f"Unknown pipeline '{pipeline_id}'.")
+        self.store.set_user_permission(normalized, pipeline_id, normalize_permissions(actions))
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def revoke_permission(self, username: str, pipeline_id: str) -> User:
+        """Remove every grant a user holds on one pipeline."""
+        return self.grant_permission(username, pipeline_id, frozenset())
+
+    @property
+    def auth_required(self) -> bool:
+        """Return whether requests must be authenticated.
+
+        Accounts existing in the database is itself enough to switch auth on,
+        so creating the first user secures the install without a second step.
+        """
+        return bool(self.settings.auth_enabled) or self.store.count_users() > 0
+
     def diagnostics(self) -> dict[str, object]:
         """Return the full runtime diagnostics payload used by the API and UI."""
         scheduler = self.scheduler_snapshot()
@@ -1756,14 +2092,19 @@ class PipelineService:
         *,
         query: str | None = None,
         pipeline_id: str | None = None,
+        pipeline_ids: set[str] | None = None,
         task_id: str | None = None,
         limit: int = 300,
     ):
-        """Search recent log messages across runs."""
+        """Search recent log messages across runs.
+
+        ``pipeline_ids`` narrows the search to a permitted set of pipelines.
+        """
         self.reconcile_runtime_health()
         return self.store.search_logs(
             query=query,
             pipeline_id=pipeline_id,
+            pipeline_ids=pipeline_ids,
             task_id=task_id,
             limit=limit,
         )

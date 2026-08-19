@@ -65,6 +65,26 @@ class PruneRequest(BaseModel):
     vacuum: bool = True
 
 
+class SmtpSettingsRequest(BaseModel):
+    """Central SMTP configuration submitted by an administrator."""
+
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = None
+    #: Omit to keep the stored password; it is never returned by the API.
+    password: str | None = None
+    from_address: str | None = None
+    use_tls: bool | None = None
+    use_ssl: bool | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+
+
+class SmtpTestRequest(BaseModel):
+    """Where to send a test message."""
+
+    recipient: str
+
+
 class RunResponse(BaseModel):
     """RunResponse exposes the run-level state returned by the API."""
 
@@ -305,6 +325,8 @@ class PipelineResponse(BaseModel):
     latest_task_states: dict[str, str]
     retry_summary: str
     last_run: RunResponse | None = None
+    #: Newest first. Drives the run-history dots on the pipeline listing.
+    recent_runs: list[RunResponse] = Field(default_factory=list)
 
     @classmethod
     def from_summary(cls, summary: PipelineSummary) -> PipelineResponse:
@@ -333,6 +355,7 @@ class PipelineResponse(BaseModel):
             latest_task_states=dict(summary.latest_task_states),
             retry_summary=summary.retry_summary,
             last_run=RunResponse.from_record(summary.last_run) if summary.last_run else None,
+            recent_runs=[RunResponse.from_record(item) for item in summary.recent_runs],
         )
 
 

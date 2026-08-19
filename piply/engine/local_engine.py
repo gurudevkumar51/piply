@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import ast
-import re
 import threading
 import traceback
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from piply.core.artifacts import collect_task_artifacts
+from piply.core.conditions import ConditionError, evaluate_boolean
 from piply.core.context import RuntimeTaskContext
 from piply.core.graph import topological_order
 from piply.core.models import PipelineDefinition, RunRecord, TaskDefinition
@@ -24,88 +23,16 @@ def _task_sort_key(index_by_task_id: dict[str, int], task: TaskDefinition) -> tu
     return (-task.priority, index_by_task_id.get(task.task_id, 0), task.task_id)
 
 
-_CONDITION_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}")
-
-
-def _resolve_condition_placeholders(expression: str, values: dict[str, object]) -> str:
-    """Replace ``{name}`` placeholders with quoted literals before parsing.
-
-    This keeps the documented ``run_if: "{report} == 'payment'"`` form working
-    without introducing a full expression language: placeholders are substituted
-    as data, never as code.
-    """
-
-    def _replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        value: object = values
-        for part in name.split("."):
-            if isinstance(value, dict) and part in value:
-                value = value[part]
-            else:
-                value = None
-                break
-        if value is None:
-            return "None"
-        if isinstance(value, bool | int | float):
-            return repr(value)
-        return repr(str(value))
-
-    return _CONDITION_PLACEHOLDER.sub(_replace, expression)
-
-
 def safe_condition_eval(expression: str, values: dict[str, object]) -> bool:
-    """Evaluate a small boolean expression for task conditions.
+    """Evaluate a task ``run_if`` condition.
 
-    Only literals, names, comparisons, membership tests, and boolean operators
-    are supported. Anything else raises so a typo fails loudly instead of
-    silently skipping a task.
+    Delegates to the shared evaluator so ``run_if`` and conditional variables
+    accept exactly the same syntax.
     """
-    resolved = _resolve_condition_placeholders(expression, values)
     try:
-        tree = ast.parse(resolved, mode="eval")
-    except SyntaxError as exc:
-        raise ValueError(f"Invalid run_if expression '{expression}'.") from exc
-
-    def eval_node(node: ast.AST) -> object:
-        if isinstance(node, ast.Expression):
-            return eval_node(node.body)
-        if isinstance(node, ast.Constant):
-            return node.value
-        if isinstance(node, ast.Name):
-            return values.get(node.id)
-        if isinstance(node, ast.BoolOp):
-            items = [bool(eval_node(item)) for item in node.values]
-            if isinstance(node.op, ast.And):
-                return all(items)
-            if isinstance(node.op, ast.Or):
-                return any(items)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return not bool(eval_node(node.operand))
-        if isinstance(node, ast.Compare):
-            left = eval_node(node.left)
-            for operator, comparator in zip(node.ops, node.comparators, strict=True):
-                right = eval_node(comparator)
-                if isinstance(operator, ast.Eq):
-                    passed = left == right
-                elif isinstance(operator, ast.NotEq):
-                    passed = left != right
-                elif isinstance(operator, ast.In):
-                    passed = left in right if isinstance(right, list | tuple | set | str | dict) else False
-                elif isinstance(operator, ast.NotIn):
-                    passed = left not in right if isinstance(right, list | tuple | set | str | dict) else True
-                else:
-                    raise ValueError(f"Unsupported run_if operator in '{expression}'.")
-                if not passed:
-                    return False
-                left = right
-            return True
-        if isinstance(node, ast.List):
-            return [eval_node(item) for item in node.elts]
-        if isinstance(node, ast.Tuple):
-            return tuple(eval_node(item) for item in node.elts)
-        raise ValueError(f"Unsupported run_if expression '{expression}'.")
-
-    return bool(eval_node(tree))
+        return evaluate_boolean(expression, values)
+    except ConditionError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 class LocalEngine(BaseEngine):

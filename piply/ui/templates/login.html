@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in - Piply</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="login-shell">
+        <form class="login-card" method="post" action="/login">
+            <div class="brand-mark" aria-hidden="true">pl</div>
+            <h1 class="panel-title">Sign in to Piply</h1>
+            <p class="page-header-copy">{{ project.title }}</p>
+
+            {% if error %}
+            <div class="login-error" role="alert">{{ error }}</div>
+            {% endif %}
+
+            <label class="login-field">
+                <span class="small-kicker">Username</span>
+                <input type="text" name="username" autocomplete="username" autofocus required>
+            </label>
+            <label class="login-field">
+                <span class="small-kicker">Password</span>
+                <input type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <input type="hidden" name="next" value="{{ next }}">
+            <button class="button primary" type="submit">Sign in</button>
+        </form>
+    </div>
+</body>
+</html>

@@ -8,7 +8,10 @@ Piply is a lightweight DAG runner for script-heavy teams. It keeps the runtime s
 - multiple tasks per pipeline
 - dependency-aware execution with task priority
 - task and pipeline execution timeouts
-- lightweight conditional execution with `run_if`
+- lightweight conditional execution with `run_if`, and conditional variable values
+- entity priority via `payment*` / `adjustment**` suffixes
+- accounts, roles, and per-pipeline permissions
+- central SMTP for email tasks and run notifications
 - declared artifacts, browsable and downloadable from the run page
 - metadata-driven entity expansion for reusable task templates
 - optional pipeline templates and deployments for tenant/environment reuse
@@ -29,6 +32,7 @@ Full reference material now lives in `docs/`:
 - [YAML Specification](../docs/YAML_SPECIFICATION.md)
 - [Runtime Lifecycles](../docs/LIFECYCLES.md)
 - [UI Guide](../docs/UI_GUIDE.md)
+- [Authentication](../docs/AUTHENTICATION.md)
 - [Execution Examples](../docs/EXAMPLES.md)
 - [Migration Guide](../docs/MIGRATION.md)
 - [Technical Architecture](../docs/architecture/technical_architecture.md)

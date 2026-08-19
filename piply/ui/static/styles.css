@@ -1508,7 +1508,7 @@ body.drawer-open {
 
 .pipeline-row {
     display: grid;
-    grid-template-columns: 28px minmax(0, 2.2fr) repeat(3, minmax(0, 1fr)) 64px 76px auto;
+    grid-template-columns: 28px minmax(0, 2fr) 128px repeat(3, minmax(0, 1fr)) 60px 72px auto;
     align-items: center;
     gap: 10px;
     padding: 9px 12px;
@@ -1780,7 +1780,7 @@ body.drawer-open {
     }
 
     .pipeline-row {
-        grid-template-columns: 24px minmax(0, 1.8fr) repeat(2, minmax(0, 1fr)) auto;
+        grid-template-columns: 24px minmax(0, 1.6fr) 128px repeat(2, minmax(0, 1fr)) auto;
     }
 
     .pipeline-row-cell.narrow {
@@ -1832,4 +1832,378 @@ body.drawer-open {
     .dag-svg {
         min-height: 320px;
     }
+}
+
+/* ---------------------------------------------------------------------------
+   Run history dots on the pipeline listing
+   --------------------------------------------------------------------------- */
+
+.run-history {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 4px;
+    min-height: 20px;
+}
+
+/* One dot per run, oldest on the left. Anchors so each is a real link that can
+   be opened in a new tab, focused, and read by a screen reader. */
+.run-dot {
+    position: relative;
+    width: 13px;
+    height: 13px;
+    border-radius: 4px;
+    flex: 0 0 auto;
+    background: #9aa8bd;
+    border: 1px solid rgba(15, 32, 56, 0.12);
+    text-decoration: none;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.run-dot:hover,
+.run-dot:focus-visible {
+    transform: scale(1.28);
+    box-shadow: 0 2px 8px rgba(15, 32, 56, 0.28);
+    z-index: 3;
+    outline: none;
+}
+
+.run-dot:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Placeholder for a pipeline with fewer than five runs, so every row's dots
+   stay column-aligned down the page. */
+.run-dot.empty {
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+    pointer-events: none;
+}
+
+.run-dot.success { background: #1b9c60; }
+.run-dot.running {
+    background: #3975ff;
+    animation: piply-pulse 1.6s ease-in-out infinite;
+}
+.run-dot.failed,
+.run-dot.timed_out { background: #d95a5a; }
+.run-dot.interrupted { background: #b85f16; }
+.run-dot.cancelled { background: #6a5e9c; }
+.run-dot.skipped { background: #7b8ca6; }
+.run-dot.queued { background: #e89b2c; }
+
+.run-dot-tip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 9px;
+    border-radius: 8px;
+    background: rgba(15, 32, 56, 0.94);
+    color: #ffffff;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    white-space: nowrap;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+    pointer-events: none;
+    z-index: 4;
+}
+
+.run-dot:hover .run-dot-tip,
+.run-dot:focus-visible .run-dot-tip {
+    opacity: 1;
+    visibility: visible;
+}
+
+.run-history-empty {
+    font-size: 0.74rem;
+    color: var(--muted);
+    margin-left: 2px;
+}
+
+.pipeline-row-cell.wide {
+    min-width: 128px;
+}
+
+@media (max-width: 900px) {
+    /* Stacked rows: the dots keep their own labelled line. */
+    .pipeline-row-cell.wide {
+        grid-column: 2;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .run-history {
+        margin-top: 0;
+    }
+
+    /* A tooltip anchored above would be clipped at the top of a stacked row. */
+    .run-dot-tip {
+        bottom: auto;
+        top: calc(100% + 8px);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   Runs page: trigger chips and execution lineage
+   --------------------------------------------------------------------------- */
+
+.runs-table td {
+    vertical-align: middle;
+}
+
+.nowrap {
+    white-space: nowrap;
+}
+
+.lineage-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+}
+
+/* How a run was started. Colour-coded so manual, scheduled, and
+   pipeline-triggered runs are distinguishable at a glance. */
+.trigger-chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    border: 1px solid var(--border);
+    background: rgba(123, 140, 166, 0.1);
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.trigger-chip.manual {
+    color: #3975ff;
+    border-color: rgba(57, 117, 255, 0.28);
+    background: rgba(57, 117, 255, 0.1);
+}
+
+.trigger-chip.schedule {
+    color: #1b7f9c;
+    border-color: rgba(27, 127, 156, 0.28);
+    background: rgba(27, 127, 156, 0.1);
+}
+
+.trigger-chip.pipeline {
+    color: #7a4bbd;
+    border-color: rgba(122, 75, 189, 0.28);
+    background: rgba(122, 75, 189, 0.1);
+}
+
+.trigger-chip.sensor {
+    color: #1b9c60;
+    border-color: rgba(27, 156, 96, 0.28);
+    background: rgba(27, 156, 96, 0.1);
+}
+
+.trigger-chip.retry {
+    color: #b85f16;
+    border-color: rgba(184, 95, 22, 0.28);
+    background: rgba(232, 155, 44, 0.12);
+}
+
+/* The chain that led to this run: Deployment -> A -> B -> this. */
+.lineage-chain {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    font-size: 0.74rem;
+}
+
+.lineage-step {
+    padding: 1px 6px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.7);
+    color: var(--muted);
+    text-decoration: none;
+    max-width: 190px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+a.lineage-step:hover {
+    color: var(--accent);
+    border-color: rgba(57, 117, 255, 0.32);
+    background: rgba(57, 117, 255, 0.06);
+}
+
+.lineage-step.current {
+    color: var(--ink);
+    font-weight: 600;
+    border-color: var(--border-strong);
+    background: rgba(15, 32, 56, 0.05);
+}
+
+.lineage-step.success { border-left: 3px solid #1b9c60; }
+.lineage-step.failed,
+.lineage-step.timed_out { border-left: 3px solid #d95a5a; }
+.lineage-step.running { border-left: 3px solid #3975ff; }
+.lineage-step.interrupted { border-left: 3px solid #b85f16; }
+.lineage-step.deleted {
+    border-style: dashed;
+    opacity: 0.65;
+}
+
+.lineage-arrow {
+    color: var(--muted);
+    font-size: 0.7rem;
+}
+
+.listing-toolbar select.toolbar-input,
+.listing-toolbar input[type="date"].toolbar-input {
+    flex: 0 1 auto;
+    min-width: 0;
+    width: auto;
+    padding: 7px 10px;
+}
+
+/* ---------------------------------------------------------------------------
+   Collapsible panels, so the DAG can take the page
+   --------------------------------------------------------------------------- */
+
+.collapsible-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.collapse-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 2px 0;
+    cursor: pointer;
+    color: var(--muted);
+    font: inherit;
+}
+
+.collapse-toggle:hover {
+    color: var(--accent);
+}
+
+.collapse-caret {
+    display: inline-block;
+    transition: transform 0.15s ease;
+    font-size: 0.7rem;
+}
+
+.collapsible.collapsed .collapse-caret {
+    transform: rotate(-90deg);
+}
+
+.collapsible-body {
+    margin-top: 10px;
+}
+
+.collapsible.collapsed .collapsible-body {
+    display: none;
+}
+
+/* The one-line digest shown in place of the full body. */
+.collapsed-summary {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.collapsible.collapsed .collapsed-summary {
+    display: flex;
+}
+
+/* With the inspector hidden the graph spans the full width, so give it real
+   vertical space too rather than leaving a wide, short strip. */
+.dag-operator-grid.inspector-collapsed .dag-stage {
+    min-height: 560px;
+}
+
+.dag-operator-grid.inspector-collapsed .dag-viewport {
+    min-height: 620px;
+}
+
+.dag-operator-grid.inspector-collapsed .dag-svg {
+    min-height: 560px;
+}
+
+/* ---------------------------------------------------------------------------
+   Sign-in page
+   --------------------------------------------------------------------------- */
+
+.login-shell {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.login-card {
+    width: 100%;
+    max-width: 360px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 28px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    background: #ffffff;
+    box-shadow: var(--shadow);
+}
+
+.login-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.login-field input {
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    font: inherit;
+}
+
+.login-field input:focus {
+    outline: none;
+    border-color: rgba(57, 117, 255, 0.45);
+}
+
+.login-error {
+    padding: 9px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(217, 90, 90, 0.28);
+    background: rgba(217, 90, 90, 0.1);
+    color: #a03030;
+    font-size: 0.86rem;
+}
+
+/* Settings forms ------------------------------------------------------------ */
+
+.settings-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    align-items: end;
+}
+
+.settings-form select {
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    font: inherit;
 }

@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from datetime import datetime
 
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse
+
+from piply.api.auth import (
+    filter_by_pipeline,
+    require_admin,
+    require_permission,
+    resolve_user,
+    visible_pipeline_ids,
+    visible_pipelines,
+)
 from piply.api.schemas import RunResponse
 
 router = APIRouter(tags=["ui"])
@@ -22,7 +32,8 @@ def _service(request: Request):
 
 @router.get("/", response_class=HTMLResponse)
 def dashboard_page(request: Request) -> HTMLResponse:
-    """Render the dashboard page."""
+    """Render the dashboard page, narrowed to what the caller may see."""
+    require_permission(request, "view")
     service = _service(request)
     payload = service.dashboard()
     return _templates(request).TemplateResponse(
@@ -31,25 +42,15 @@ def dashboard_page(request: Request) -> HTMLResponse:
         {
             "project": payload["project"],
             "stats": payload["stats"],
-            "pipelines": payload["pipelines"],
-            "recent_runs": payload["recent_runs"],
-            "recent_failures": payload["recent_failures"],
-            "active_pipelines": payload["active_pipelines"],
+            "pipelines": visible_pipelines(request, payload["pipelines"]),
+            "recent_runs": filter_by_pipeline(request, payload["recent_runs"]),
+            "recent_failures": filter_by_pipeline(request, payload["recent_failures"]),
+            "active_pipelines": visible_pipelines(request, payload["active_pipelines"]),
             "runtime_trend": payload["runtime_trend"],
             "runtime_metrics": payload["runtime_metrics"],
             "scheduler": payload["scheduler"],
             "page": "dashboard",
         },
-    )
-
-
-@router.get("/logout", response_class=HTMLResponse)
-def logout_page(request: Request) -> Response:
-    """Clear basic auth credentials by forcing a 401 challenge."""
-    return Response(
-        status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="Piply"'},
-        content="Logged out successfully. You can close this tab or return to the dashboard to log in again.",
     )
 
 
@@ -69,8 +70,9 @@ def _pipeline_group_key(summary) -> tuple[str, str]:
 @router.get("/pipelines", response_class=HTMLResponse)
 def pipelines_page(request: Request) -> HTMLResponse:
     """Render the pipeline list page."""
+    require_permission(request, "view")
     service = _service(request)
-    summaries = service.list_pipelines()
+    summaries = visible_pipelines(request, service.list_pipelines())
 
     groups: dict[str, dict[str, object]] = {}
     for summary in summaries:
@@ -114,6 +116,17 @@ def pipelines_page(request: Request) -> HTMLResponse:
                 (summary.last_run.started_at or summary.last_run.created_at).isoformat() if summary.last_run else None
             ),
             "last_run_duration_seconds": summary.last_run.duration_seconds if summary.last_run else None,
+            # Newest first; the template reverses so the dots read left to right.
+            "recent_runs": [
+                {
+                    "run_id": item.run_id,
+                    "status": item.status,
+                    "trigger": item.trigger,
+                    "started_at": (item.started_at or item.created_at).isoformat(),
+                    "duration_seconds": item.duration_seconds,
+                }
+                for item in summary.recent_runs
+            ],
         }
         for summary in summaries
     ]
@@ -134,7 +147,8 @@ def pipelines_page(request: Request) -> HTMLResponse:
 
 @router.get("/diagnostics", response_class=HTMLResponse)
 def diagnostics_page(request: Request) -> HTMLResponse:
-    """Render the runtime diagnostics page."""
+    """Render the runtime diagnostics page. Administrators only."""
+    require_admin(request, "Only administrators can view diagnostics.")
     service = _service(request)
     payload = service.diagnostics()
     return _templates(request).TemplateResponse(
@@ -152,6 +166,7 @@ def diagnostics_page(request: Request) -> HTMLResponse:
 @router.get("/pipelines/{pipeline_id}", response_class=HTMLResponse)
 def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
     """Render the pipeline detail page."""
+    require_permission(request, "view", pipeline_id)
     service = _service(request)
     try:
         detail = service.get_pipeline_detail(pipeline_id)
@@ -229,16 +244,73 @@ def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
     )
 
 
+#: Trigger types a run can carry, in the order the filter bar shows them.
+TRIGGER_TYPES = ("manual", "schedule", "pipeline", "sensor", "retry", "api", "task")
+RUN_STATUSES = ("queued", "running", "success", "failed", "timed_out", "cancelled", "interrupted")
+
+
 @router.get("/runs", response_class=HTMLResponse)
-def runs_page(request: Request) -> HTMLResponse:
-    """Render the run history page."""
+def runs_page(
+    request: Request,
+    pipeline_id: str | None = None,
+    status: str | None = None,
+    trigger: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sort: str = "started_desc",
+    limit: int = 100,
+) -> HTMLResponse:
+    """Render the run history page with filters, sorting, and trigger lineage."""
+    require_permission(request, "view")
     service = _service(request)
+
+    def _parse_moment(value: str | None, end_of_day: bool) -> datetime | None:
+        """Accept a date or a datetime from the filter bar."""
+        if not value:
+            return None
+        for pattern in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(value, pattern)
+            except ValueError:
+                continue
+            if pattern == "%Y-%m-%d" and end_of_day:
+                parsed = parsed.replace(hour=23, minute=59, second=59)
+            return parsed.astimezone()
+        return None
+
+    runs = service.list_runs(
+        pipeline_id=pipeline_id or None,
+        status=status or None,
+        trigger=trigger or None,
+        created_after=_parse_moment(date_from, end_of_day=False),
+        created_before=_parse_moment(date_to, end_of_day=True),
+        sort=sort,
+        limit=max(1, min(500, limit)),
+    )
+    allowed_pipelines = visible_pipelines(request, service.list_pipelines())
+    allowed_ids = {item.pipeline_id for item in allowed_pipelines}
+    runs = [item for item in runs if item.pipeline_id in allowed_ids]
+    lineage = service.lineage_for_runs(runs)
+
     return _templates(request).TemplateResponse(
         request,
         "runs.html",
         {
             "project": service.project,
-            "runs": service.list_runs(limit=80),
+            "runs": runs,
+            "lineage": lineage,
+            "pipelines": allowed_pipelines,
+            "trigger_types": TRIGGER_TYPES,
+            "run_statuses": RUN_STATUSES,
+            "filters": {
+                "pipeline_id": pipeline_id or "",
+                "status": status or "",
+                "trigger": trigger or "",
+                "date_from": date_from or "",
+                "date_to": date_to or "",
+                "sort": sort,
+                "limit": limit,
+            },
             "scheduler": service.scheduler_snapshot(),
             "page": "runs",
         },
@@ -249,6 +321,10 @@ def runs_page(request: Request) -> HTMLResponse:
 def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
     """Render the run detail page."""
     service = _service(request)
+    existing = service.store.get_run(run_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
+    require_permission(request, "view", existing.pipeline_id)
     try:
         payload = service.get_run_detail(run_id)
     except KeyError as exc:
@@ -340,12 +416,18 @@ def execution_matrix_page(
     status: str | None = None,
 ) -> HTMLResponse:
     """Render the execution matrix page."""
+    require_permission(request, "view", pipeline_id)
     service = _service(request)
+    allowed = visible_pipeline_ids(request)
+    if pipeline_id is None and allowed is not None:
+        # Fall back to a pipeline this caller may actually see, not just the first.
+        pipeline_id = next((item.pipeline_id for item in service.list_pipelines() if item.pipeline_id in allowed), None)
     payload = service.execution_matrix(
         pipeline_id=pipeline_id,
         tenant_id=tenant,
         status=status,
     )
+    payload["pipelines"] = visible_pipelines(request, payload["pipelines"])
     return _templates(request).TemplateResponse(
         request,
         "execution_matrix.html",
@@ -365,15 +447,21 @@ def logs_page(
     pipeline_id: str | None = None,
     task_id: str | None = None,
 ) -> HTMLResponse:
-    """Render searchable logs."""
+    """Render searchable logs, restricted to pipelines the caller may see."""
+    require_permission(request, "view", pipeline_id)
     service = _service(request)
     return _templates(request).TemplateResponse(
         request,
         "logs.html",
         {
             "project": service.project,
-            "logs": service.search_logs(query=q, pipeline_id=pipeline_id, task_id=task_id),
-            "pipelines": service.list_pipelines(),
+            "logs": service.search_logs(
+                query=q,
+                pipeline_id=pipeline_id,
+                pipeline_ids=visible_pipeline_ids(request),
+                task_id=task_id,
+            ),
+            "pipelines": visible_pipelines(request, service.list_pipelines()),
             "query": q or "",
             "selected_pipeline_id": pipeline_id or "",
             "selected_task_id": task_id or "",
@@ -385,18 +473,36 @@ def logs_page(
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request) -> HTMLResponse:
-    """Render lightweight settings and runtime configuration."""
+    """Render settings, plus SMTP and account administration for admins."""
+    require_permission(request, "view")
     service = _service(request)
     payload = service.dashboard()
+    current = resolve_user(request)
+    is_admin = current is None or current.is_admin
     return _templates(request).TemplateResponse(
         request,
         "settings.html",
         {
             "project": service.project,
-            "pipelines": payload["pipelines"],
+            "pipelines": visible_pipelines(request, payload["pipelines"]),
             "settings": payload["settings"],
             "scheduler": payload["scheduler"],
             "runtime_metrics": payload["runtime_metrics"],
+            "smtp": service.get_smtp_settings() if is_admin else None,
+            "users": [
+                {
+                    "username": item.username,
+                    "role": item.role,
+                    "is_active": item.is_active,
+                    "last_login_at": item.last_login_at,
+                    "permissions": {key: sorted(value) for key, value in item.permissions.items()},
+                }
+                for item in (service.list_users() if is_admin else [])
+            ],
+            "all_pipeline_ids": sorted(service.project.pipelines),
+            "current_user": current,
+            "is_admin": is_admin,
+            "auth_required": service.auth_required,
             "page": "settings",
         },
     )

@@ -1131,6 +1131,27 @@ piply diagnostics
 piply diagnostics --json
 ```
 
+### `piply users`
+
+Manage accounts and pipeline permissions. Creating the first account switches
+authentication on for the install.
+
+```bash
+piply users create admin --role admin              # password is generated and printed
+piply users create alice --grant nightly=view,run
+piply users list
+piply users grant alice reports all
+piply users grant alice '*' view                   # every pipeline
+piply users revoke alice reports
+piply users passwd alice
+piply users disable alice
+piply users delete alice --yes
+```
+
+Permissions are `view`, `edit`, and `run`; `edit` and `run` both imply `view`.
+Piply refuses to delete, demote, or disable the only active admin. Full details
+in [Authentication](../docs/AUTHENTICATION.md).
+
 ### `piply pause` / `piply resume`
 
 Pause or resume schedule dispatch.
@@ -1199,12 +1220,14 @@ GET  /api/logs
 
 - Dashboard: run summary, runtime trend, active pipelines, failures, queue/worker metrics.
 - Pipelines: Airflow-style listing grouped by template, sortable by upcoming or last run, filterable by running/failed/scheduled/paused.
+  Each row shows its last five runs as colour-coded dots; click a dot to open that run.
 - Pipeline detail: DAG first, one merged metadata strip, selected-node details, retry/run task actions, and an execution preview drawer.
 - Run detail: run DAG including downstream pipeline nodes, task focus panel, log filtering, artifact browser, Re-Run, retry-from-task, and Replay config.
 - Execution Matrix: task rows by run columns.
+- Runs: filter by pipeline/status/trigger/date, sort, and see the full trigger lineage of each run.
 - Logs: cross-run log search.
 - Diagnostics: scheduler health, running tasks, sensor health, reconciliation state, storage and retention.
-- Settings: schedules, runtime settings, queue metrics, worker metrics.
+- Settings: schedules, runtime settings, queue metrics, worker metrics, plus central SMTP and user administration for admins.
 
 See [../docs/UI_GUIDE.md](../docs/UI_GUIDE.md) for the full walkthrough.
 

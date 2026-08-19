@@ -17,6 +17,7 @@ from pathlib import Path
 import typer
 import uvicorn
 
+from piply.core.auth import AuthError, generate_password
 from piply.core.loader import ConfigError, discover_config, load_project
 from piply.core.service import PipelineService
 from piply.settings import load_settings
@@ -24,6 +25,8 @@ from piply.settings import load_settings
 app = typer.Typer(help="Piply: lightweight orchestration for task-based Python workflows.")
 tasks_app = typer.Typer(help="Inspect pipeline tasks.")
 app.add_typer(tasks_app, name="tasks")
+users_app = typer.Typer(help="Manage accounts and pipeline permissions.")
+app.add_typer(users_app, name="users")
 RUN_PARAM_OPTION = typer.Option(
     None,
     "--param",
@@ -41,6 +44,24 @@ PLAN_PARAM_OPTION = typer.Option(
 )
 BACKFILL_START_OPTION = typer.Option(None, "--from", help="Start of the schedule window to backfill.")
 BACKFILL_END_OPTION = typer.Option(None, "--to", help="End of the schedule window to backfill.")
+USER_GRANT_OPTION = typer.Option(
+    None,
+    "--grant",
+    help="Grant as PIPELINE=actions, for example reports=view,run. Repeat for more pipelines.",
+)
+
+
+def _echo_permissions(user) -> None:
+    """Print one account's pipeline grants."""
+    if user.is_admin:
+        typer.echo("  permissions: administrator (every pipeline, every action)")
+        return
+    if not user.permissions:
+        typer.echo("  permissions: none yet")
+        return
+    for pipeline_id, actions in sorted(user.permissions.items()):
+        label = "every pipeline" if pipeline_id == "*" else pipeline_id
+        typer.echo(f"  {label}: {', '.join(sorted(actions))}")
 
 
 def _describe_database(config_path: Path, settings) -> str:
@@ -1037,6 +1058,144 @@ def diagnostics(
     size = int(database.get("size_bytes") or 0)
     size_label = f" ({_format_bytes(size)})" if size else ""
     typer.echo(f"Database    : {database['path']} [{database.get('backend', 'sqlite')}]{size_label}")
+
+
+@users_app.command("create")
+def users_create(
+    username: str = typer.Argument(..., help="Username to create."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    password: str | None = typer.Option(None, "--password", help="Password. Generated when omitted."),
+    role: str = typer.Option("user", "--role", help="admin or user."),
+    grant: list[str] | None = USER_GRANT_OPTION,
+) -> None:
+    """Create an account, optionally granting pipeline permissions.
+
+    Creating the first account switches authentication on for the install.
+    """
+    service = PipelineService(config_path=_resolve_config(config))
+    secret = password or generate_password()
+    permissions: dict[str, object] = {}
+    for item in grant or []:
+        if "=" not in item:
+            raise typer.BadParameter("--grant must use PIPELINE=actions, for example reports=view,run")
+        pipeline_id, actions = item.split("=", 1)
+        permissions[pipeline_id.strip()] = actions
+
+    try:
+        user = service.create_user(username, secret, role=role, permissions=permissions)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Created {user.role} '{user.username}'.")
+    if password is None:
+        typer.echo(f"Password: {secret}")
+        typer.echo("Store it now. It is hashed and cannot be shown again.")
+    _echo_permissions(user)
+
+
+@users_app.command("list")
+def users_list(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """List accounts and their pipeline permissions."""
+    service = PipelineService(config_path=_resolve_config(config))
+    users = service.list_users()
+    if not users:
+        typer.echo("No accounts exist. Authentication is off unless PIPLY_AUTH_ENABLED is set.")
+        return
+    for user in users:
+        state = "active" if user.is_active else "disabled"
+        typer.echo(f"{user.username}  [{user.role}, {state}]  last login: {user.last_login_at or 'never'}")
+        _echo_permissions(user)
+
+
+@users_app.command("passwd")
+def users_passwd(
+    username: str = typer.Argument(..., help="Account to update."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    password: str | None = typer.Option(None, "--password", help="New password. Generated when omitted."),
+) -> None:
+    """Set a new password for an account."""
+    service = PipelineService(config_path=_resolve_config(config))
+    secret = password or generate_password()
+    try:
+        service.update_user(username, password=secret)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Password updated for '{username}'.")
+    if password is None:
+        typer.echo(f"Password: {secret}")
+
+
+@users_app.command("grant")
+def users_grant(
+    username: str = typer.Argument(..., help="Account to grant."),
+    pipeline_id: str = typer.Argument(..., help="Pipeline id, or '*' for every pipeline."),
+    actions: str = typer.Argument(..., help="Comma-separated: view, edit, run, or all."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Grant pipeline permissions to an account."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        user = service.grant_permission(username, pipeline_id, actions)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Updated permissions for '{username}'.")
+    _echo_permissions(user)
+
+
+@users_app.command("revoke")
+def users_revoke(
+    username: str = typer.Argument(..., help="Account to change."),
+    pipeline_id: str = typer.Argument(..., help="Pipeline id, or '*'."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Remove every permission an account holds on one pipeline."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        user = service.revoke_permission(username, pipeline_id)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Revoked '{pipeline_id}' for '{username}'.")
+    _echo_permissions(user)
+
+
+@users_app.command("disable")
+def users_disable(
+    username: str = typer.Argument(..., help="Account to disable."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Disable an account without deleting it."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.update_user(username, is_active=False)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Disabled '{username}'.")
+
+
+@users_app.command("delete")
+def users_delete(
+    username: str = typer.Argument(..., help="Account to delete."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Delete an account and every permission it held."""
+    service = PipelineService(config_path=_resolve_config(config))
+    if not yes and not typer.confirm(f"Delete account '{username}'?"):
+        typer.echo("Aborted.")
+        raise typer.Exit(code=1)
+    try:
+        service.delete_user(username)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Deleted '{username}'.")
 
 
 @app.command()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from piply.api.auth import require_admin, require_permission, visible_pipelines
 from piply.api.schemas import PipelineDetailResponse, PipelineResponse, RunResponse, TaskResponse, TriggerRunRequest
 
 router = APIRouter(prefix="/api/pipelines", tags=["pipelines"])
@@ -14,16 +15,29 @@ def _get_service(request: Request):
     return request.app.state.service
 
 
+def _guard_command_overrides(request: Request, payload: TriggerRunRequest | None) -> None:
+    """Restrict command overrides to administrators.
+
+    An override replaces the command a task runs, so allowing it under a plain
+    ``run`` grant would turn "may run this one pipeline" into "may execute any
+    command as the Piply process". Admins keep it for debugging.
+    """
+    if payload is not None and payload.command_overrides:
+        require_admin(request, "Only administrators can override task commands.")
+
+
 @router.get("", response_model=list[PipelineResponse])
 def list_pipelines(request: Request) -> list[PipelineResponse]:
-    """List configured pipelines."""
+    """List the pipelines the caller may see."""
+    require_permission(request, "view")
     service = _get_service(request)
-    return [PipelineResponse.from_summary(item) for item in service.list_pipelines()]
+    return [PipelineResponse.from_summary(item) for item in visible_pipelines(request, service.list_pipelines())]
 
 
 @router.get("/{pipeline_id}", response_model=PipelineDetailResponse)
 def get_pipeline(request: Request, pipeline_id: str) -> PipelineDetailResponse:
     """Return one pipeline with tasks and recent runs."""
+    require_permission(request, "view", pipeline_id)
     service = _get_service(request)
     try:
         payload = service.get_pipeline_detail(pipeline_id)
@@ -39,6 +53,8 @@ def trigger_pipeline(
     payload: TriggerRunRequest | None = None,
 ) -> RunResponse:
     """Trigger one manual pipeline run."""
+    require_permission(request, "run", pipeline_id)
+    _guard_command_overrides(request, payload)
     service = _get_service(request)
     try:
         initial_context = {}
@@ -62,6 +78,7 @@ def trigger_pipeline(
 @router.get("/{pipeline_id}/tasks/{task_id}", response_model=TaskResponse)
 def get_pipeline_task(request: Request, pipeline_id: str, task_id: str) -> TaskResponse:
     """Return one task definition from a pipeline."""
+    require_permission(request, "view", pipeline_id)
     service = _get_service(request)
     try:
         pipeline = service.get_pipeline(pipeline_id)
@@ -79,6 +96,8 @@ def trigger_pipeline_task(
     payload: TriggerRunRequest | None = None,
 ) -> RunResponse:
     """Trigger one task and its upstream dependencies as a focused manual run."""
+    require_permission(request, "run", pipeline_id)
+    _guard_command_overrides(request, payload)
     service = _get_service(request)
     try:
         initial_context = {}
@@ -108,6 +127,9 @@ def chain_pipeline(
     payload: TriggerRunRequest | None = None,
 ) -> RunResponse:
     """Trigger a downstream pipeline while preserving parent and tenant context."""
+    require_permission(request, "run", pipeline_id)
+    require_permission(request, "run", target_pipeline_id)
+    _guard_command_overrides(request, payload)
     service = _get_service(request)
     try:
         service.get_pipeline(pipeline_id)
@@ -131,6 +153,7 @@ def chain_pipeline(
 @router.post("/{pipeline_id}/pause", response_model=PipelineResponse)
 def pause_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
     """Pause one pipeline schedule."""
+    require_permission(request, "edit", pipeline_id)
     service = _get_service(request)
     try:
         summary = service.set_pipeline_paused(pipeline_id, True)
@@ -142,6 +165,7 @@ def pause_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
 @router.post("/{pipeline_id}/resume", response_model=PipelineResponse)
 def resume_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
     """Resume one pipeline schedule."""
+    require_permission(request, "edit", pipeline_id)
     service = _get_service(request)
     try:
         summary = service.set_pipeline_paused(pipeline_id, False)
@@ -153,6 +177,7 @@ def resume_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
 @router.delete("/{pipeline_id}")
 def delete_pipeline(request: Request, pipeline_id: str) -> dict[str, str]:
     """Delete one pipeline definition and its stored history."""
+    require_permission(request, "edit", pipeline_id)
     service = _get_service(request)
     try:
         service.delete_pipeline(pipeline_id)

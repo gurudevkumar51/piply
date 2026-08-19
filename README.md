@@ -21,11 +21,13 @@ It stays small on purpose:
 - Metadata-driven `entities` expansion for reusable task templates
 - Optional `pipeline_templates` and `pipeline_deployments` for tenant reuse
 - Lightweight conditional execution: `run_if: "{report} == 'payment'"`
+- Conditional variable values: `active_browser: true if env == "dev" else false`
 - Declared artifacts: `artifacts: ["out/*.csv"]`
 
 **Execution**
 
 - Task priority, via `priority: high`, `priority: "***"`, or an `extract***:` id
+- Entity priority, via a `payment*` / `adjustment**` suffix on entity values
 - Task and pipeline timeouts with a configurable kill grace period
 - Per-task upstream failure behavior: `skip`, `fail`, or `continue`
 - Task output passing through `context["task_id"]`
@@ -43,7 +45,11 @@ It stays small on purpose:
 - Graceful shutdown and startup recovery — no orphaned RUNNING records
 - Prometheus metrics at `GET /metrics` and a runtime Diagnostics page
 - Airflow-style pipeline listing with template grouping, sorting, and filtering
+- Last-five-runs status dots on every pipeline row, each linking to its run
 - Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`
+- Accounts, roles, and per-pipeline view/edit/run permissions
+- Central SMTP configured once, reused by email tasks and run notifications
+- Runs page with filters, sorting, and full multi-level trigger lineage
 
 ## Quick Start
 
@@ -264,6 +270,8 @@ piply backup /backups                                      # safe while running
 piply restore /backups/piply-20260804T074211Z.db           # stop the server first
 
 # Serving
+piply users create admin --role admin                       # switches auth on
+piply users grant alice nightly=view,run
 piply pause extract_flow
 piply resume extract_flow
 piply start --config piply-demo/piply.yaml --port 8080
@@ -277,6 +285,7 @@ piply stop --config piply-demo/piply.yaml
 - [YAML Specification](docs/YAML_SPECIFICATION.md): every config key, with defaults
 - [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
 - [UI Guide](docs/UI_GUIDE.md): every page and what it answers
+- [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
 - [Usage Guide](wiki/USAGE_GUIDE.md): longer-form walkthrough
 

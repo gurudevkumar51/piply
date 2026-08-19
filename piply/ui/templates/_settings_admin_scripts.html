@@ -1,0 +1,99 @@
+{# Client behaviour for the admin-only settings panels. #}
+<script>
+const ALL_PIPELINE_IDS = {{ all_pipeline_ids|tojson }};
+
+function showSettingsResult(elementId, text) {
+    const node = document.getElementById(elementId);
+    if (!node) return;
+    node.hidden = false;
+    node.textContent = text;
+}
+
+async function saveSmtp() {
+    const payload = {
+        host: document.getElementById("smtp-host").value.trim(),
+        port: Number(document.getElementById("smtp-port").value) || 587,
+        username: document.getElementById("smtp-username").value.trim(),
+        from_address: document.getElementById("smtp-from").value.trim(),
+        use_tls: document.getElementById("smtp-tls").checked,
+        use_ssl: document.getElementById("smtp-ssl").checked,
+    };
+    // Only send a password when one was typed, so a blank field keeps the
+    // stored value rather than clearing it.
+    const password = document.getElementById("smtp-password").value;
+    if (password) {
+        payload.password = password;
+    }
+
+    try {
+        const saved = await piplyRequest("/api/settings/smtp", { method: "PUT", body: JSON.stringify(payload) });
+        document.getElementById("smtp-password").value = "";
+        showSettingsResult("smtp-result", "Saved.\n" + JSON.stringify(saved, null, 2));
+    } catch (error) {
+        showSettingsResult("smtp-result", error.message);
+    }
+}
+
+async function testSmtp() {
+    const recipient = window.prompt("Send a test message to which address?");
+    if (!recipient) return;
+    try {
+        const result = await piplyRequest("/api/settings/smtp/test", {
+            method: "POST",
+            body: JSON.stringify({ recipient }),
+        });
+        showSettingsResult("smtp-result", result.detail);
+    } catch (error) {
+        showSettingsResult("smtp-result", error.message);
+    }
+}
+
+async function createAccount() {
+    const payload = {
+        username: document.getElementById("new-username").value.trim(),
+        password: document.getElementById("new-password").value,
+        role: document.getElementById("new-role").value,
+    };
+    try {
+        await piplyRequest("/api/users", { method: "POST", body: JSON.stringify(payload) });
+        window.location.reload();
+    } catch (error) {
+        showSettingsResult("user-result", error.message);
+    }
+}
+
+async function promptGrant(username) {
+    const available = ALL_PIPELINE_IDS.join(", ");
+    const pipelineId = window.prompt(
+        "Pipeline id to grant to " + username + ". Use * for every pipeline.\n\nAvailable: " + available
+    );
+    if (!pipelineId) return;
+    const actions = window.prompt(
+        "Actions, comma separated: view, edit, run (or 'all'). Leave empty to revoke.",
+        "view,run"
+    );
+    if (actions === null) return;
+    try {
+        await piplyRequest("/api/users/" + encodeURIComponent(username) + "/permissions", {
+            method: "POST",
+            body: JSON.stringify({
+                pipeline_id: pipelineId.trim(),
+                actions: actions.split(",").map((item) => item.trim()).filter(Boolean),
+            }),
+        });
+        window.location.reload();
+    } catch (error) {
+        showSettingsResult("user-result", error.message);
+    }
+}
+
+async function deleteAccount(username) {
+    if (!window.confirm("Delete account '" + username + "'?")) return;
+    try {
+        await piplyRequest("/api/users/" + encodeURIComponent(username), { method: "DELETE" });
+        window.location.reload();
+    } catch (error) {
+        showSettingsResult("user-result", error.message);
+    }
+}
+</script>

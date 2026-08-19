@@ -25,8 +25,17 @@ piply start --config piply.yaml
 An Airflow-style listing rather than a wall of cards.
 
 **Rows** show a status dot, the title and id, deployment/tag chips, upstream
-(`←`) and downstream (`→`) pipelines, schedule, last run, next run, task count,
-and state.
+(`←`) and downstream (`→`) pipelines, the last five runs, schedule, last run,
+next run, task count, and state.
+
+**Run history dots** — the last five runs, oldest on the left, newest on the
+right, coloured by status. Each dot is a link: click it to open that run. Hover
+or focus for the status, how long ago it ran, its duration, and its run id. A
+pipeline with fewer than five runs shows dashed placeholders so the dots stay
+aligned down the page; one with none shows *no runs yet*.
+
+The number of dots is configurable with `PIPLY_PIPELINE_RUN_HISTORY_COUNT`
+(default 5, maximum 20).
 
 **Grouping** — deployments of the same template are grouped under a
 `Template: <name>` heading, so ten tenants of one workflow read as one block
@@ -52,11 +61,14 @@ Laid out so the DAG is the first substantial thing on screen.
 
 1. **Header** — title, id, last-run status, and the actions: Run now, Preview,
    Pause/Resume, Delete.
-2. **Metadata strip** — one merged row: next run, schedule, task count,
-   execution mode, retry policy, timeout, concurrency, template/deployment,
-   upstream and downstream pipelines, tags, primary entry, and the resolved
-   variables. This replaces the former hero block plus five-card grid.
-3. **Task graph** — the DAG, with the task inspector beside it.
+2. **Metadata strip** — collapsible. Collapsed by default, leaving a one-line
+   digest of next run, schedule, task count, and execution mode. Expanded it
+   adds retry policy, timeout, concurrency, template/deployment, upstream and
+   downstream pipelines, tags, primary entry, and the resolved variables.
+3. **Task graph** — the DAG, with the task inspector beside it. *Hide task
+   focus* collapses the inspector; the graph then takes the full width **and**
+   grows to 560px tall, so collapsing both panels turns the page into a graph
+   view. Both choices persist per browser.
 4. **Manual command overrides** — edit a CLI command for one manual run.
 5. **Tasks** and **Recent runs**.
 
@@ -74,6 +86,33 @@ anything:
 
 *Run it* launches the pipeline straight from the drawer. `piply plan` prints the
 same information in a terminal.
+
+---
+
+## Runs
+
+**Filters** across the top, all server-side so they work beyond the page limit
+and are shareable as a URL: pipeline, status (including a *Failure-like* preset
+covering failed, timed out, and interrupted), trigger type, and a from/to date
+range. **Sort** by newest, oldest, longest, shortest, pipeline name, status, or
+trigger. **Rows** picks 50 / 100 / 200 / 500.
+
+Every control submits on change; *Reset* clears them.
+
+**Trigger & lineage** is the column that answers "why did this run?". A coloured
+chip names the trigger — `manual` blue, `schedule` teal, `pipeline` violet,
+`sensor` green, `retry` amber — so the three kinds are distinguishable at a
+glance.
+
+For a pipeline-triggered run, the full chain is shown beneath the chip:
+
+```
+pipeline   ACME_ETL → silver → gold → semantic
+```
+
+Every step is a link to that run, coloured by its status, so you can walk back
+up a multi-level chain without leaving the page. A step whose run has since been
+pruned is shown dashed and greyed rather than being silently dropped.
 
 ---
 
@@ -187,6 +226,25 @@ settings, and retention.
 
 The scheduler chip in the header polls every five seconds and shows *scheduler
 live*, *not responding*, *crashed*, or *offline*.
+
+---
+
+## Sign in
+
+With no accounts, there is no login page and everything is permitted. Once the
+first account exists, `/login` appears and every page requires a session.
+
+The header shows the signed-in username next to *Logout*.
+
+**Settings → Users and permissions** (admins only) creates accounts, grants
+pipeline actions, and deletes accounts. **Settings → Email (SMTP)** configures
+the mail server once for the whole install, with a *Send test email* button.
+
+A non-admin only sees the pipelines they were granted — on the Pipelines page,
+the Runs page, and the API alike. Actions they lack permission for return 403
+rather than being hidden and then failing.
+
+See [AUTHENTICATION.md](AUTHENTICATION.md) for roles, grants, and the CLI.
 
 ---
 

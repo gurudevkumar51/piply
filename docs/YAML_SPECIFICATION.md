@@ -55,6 +55,50 @@ missing variable is visible in the command preview and reported by `piply plan`.
 `run_if` is the one exception: its `{name}` placeholders are resolved at
 execution time, not load time, so values are substituted as quoted literals.
 
+### Conditional values
+
+A `variables` value may choose between two options. This is the same tiny
+evaluator that powers `run_if` — not an expression language.
+
+```yaml
+variables:
+  stage: dev
+
+  # Inline ternary
+  active_browser: true if stage == "dev" else false
+  headless: false if stage == "dev" else true
+
+  # Explicit mapping. Preferred for anything non-trivial: it cannot be
+  # confused with prose, and it reads better in review.
+  workers:
+    if: stage == "prod"
+    then: 8
+    else: 2
+```
+
+**What a condition can see**, in order of precedence: variables defined earlier
+in the same block, then pipeline and deployment variables, then `.env` values
+and environment variables. `env` is a built-in that falls back to `PIPLY_ENV`
+when nothing else defines it, so `env == "dev"` works without declaring it.
+
+**Supported**: literals, names, `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`,
+`not in`, `and`, `or`, `not`, list literals, and `A if C else B`.
+
+**Not supported**: function calls, attribute access, arithmetic, comprehensions,
+lambdas, imports. Anything else raises a `ConfigError` at load time rather than
+silently producing a wrong value.
+
+**Type handling.** Config values are strings, so comparisons are
+YAML-friendly: `"true" == true` holds, `"8" > 3` holds, and `true`/`false`/
+`null` may be written in YAML's lower case. The result is stored as a string,
+so `true` becomes `"true"`.
+
+**Prose is safe.** A value is only treated as a condition when it parses as a
+ternary. `message: run if you can else walk` stays a literal string.
+
+Ordering matters, exactly as it already does for `{placeholder}` interpolation:
+a condition can only see variables declared above it.
+
 ---
 
 ## 3. Top-Level Keys
@@ -117,6 +161,38 @@ declared as `extract` with `entities: {report: [...]}` produces runtime task ids
 of the form `payment.extract`, `adjustment.extract`, and so on. Set
 `entities: false` on a task to opt it out of expansion.
 
+#### Entity priority
+
+A trailing `*` run on an entity value raises the priority of every task
+generated for it. More stars means sooner.
+
+```yaml
+entities:
+  report:
+    - payment*        # priority 1
+    - adjustment**    # priority 2 -> runs first
+    - refund          # priority 0
+```
+
+The stars are stripped from the value, so the task still receives
+`report=payment` and the runtime id is still `payment.extract`. The entity
+priority is *added* to whatever the task template declares, so
+`extract**` with `adjustment**` gives that task priority 4.
+
+Dependency order still wins: a high-priority entity task waits for its
+dependencies like any other. Equal priorities may run in any order.
+
+To use a value that genuinely ends in an asterisk, use the mapping form, which
+never strips:
+
+```yaml
+entities:
+  code:
+    - {id: wildcard, value: "SELECT *"}
+```
+
+Priority ordering is visible in `piply plan` and on the DAG nodes.
+
 ---
 
 ## 4. Pipeline Keys
@@ -154,6 +230,10 @@ pipelines:
 
     triggers_on_success:
       - report_flow
+
+    notify:                              # email on run outcome, see Notifications below
+      on_failure: [oncall@example.com]
+      on_success: [team@example.com]
 
     entities: {}                         # pipeline-scoped entity expansion
     sensors: {}                          # see section 7
@@ -394,6 +474,71 @@ rather than hang.
 
 ---
 
+### Notifications
+
+`notify` emails the listed addresses when a run finishes. Delivery uses the
+**central SMTP settings**, so a pipeline only says *who* to tell, never *how* to
+reach a mail server.
+
+```yaml
+# Shorthand: a bare list means "on failure", which is what people want.
+notify: [oncall@example.com]
+
+# Explicit
+notify:
+  on_failure: [oncall@example.com, sre@example.com]
+  on_success: [team@example.com]
+```
+
+A delivery failure is written to the run log and never changes the run's status.
+If no SMTP server is configured, the run log says so and the run still succeeds.
+
+Configure the server once under **Settings → Email (SMTP)**, or with
+environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `PIPLY_SMTP_HOST` | server hostname; setting it is what enables sending |
+| `PIPLY_SMTP_PORT` | default `587` |
+| `PIPLY_SMTP_USERNAME` | login user |
+| `PIPLY_SMTP_PASSWORD` | login password |
+| `PIPLY_SMTP_FROM_ADDRESS` | From header; defaults to the username |
+| `PIPLY_SMTP_USE_TLS` | STARTTLS, default `true` |
+| `PIPLY_SMTP_USE_SSL` | implicit SSL, default `false` |
+| `PIPLY_SMTP_TIMEOUT_SECONDS` | default `30` |
+
+Environment variables take precedence over the stored settings, so the password
+never has to be written to the database. The stored password is write-only: it
+is never returned by the API nor rendered in the UI.
+
+The same configuration backs `type: email` tasks. A task that sets its own
+`smtp_host` still uses that instead, so existing per-pipeline SMTP blocks keep
+working:
+
+```yaml
+tasks:
+  # Uses the central settings.
+  notify_ops:
+    type: email
+    to: [ops@example.com]
+    subject: "Batch {batch_id} finished"
+    body: All good.
+
+  # Overrides them for this task only.
+  notify_vendor:
+    type: email
+    smtp_host: vendor-relay.example.com
+    smtp_port: 25
+    to: [vendor@example.com]
+    subject: Handoff complete
+```
+
+> **Behaviour change:** `smtp_host` previously defaulted to `localhost`. It now
+> defaults to unset so the central settings apply. A task that genuinely wants a
+> local mail server should say `smtp_host: localhost` explicitly.
+
+---
+
 ## 7. Sensors
 
 Sensors poll external state and enqueue a pipeline trigger when it changes.
@@ -520,11 +665,16 @@ the config.
 | `PIPLY_QUEUE_DISPATCH_BATCH_SIZE` | `100` | trigger queue batch size |
 | `PIPLY_QUEUE_DISPATCH_STALE_SECONDS` | `300` | requeue abandoned dispatches after |
 | `PIPLY_UPCOMING_RUN_PREVIEW_COUNT` | `8` | upcoming slots shown in the UI |
+| `PIPLY_PIPELINE_RUN_HISTORY_COUNT` | `5` | run-history dots per pipeline row, max 20 |
 | `PIPLY_RETENTION_RUN_DAYS` | `30` | `piply prune` run age limit |
 | `PIPLY_RETENTION_LOG_DAYS` | `14` | `piply prune` log age limit |
 | `PIPLY_RETENTION_MAX_RUNS_PER_PIPELINE` | `200` | `piply prune` per-pipeline cap |
 | `PIPLY_ARTIFACTS_DIR` | unset | extra allowed root for artifact downloads |
 | `PIPLY_METRICS_ENABLED` | `true` | serve `GET /metrics` |
+| `PIPLY_SMTP_*` | unset | central SMTP, see Notifications above |
+| `PIPLY_ADMIN_USERNAME` | `admin` | bootstrapped admin username |
+| `PIPLY_ADMIN_PASSWORD` | generated | bootstrapped admin password |
+| `PIPLY_SESSION_SECRET` | generated | session cookie signing key |
 | `PIPLY_AUTH_ENABLED` | `false` | require authentication |
 | `PIPLY_AUTH_USERNAME` / `PIPLY_AUTH_PASSWORD` | unset | UI basic auth |
 | `PIPLY_API_TOKEN` | unset | API and `/metrics` bearer token |
