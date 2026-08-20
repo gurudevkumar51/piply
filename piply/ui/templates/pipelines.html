@@ -126,6 +126,40 @@ function comparePipelines(a, b) {
     return a.title.localeCompare(b.title);
 }
 
+const RUN_HISTORY_SLOTS = 5;
+
+function renderRunHistory(pipeline) {
+    // Newest first from the API; reversed so the dots read oldest -> newest,
+    // left to right, with the most recent run nearest the other columns.
+    const runs = (pipeline.recent_runs || []).slice(0, RUN_HISTORY_SLOTS).reverse();
+    const padding = RUN_HISTORY_SLOTS - runs.length;
+
+    const empties = Array.from({ length: padding }, () =>
+        '<span class="run-dot empty" aria-hidden="true"></span>'
+    ).join("");
+
+    const dots = runs.map((run) => {
+        const when = absoluteTime(run.started_at);
+        const ago = relativeTime(run.started_at);
+        const duration = run.duration_seconds === null || run.duration_seconds === undefined
+            ? ""
+            : ` &middot; ${escapeHtml(formatDurationSeconds(run.duration_seconds))}`;
+        const label = `${run.status} &middot; ${escapeHtml(ago)}${duration}`;
+        return `
+            <a class="run-dot ${escapeHtml(run.status)}"
+               href="/runs/${escapeHtml(run.run_id)}"
+               title="${escapeHtml(run.status)} — ${escapeHtml(when)}"
+               aria-label="Run ${escapeHtml(run.run_id)}: ${escapeHtml(run.status)}, ${escapeHtml(ago)}">
+                <span class="run-dot-tip">${label}<br><span class="mono">${escapeHtml(run.run_id)}</span></span>
+            </a>`;
+    }).join("");
+
+    if (!runs.length) {
+        return `<div class="run-history">${empties}<span class="run-history-empty">no runs yet</span></div>`;
+    }
+    return `<div class="run-history">${empties}${dots}</div>`;
+}
+
 function renderPipelineRow(pipeline) {
     const status = pipeline.active_runs > 0 ? "running" : (pipeline.last_run_status || "queued");
     const stateLabel = pipeline.paused ? "paused" : (pipeline.enabled ? "enabled" : "disabled");
@@ -145,7 +179,7 @@ function renderPipelineRow(pipeline) {
     return `
         <div class="pipeline-row" data-pipeline-row="${escapeHtml(pipeline.pipeline_id)}">
             <div class="pipeline-row-status">
-                <span class="status-dot-lg ${escapeHtml(status)}" title="${escapeHtml(status)}"></span>
+                <span class="status-dot-lg ${escapeHtml(status)}" title="Current state: ${escapeHtml(status)}"></span>
             </div>
             <div class="pipeline-row-main">
                 <a class="pipeline-row-title" href="/pipelines/${escapeHtml(pipeline.pipeline_id)}">${escapeHtml(pipeline.title)}</a>
@@ -158,6 +192,10 @@ function renderPipelineRow(pipeline) {
             <div class="pipeline-row-cell">
                 <div class="cell-label">Schedule</div>
                 <div class="cell-value">${escapeHtml(pipeline.schedule_text)}</div>
+            </div>
+            <div class="pipeline-row-cell wide">
+                <div class="cell-label">Last ${RUN_HISTORY_SLOTS} runs</div>
+                ${renderRunHistory(pipeline)}
             </div>
             <div class="pipeline-row-cell">
                 <div class="cell-label">Last run</div>

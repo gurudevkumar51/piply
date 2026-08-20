@@ -6,6 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query, Request
 
+from piply.api.auth import get_service, require_permission, visible_pipeline_ids
 from piply.api.schemas import (
     ExecutionMatrixResponse,
     LogResponse,
@@ -19,15 +20,11 @@ from piply.api.schemas import (
 router = APIRouter(tags=["execution"])
 
 
-def _get_service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
-
-
 @router.get("/api/metrics", response_model=dict[str, object])
 def get_runtime_metrics(request: Request) -> dict[str, object]:
     """Return queue and local worker metrics."""
-    return _get_service(request).runtime_metrics()
+    require_permission(request, "view")
+    return get_service(request).runtime_metrics()
 
 
 @router.get("/api/execution-matrix", response_model=ExecutionMatrixResponse)
@@ -41,7 +38,19 @@ def get_execution_matrix(
     limit: int = Query(default=24, ge=1, le=100),
 ) -> ExecutionMatrixResponse:
     """Return task-by-run matrix data for the grid UI."""
-    payload = _get_service(request).execution_matrix(
+    require_permission(request, "view", pipeline_id)
+    service = get_service(request)
+    allowed = visible_pipeline_ids(request)
+    if pipeline_id is None and allowed is not None:
+        # Without an explicit choice the service picks the first pipeline, which
+        # could be one this caller may not see. Choose a visible one instead.
+        pipeline_id = next((item.pipeline_id for item in service.list_pipelines() if item.pipeline_id in allowed), None)
+        if pipeline_id is None:
+            return ExecutionMatrixResponse(
+                pipelines=[], selected_pipeline_id=None, runs=[], rows=[], trend=[], filters={}
+            )
+
+    payload = service.execution_matrix(
         pipeline_id=pipeline_id,
         tenant_id=tenant,
         status=status,
@@ -49,8 +58,11 @@ def get_execution_matrix(
         date_to=date_to,
         limit=limit,
     )
+    pipelines = payload["pipelines"]
+    if allowed is not None:
+        pipelines = [item for item in pipelines if item.pipeline_id in allowed]
     return ExecutionMatrixResponse(
-        pipelines=[PipelineResponse.from_summary(item) for item in payload["pipelines"]],
+        pipelines=[PipelineResponse.from_summary(item) for item in pipelines],
         selected_pipeline_id=payload["selected_pipeline_id"],
         runs=[RunResponse.from_record(item) for item in payload["runs"]],
         rows=[
@@ -73,10 +85,12 @@ def search_logs(
     task_id: str | None = None,
     limit: int = Query(default=300, ge=1, le=1000),
 ) -> list[LogResponse]:
-    """Search recent logs across runs."""
-    logs = _get_service(request).search_logs(
+    """Search recent logs across runs, restricted to pipelines the caller may see."""
+    require_permission(request, "view", pipeline_id)
+    logs = get_service(request).search_logs(
         query=q,
         pipeline_id=pipeline_id,
+        pipeline_ids=visible_pipeline_ids(request),
         task_id=task_id,
         limit=limit,
     )

@@ -155,3 +155,131 @@ def test_preview_endpoint_backs_the_execution_preview_ui(tmp_path: Path) -> None
     assert payload["stages"] == [["ingest"]]
     assert payload["tasks"][0]["priority"] == 1
     assert "ingest acme" in payload["tasks"][0]["command"]
+
+
+RUN_HISTORY_CONFIG = "\n".join(
+    [
+        'version: "1"',
+        "title: Run History Test",
+        "workspace: workspace",
+        "pipelines:",
+        "  ok_flow:",
+        "    tasks:",
+        "      main: {type: cli, command: python -c \"print('ok')\"}",
+        "  failing_flow:",
+        "    tasks:",
+        '      main: {type: cli, command: python -c "import sys; sys.exit(3)"}',
+        "  never_run:",
+        "    tasks:",
+        "      main: {type: cli, command: echo hi}",
+    ]
+)
+
+
+def test_recent_runs_are_capped_and_newest_first(tmp_path: Path) -> None:
+    """Each pipeline carries its last N runs, newest first, in one query."""
+    config_path = _project(tmp_path, RUN_HISTORY_CONFIG)
+    service = PipelineService(config_path=config_path)
+
+    created = [service.trigger_pipeline("ok_flow", wait=True).run_id for _ in range(7)]
+    service.trigger_pipeline("failing_flow", wait=True)
+
+    summaries = {item.pipeline_id: item for item in service.list_pipelines()}
+
+    # Capped at the configured history count, newest first.
+    history = summaries["ok_flow"].recent_runs
+    assert len(history) == service.settings.pipeline_run_history_count == 5
+    assert [run.run_id for run in history] == list(reversed(created))[:5]
+
+    # The newest of those is also the summary's last_run, from the same query.
+    assert summaries["ok_flow"].last_run is not None
+    assert summaries["ok_flow"].last_run.run_id == history[0].run_id
+
+    # Status travels with each dot, so colour comes from real data.
+    assert {run.status for run in history} == {"success"}
+    assert summaries["failing_flow"].recent_runs[0].status == "failed"
+
+    # A pipeline that has never run gets an empty history rather than an error.
+    assert summaries["never_run"].recent_runs == ()
+    assert summaries["never_run"].last_run is None
+
+
+def test_run_history_does_not_add_queries_per_pipeline(tmp_path: Path) -> None:
+    """The listing query count stays constant as pipelines are added.
+
+    The dots come from the same windowed query that supplies the latest run, so
+    showing five runs each must not reintroduce an N+1.
+    """
+    from contextlib import contextmanager
+
+    import piply.core.store as store_mod
+
+    def count_queries(pipeline_count: int) -> int:
+        body = ['version: "1"', "title: Scaling Test", "workspace: workspace", "pipelines:"]
+        for index in range(pipeline_count):
+            body += [f"  flow_{index}:", "    tasks:", "      main: {type: cli, command: echo hi}"]
+        project = tmp_path / f"p{pipeline_count}"
+        project.mkdir()
+        (project / "workspace").mkdir()
+        config_path = project / "piply.yaml"
+        config_path.write_text("\n".join(body), encoding="utf-8")
+
+        service = PipelineService(config_path=config_path)
+        for index in range(pipeline_count):
+            service.trigger_pipeline(f"flow_{index}", wait=True)
+
+        statements: list[str] = []
+        original = store_mod.RunStore._connect
+
+        @contextmanager
+        def counting(self):
+            with original(self) as connection:
+                real = connection.execute
+
+                def wrapped(sql, parameters=()):
+                    statements.append(sql)
+                    return real(sql, parameters)
+
+                connection.execute = wrapped  # type: ignore[method-assign]
+                yield connection
+
+        store_mod.RunStore._connect = counting
+        try:
+            summaries = service.list_pipelines()
+        finally:
+            store_mod.RunStore._connect = original
+
+        assert len(summaries) == pipeline_count
+        assert all(item.recent_runs for item in summaries)
+        return len(statements)
+
+    small = count_queries(2)
+    large = count_queries(10)
+
+    # Five times the pipelines, the same number of queries.
+    assert small == large, f"{small} queries for 2 pipelines, {large} for 10"
+
+
+def test_pipelines_page_renders_clickable_run_dots(tmp_path: Path) -> None:
+    """Every dot is a link to its own run page."""
+    config_path = _project(tmp_path, RUN_HISTORY_CONFIG)
+    service = PipelineService(config_path=config_path)
+    passing = [service.trigger_pipeline("ok_flow", wait=True).run_id for _ in range(2)]
+    failing = service.trigger_pipeline("failing_flow", wait=True).run_id
+
+    with TestClient(create_app(str(config_path))) as client:
+        body = client.get("/pipelines").text
+        payload = client.get("/api/pipelines").json()
+
+    # The template ships the run history and the renderer that draws it.
+    assert "renderRunHistory" in body
+    assert 'class="run-dot' in body
+    assert "/runs/${escapeHtml(run.run_id)}" in body
+    for run_id in [*passing, failing]:
+        assert run_id in body, f"{run_id} missing from the page payload"
+
+    # The API exposes the same history, with the status each dot is coloured by.
+    by_id = {item["pipeline_id"]: item for item in payload}
+    assert [item["id"] for item in by_id["ok_flow"]["recent_runs"]] == list(reversed(passing))
+    assert by_id["failing_flow"]["recent_runs"][0]["status"] == "failed"
+    assert by_id["never_run"]["recent_runs"] == []

@@ -17,7 +17,6 @@ import importlib
 import re
 import sqlite3
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -239,6 +238,15 @@ class Dialect(ABC):
         """Reclaim free space."""
         connection.execute("VACUUM")
 
+    def resync_identity(self, connection: Connection, table: str, column: str = "id") -> None:
+        """Realign a generated-id counter after rows were inserted with explicit ids.
+
+        Only meaningful where the backend keeps a separate sequence object.
+        SQLite derives the next rowid from the table itself, so there is
+        nothing to fix.
+        """
+        return
+
 
 class SqliteDialect(Dialect):
     """The default backend: one local file, no server."""
@@ -346,6 +354,22 @@ class PostgresDialect(Dialect):
         """
         return
 
+    def resync_identity(self, connection: Connection, table: str, column: str = "id") -> None:
+        """Advance a BIGSERIAL sequence past the largest id already present.
+
+        Copying rows in with explicit ids leaves the sequence at its old value,
+        so the next natural insert would collide with an existing primary key.
+        """
+        connection.execute(
+            f"""
+            SELECT setval(
+                pg_get_serial_sequence('{table}', '{column}'),
+                COALESCE((SELECT MAX({column}) FROM {table}), 0) + 1,
+                false
+            )
+            """
+        )
+
 
 class _Psycopg2Adapter:
     """Give psycopg2 the `cursor(row_factory=...)` signature psycopg 3 uses."""
@@ -399,14 +423,3 @@ def build_dialect(database: str | Path) -> Dialect:
     if is_postgres_dsn(text):
         return PostgresDialect(text)
     return SqliteDialect(text)
-
-
-@contextmanager
-def open_connection(dialect: Dialect):
-    """Open, prepare, and close one connection."""
-    connection = dialect.connect()
-    try:
-        dialect.prepare(connection)
-        yield connection
-    finally:
-        connection.close()

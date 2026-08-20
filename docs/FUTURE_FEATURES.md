@@ -17,7 +17,11 @@ Legend: **Effort** S (days) / M (1–2 weeks) / L (a month+).
 
 ## Tier 1 — highest value for the cost
 
-### 1.1 Alerting on failure
+### 1.1 Alerting on failure — **shipped in 0.2.1**
+
+Delivered as pipeline-level `notify:` plus central SMTP under Settings. The
+shape below is close to what shipped; `on_timeout` and `on_sla_miss` are still
+open. See [Authentication](AUTHENTICATION.md) and the YAML specification.
 
 **Problem.** Today you learn a pipeline failed by opening the UI. There is no
 push.
@@ -78,6 +82,11 @@ a suggestion rather than requiring a hand-tuned number.
 ---
 
 ### 1.3 Run parameters as a first-class form
+
+Partly delivered: a manual run now prompts for any `{placeholder}` the config
+leaves unresolved, and `piply run --var NAME=VALUE` supplies them from the CLI.
+What is still open is a *declared* contract with types, defaults, and
+validation.
 
 **Problem.** `--param key=value` exists on the CLI but the UI cannot supply
 parameters, and nothing declares what a pipeline accepts.
@@ -355,12 +364,11 @@ Strictly an optional extra.
 
 **Effort:** M · **Deps:** `opentelemetry-sdk` as an extra
 
-### 4.5 Read-only role
+### 4.5 Read-only role — **shipped in 0.2.1**
 
-Today auth is all-or-nothing. A viewer role that can browse but not trigger,
-cancel, or delete is a common requirement once more than one team can see the UI.
-
-**Effort:** M
+Delivered as per-pipeline `view` / `edit` / `run` grants rather than a single
+global role, so one account can watch one tenant and operate another. See
+[Authentication](AUTHENTICATION.md).
 
 ---
 
@@ -383,17 +391,14 @@ Recorded so the reasoning is not relitigated.
 
 If picking up this list, this order front-loads value and keeps each step small:
 
-1. **1.1 Alerting** — biggest gap, smallest cost
-2. **1.5 Task-level retry** — small, removes most spurious full-run retries
-3. **3.3 FTS log search** + **3.5 Dark mode** + **3.6 Keyboard nav** — cheap wins
-4. **1.4 Log persistence** — before the database becomes the problem
-5. **1.3 Run parameters** — unlocks non-author operators
-6. **1.2 SLA tracking** — pairs naturally with alerting
-7. **2.3 Concurrency pools** — replaces staggered-cron workarounds
-8. **2.5 Plugin hooks** — lets the core stop growing
-9. Everything else, driven by real demand rather than this list
+1. **1.5 Task-level retry** — small, removes most spurious full-run retries
+2. **3.3 FTS log search** + **3.5 Dark mode** + **3.6 Keyboard nav** — cheap wins
+3. **1.4 Log persistence** — before the database becomes the problem
+4. **1.3 Run parameters** — unlocks non-author operators
+5. **1.2 SLA tracking** — pairs naturally with the alerting that shipped in 0.2.1
+6. **2.3 Concurrency pools** — replaces staggered-cron workarounds
+7. **2.5 Plugin hooks** — lets the core stop growing
+8. Everything else, driven by real demand rather than this list
 
-
-### Suggestion by Guru:
-
-1. UI: Pipeline page: every pipeline show last 5 run in Dot format, every DOT will represent a Run & on click on dot redirect to that particular run page.
+For what is planned for a specific release rather than merely proposed, see
+[Roadmap](ROADMAP.md).

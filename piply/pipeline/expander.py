@@ -21,6 +21,8 @@ class EntityItem:
     key: str
     value: str
     variables: dict[str, str] = field(default_factory=dict)
+    #: One per trailing '*' on the configured value. Higher runs first.
+    priority: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -30,6 +32,8 @@ class EntitySelection:
     key: str
     values: dict[str, str]
     variables: dict[str, str]
+    #: Sum of the selected items' priorities.
+    priority: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,6 +46,8 @@ class RuntimeTaskTemplate:
     entity_key: str | None = None
     entity_values: dict[str, str] = field(default_factory=dict)
     variables: dict[str, str] = field(default_factory=dict)
+    #: Priority contributed by the entity values, added to the task's own.
+    priority: int = 0
 
 
 EntityMap = dict[str, tuple[EntityItem, ...]]
@@ -55,8 +61,21 @@ def slug_fragment(value: object) -> str:
     return slug or "item"
 
 
+def split_priority_suffix(raw_value: str) -> tuple[str, int]:
+    """Split a trailing ``*`` run of an entity value into value and priority.
+
+    ``payment**`` means the value ``payment`` at priority 2. A value made only
+    of asterisks is left alone, and the mapping form never strips, so a literal
+    trailing asterisk can still be expressed.
+    """
+    stripped = raw_value.rstrip("*")
+    if not stripped:
+        return raw_value, 0
+    return stripped, len(raw_value) - len(stripped)
+
+
 def _entity_item_from_scalar(entity_name: str, raw_value: object) -> EntityItem:
-    value = str(raw_value)
+    value, priority = split_priority_suffix(str(raw_value))
     return EntityItem(
         entity=entity_name,
         key=slug_fragment(value),
@@ -65,6 +84,7 @@ def _entity_item_from_scalar(entity_name: str, raw_value: object) -> EntityItem:
             entity_name: value,
             f"{entity_name}_value": value,
         },
+        priority=priority,
     )
 
 
@@ -82,7 +102,13 @@ def _entity_item_from_mapping(entity_name: str, raw_key: object, raw_value: Any)
         variables.setdefault(f"{entity_name}_value", value)
         return EntityItem(entity=entity_name, key=slug_fragment(raw_key), value=value, variables=variables)
     item = _entity_item_from_scalar(entity_name, raw_value)
-    return EntityItem(entity=entity_name, key=slug_fragment(raw_key), value=item.value, variables=item.variables)
+    return EntityItem(
+        entity=entity_name,
+        key=slug_fragment(raw_key),
+        value=item.value,
+        variables=item.variables,
+        priority=item.priority,
+    )
 
 
 def parse_entity_map(raw_value: Any, label: str) -> EntityMap:
@@ -151,7 +177,14 @@ def entity_selections(entity_map: EntityMap) -> tuple[EntitySelection, ...]:
         for item in selected_items:
             variables.update(item.variables)
         variables["entity_key"] = key
-        selections.append(EntitySelection(key=key, values=values, variables=variables))
+        selections.append(
+            EntitySelection(
+                key=key,
+                values=values,
+                variables=variables,
+                priority=sum(item.priority for item in selected_items),
+            )
+        )
     return tuple(selections)
 
 
@@ -212,6 +245,7 @@ def expand_task_templates(
                     entity_key=selection.key,
                     entity_values=selection.values,
                     variables=selection.variables,
+                    priority=selection.priority,
                 )
             )
 
@@ -256,6 +290,7 @@ def expand_task_templates(
                 entity_key=spec.entity_key,
                 entity_values=spec.entity_values,
                 variables=spec.variables,
+                priority=spec.priority,
             )
         )
 

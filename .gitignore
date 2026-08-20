@@ -56,3 +56,10 @@ build_tmp/
 .prefect/
 piply-demo/*
 piply.db
+
+# Piply runtime state and demo output. `piply-demo/piply.yaml` sets
+# `workspace: .`, so running the demo writes these at the repository root.
+.piply/
+reports/
+sensor_inbox/
+artifacts/

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from piply.api.auth import get_service, require_admin, require_permission, visible_pipeline_ids
+from piply.version import get_version
 
 router = APIRouter(tags=["observability"])
 
@@ -19,11 +22,6 @@ _RUN_STATUSES = (
     "interrupted",
     "timed_out",
 )
-
-
-def _get_service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
 
 
 def _escape_label(value: str) -> str:
@@ -182,19 +180,60 @@ def render_prometheus(service) -> str:
 @router.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
 def get_metrics(request: Request) -> PlainTextResponse:
     """Expose runtime metrics in the Prometheus text exposition format."""
-    service = _get_service(request)
+    require_permission(request, "view")
+    service = get_service(request)
     if not request.app.state.settings.metrics_enabled:
         raise HTTPException(status_code=404, detail="Metrics are disabled. Set PIPLY_METRICS_ENABLED=true to enable.")
     return PlainTextResponse(render_prometheus(service), media_type=PROMETHEUS_CONTENT_TYPE)
 
 
+@router.get("/health", response_model=dict[str, object], include_in_schema=False)
+def get_health(request: Request) -> JSONResponse:
+    """Liveness probe for container orchestrators and load balancers.
+
+    Public and deliberately cheap: it answers whether this process can serve a
+    request and reach its metadata store, which is what a restart would fix.
+    Scheduler state is reported but does not fail the check, because a paused
+    or stopped scheduler is a valid operating state and restarting the
+    container would not help.
+    """
+    service = get_service(request)
+    try:
+        scheduler_state = service.store.get_meta("scheduler_state") or "unknown"
+    except Exception as exc:  # noqa: BLE001 - any store failure means unhealthy
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "detail": f"Metadata store unreachable: {exc}"},
+        )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "version": get_version(),
+            "scheduler": scheduler_state,
+            "accepting_work": not service.is_shutting_down,
+        },
+    )
+
+
 @router.get("/api/diagnostics", response_model=dict[str, object])
 def get_diagnostics(request: Request) -> dict[str, object]:
-    """Return scheduler, worker, sensor, and reconciliation diagnostics."""
-    return _get_service(request).diagnostics()
+    """Return scheduler, worker, sensor, and reconciliation diagnostics.
+
+    Admin-only: the payload names filesystem paths, the config location, the
+    process id, and the metadata store, none of which a delegated pipeline
+    operator needs.
+    """
+    require_admin(request, "Only administrators can view diagnostics.")
+    return get_service(request).diagnostics()
 
 
 @router.get("/api/sensors", response_model=list[dict[str, object]])
 def get_sensor_health(request: Request) -> list[dict[str, object]]:
-    """Return the health of every configured sensor."""
-    return _get_service(request).sensor_health()
+    """Return the health of sensors on pipelines the caller may see."""
+    require_permission(request, "view")
+    sensors = get_service(request).sensor_health()
+    allowed = visible_pipeline_ids(request)
+    if allowed is None:
+        return sensors
+    return [item for item in sensors if item.get("pipeline_id") in allowed]

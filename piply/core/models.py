@@ -235,6 +235,10 @@ class PipelineDefinition:
     max_parallel_tasks: int = 4
     timeout_seconds: int | None = None
     triggers_on_success: tuple[str, ...] = ()
+    #: Email recipients for run outcomes, delivered through the central SMTP
+    #: settings so no pipeline needs its own server configuration.
+    notify_on_failure: tuple[str, ...] = ()
+    notify_on_success: tuple[str, ...] = ()
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     sensors: dict[str, SensorDefinition] = field(default_factory=dict)
 
@@ -306,6 +310,10 @@ class ProjectDefinition:
     default_python: str
     timezone_name: str
     pipelines: dict[str, PipelineDefinition]
+    #: Non-fatal problems found while loading, surfaced by `validate` and `plan`.
+    #: A warning never blocks a run; it exists so a silent misconfiguration is
+    #: visible before it produces a confusing failure at 3am.
+    warnings: tuple[str, ...] = ()
 
     @property
     def pipeline_count(self) -> int:
@@ -472,6 +480,8 @@ class PipelineSummary:
     timeout_seconds: int | None = None
     triggered_by: tuple[str, ...] = ()
     latest_task_states: dict[str, TaskStatus] = field(default_factory=dict)
+    #: Newest first. Rendered as the run-history dots on the pipeline listing.
+    recent_runs: tuple[RunRecord, ...] = ()
     last_run: RunRecord | None = None
     active_runs: int = 0
     retry_summary: str = "No automatic retry"
@@ -484,8 +494,3 @@ class PipelineSummary:
         if self.execution_mode == "parallel":
             return f"Auto DAG concurrency up to {self.max_parallel_tasks} tasks"
         return "Dependency-aware sequential flow"
-
-
-def utc_now() -> datetime:
-    """Return the current UTC timestamp."""
-    return datetime.now(timezone.utc)

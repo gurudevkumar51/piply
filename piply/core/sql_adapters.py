@@ -105,8 +105,3 @@ def connect_sql(connection: str | None = None, *, database: Path | None = None):
     if database is None or not database.exists():
         return None
     return sqlite3.connect(database)
-
-
-def supported_sql_adapters() -> tuple[str, ...]:
-    """Return the documented connection schemes supported by built-in sensors."""
-    return tuple(sorted(SUPPORTED_SQL_SCHEMES))

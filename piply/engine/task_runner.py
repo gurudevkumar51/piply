@@ -471,37 +471,34 @@ class TaskRunner:
             return TaskExecutionResult(status="failed", error=message)
 
     def _run_email_task(self, task: TaskDefinition) -> TaskExecutionResult:
-        import smtplib
-        from email.message import EmailMessage
+        """Send one email, using central SMTP settings unless the task overrides them."""
+        from piply.core.mailer import build_message, load_smtp_settings, resolve_for_task, send_message
 
         if not task.email_to:
             message = "No recipients specified for email task."
             self.emit(message, task_id=task.task_id)
             return TaskExecutionResult(status="failed", error=message)
 
-        msg = EmailMessage()
-        msg.set_content(task.email_body or "")
-        msg["Subject"] = task.email_subject or "Piply Notification"
-        msg["From"] = task.smtp_user or "piply@localhost"
-        msg["To"] = ", ".join(task.email_to)
+        settings = resolve_for_task(load_smtp_settings(self.store), task)
+        if not settings.configured:
+            message = "No SMTP server is configured. Set one under Settings, or give this task its own smtp_host."
+            self.emit(message, task_id=task.task_id)
+            return TaskExecutionResult(status="failed", error=message)
 
+        subject = task.email_subject or "Piply Notification"
         try:
-            with smtplib.SMTP(task.smtp_host or "localhost", task.smtp_port) as server:
-                if task.smtp_user and task.smtp_password:
-                    server.starttls()
-                    server.login(task.smtp_user, task.smtp_password)
-                server.send_message(msg)
+            send_message(
+                settings,
+                build_message(settings, to=list(task.email_to), subject=subject, body=task.email_body or ""),
+            )
             if self.is_cancelled and self.is_cancelled():
                 self.emit("Task cancelled.", task_id=task.task_id)
                 return TaskExecutionResult(status="cancelled")
-            self.emit("Email sent successfully.", task_id=task.task_id)
+            self.emit(f"Email sent to {', '.join(task.email_to)} via {settings.host}.", task_id=task.task_id)
             return TaskExecutionResult(
                 status="success",
                 exit_code=0,
-                output={
-                    "to": list(task.email_to),
-                    "subject": task.email_subject or "Piply Notification",
-                },
+                output={"to": list(task.email_to), "subject": subject, "smtp_host": settings.host},
             )
         except Exception as exc:
             message = f"Failed to send email: {exc}"
