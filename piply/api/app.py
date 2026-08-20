@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from piply.api.auth import AuthMiddleware, SecurityHeadersMiddleware
+from piply.api.auth import auth_middleware, security_headers_middleware
 from piply.core.scheduler import PipelineScheduler
 from piply.core.service import PipelineService
 from piply.settings import PiplySettings, load_settings
@@ -103,11 +103,13 @@ def create_app(config_path: str | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    app.add_middleware(AuthMiddleware)
+    # Registered through FastAPI's own middleware decorator so nothing here
+    # imports Starlette directly, keeping the declared dependencies honest.
+    app.middleware("http")(auth_middleware)
     # Added last so it wraps outermost, which means the hardening headers are
-    # also present on the 401 and login-redirect responses AuthMiddleware
+    # also present on the 401 and login-redirect responses the auth middleware
     # returns without ever reaching a route.
-    app.add_middleware(SecurityHeadersMiddleware)
+    app.middleware("http")(security_headers_middleware)
     app.mount("/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
     app.include_router(accounts.router)
     app.include_router(ui.router)

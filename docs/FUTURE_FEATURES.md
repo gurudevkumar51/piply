@@ -119,7 +119,86 @@ Validation happens before the run is created rather than inside task code.
 
 ---
 
-### 1.4 Log persistence outside SQLite
+### 1.4 dbt artifact awareness
+
+**Problem.** dbt is the single most common thing Piply is asked to orchestrate,
+and today it is opaque. `dbt run --selector feed_silver` is *one* Piply task. If
+it fails you get an exit code and a wall of stdout, and the question you
+actually have — *which model broke, and how long did the rest take* — is
+answered by scrolling.
+
+Measured on a real project (RCM-Data-pipeline): 1132 model files, 444 nodes,
+46 selectors, 19 dbt tasks across the medallion chain. At that size "the silver
+stage failed" is not an actionable message.
+
+**Proposal.** Read the artifacts dbt already writes. No dbt dependency, no
+import — just parsing JSON that a `type: cli` task leaves in `target/`.
+
+```yaml
+tasks:
+  load_silver:
+    type: cli
+    command: dbt run {dbt_ops} --selector {selector}
+    dbt_results: RCM_DataFlow/target      # new: where to look afterwards
+```
+
+After the task exits, Piply reads `run_results.json` and records one row per
+model:
+
+| From the artifact | Shown as |
+| --- | --- |
+| `unique_id` | model name |
+| `status` | success / error / skipped |
+| `execution_time` | per-model duration |
+| `message`, `failures` | the actual error, not stdout |
+| `adapter_response.rows_affected` | rows written |
+| `relation_name` | the table or view produced |
+
+These land in the existing task-output and artifact panels — no new UI concept.
+`manifest.json` additionally allows `piply plan` to **validate selector names
+before a run**, which with 46 selectors and interpolated values like
+`--selector int_{selector}` catches a typo at validate time instead of at 03:00.
+
+**Why it matters.** It is the highest-value-per-line integration available:
+per-model failure attribution, per-model timing that feeds SLA tracking (1.2),
+and selector validation — for roughly 100 lines and **zero new dependencies**.
+The artifact schema is versioned and stable, so it works across dbt versions and
+adapters.
+
+Measured cost of reading them: `manifest.json` is 1.9 MB and parses in ~10 ms.
+
+**Deliberately out of scope — do not embed dbt.** Importing `dbt-core` or
+`dbtRunner` would be a mistake:
+
+- dbt-core pulls roughly 50 transitive dependencies into a project whose entire
+  runtime is 8.
+- It version-locks Piply to dbt's release cadence, and adapters ship separately.
+- Real deployments run dbt in a *different* environment on purpose — the RCM
+  project uses `conda run -n py313_piply_automation dbt ...`. Embedding would
+  force dbt into Piply's interpreter and break that separation.
+
+Shelling out is the correct boundary, not a workaround.
+
+**Also out of scope — expanding `manifest.json` into per-model Piply tasks.**
+Tempting, since it would give per-model retry and priority. But it duplicates
+dbt's own scheduler, which understands `ref()`, threading, and incremental
+state in ways Piply would have to re-derive. Two DAGs that can disagree is worse
+than one opaque task. dbt should own dbt's DAG; Piply owns *when* dbt runs and
+*what happened*.
+
+**Not a fix for the concurrency bottleneck.** Several tenant deployments
+serialising behind one shared downstream pipeline is [2.3 concurrency
+pools](#23-pipeline-level-concurrency-pools), unrelated to dbt awareness.
+
+**Effort:** S–M · **Deps:** none
+
+A `type: dbt` shorthand that builds the command and wires this up automatically
+is a reasonable follow-on, but only after the artifact parsing exists — the
+parsing is where the value is, the shorthand is sugar over `{dbt_ops}`.
+
+---
+
+### 1.5 Log persistence outside SQLite
 
 **Problem.** Every log line is a row. A chatty dbt run can add tens of thousands
 of rows per execution, which is why `piply prune` is necessary at all.
@@ -135,7 +214,7 @@ makes retention a file-deletion problem instead of a `DELETE` + `VACUUM` one.
 
 ---
 
-### 1.5 Task-level retry
+### 1.6 Task-level retry
 
 **Problem.** `retry` is pipeline-level. One flaky API call forces a whole-run
 retry.
@@ -391,14 +470,15 @@ Recorded so the reasoning is not relitigated.
 
 If picking up this list, this order front-loads value and keeps each step small:
 
-1. **1.5 Task-level retry** — small, removes most spurious full-run retries
-2. **3.3 FTS log search** + **3.5 Dark mode** + **3.6 Keyboard nav** — cheap wins
-3. **1.4 Log persistence** — before the database becomes the problem
-4. **1.3 Run parameters** — unlocks non-author operators
-5. **1.2 SLA tracking** — pairs naturally with the alerting that shipped in 0.2.1
-6. **2.3 Concurrency pools** — replaces staggered-cron workarounds
-7. **2.5 Plugin hooks** — lets the core stop growing
-8. Everything else, driven by real demand rather than this list
+1. **1.6 Task-level retry** — small, removes most spurious full-run retries
+2. **1.4 dbt artifact awareness** — biggest visibility win per line, no new dependency
+3. **3.3 FTS log search** + **3.5 Dark mode** + **3.6 Keyboard nav** — cheap wins
+4. **1.5 Log persistence** — before the database becomes the problem
+5. **1.3 Run parameters** — declared, typed inputs on top of the prompt that shipped
+6. **1.2 SLA tracking** — pairs naturally with the alerting that shipped in 0.2.1
+7. **2.3 Concurrency pools** — replaces staggered-cron workarounds
+8. **2.5 Plugin hooks** — lets the core stop growing
+9. Everything else, driven by real demand rather than this list
 
 For what is planned for a specific release rather than merely proposed, see
 [Roadmap](ROADMAP.md).

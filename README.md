@@ -296,6 +296,7 @@ piply stop --config piply-demo/piply.yaml
 - [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
 - [Usage Guide](wiki/USAGE_GUIDE.md): longer-form walkthrough
+- [Changelog](CHANGELOG.md): what changed per release, and what to check before upgrading
 
 **Understanding Piply**
 

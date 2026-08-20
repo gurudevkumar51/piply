@@ -1344,11 +1344,6 @@ class RunStore:
             row = connection.execute("SELECT COALESCE(MAX(id), 0) AS cursor FROM logs").fetchone()
         return int(row["cursor"] or 0)
 
-    def get_latest_run_for_pipeline(self, pipeline_id: str) -> RunRecord | None:
-        """Return the most recent run for one pipeline."""
-        runs = self.list_runs(pipeline_id=pipeline_id, limit=1)
-        return runs[0] if runs else None
-
     def latest_runs_by_pipeline(self) -> dict[str, RunRecord]:
         """Return the newest run for every pipeline using a single scan."""
         with self._connect() as connection:

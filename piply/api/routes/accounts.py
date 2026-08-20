@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from urllib.parse import parse_qsl
+
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -10,6 +12,39 @@ from piply.api.auth import SESSION_COOKIE, get_service, require_permission, reso
 from piply.core.auth import PERMISSIONS, AuthError, constant_time_equals, issue_session
 
 router = APIRouter(tags=["accounts"])
+
+#: Enough for any sign-in, small enough that an unauthenticated caller cannot
+#: make the server buffer something large.
+_MAX_LOGIN_BODY_BYTES = 8 * 1024
+
+
+async def _read_login_form(request: Request) -> dict[str, str]:
+    """Parse the sign-in form body without a third-party parser.
+
+    FastAPI's ``Form(...)`` and Starlette's ``request.form()`` both require the
+    ``python-multipart`` package. The sign-in form is the only form in the app
+    and browsers always send it as ``application/x-www-form-urlencoded``, which
+    the standard library decodes correctly — including ``+`` for space and
+    percent-escapes. Doing it here keeps the runtime dependency count at eight
+    and keeps a third-party parser off the one endpoint that is reachable
+    without credentials.
+    """
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/x-www-form-urlencoded":
+        raise HTTPException(status_code=415, detail="Sign in expects an HTML form submission.")
+
+    body = await request.body()
+    if len(body) > _MAX_LOGIN_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Sign-in request was too large.")
+
+    try:
+        decoded = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Sign-in request was not valid UTF-8.") from exc
+
+    # keep_blank_values so an empty password stays present and is rejected as a
+    # bad credential, rather than vanishing and looking like a malformed form.
+    return dict(parse_qsl(decoded, keep_blank_values=True))
 
 
 def _user_payload(user) -> dict[str, object]:
@@ -72,13 +107,13 @@ def login_page(request: Request, next: str = "/", error: str | None = None) -> H
 
 
 @router.post("/login")
-def login_submit(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-    next: str = Form("/"),
-):
+async def login_submit(request: Request):
     """Verify credentials and start a session."""
+    form = await _read_login_form(request)
+    username = form.get("username", "")
+    password = form.get("password", "")
+    next = form.get("next", "/")
+
     service = get_service(request)
     if service.login_retry_after(username):
         return RedirectResponse(
