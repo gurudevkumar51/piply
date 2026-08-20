@@ -310,6 +310,10 @@ class ProjectDefinition:
     default_python: str
     timezone_name: str
     pipelines: dict[str, PipelineDefinition]
+    #: Non-fatal problems found while loading, surfaced by `validate` and `plan`.
+    #: A warning never blocks a run; it exists so a silent misconfiguration is
+    #: visible before it produces a confusing failure at 3am.
+    warnings: tuple[str, ...] = ()
 
     @property
     def pipeline_count(self) -> int:
@@ -490,8 +494,3 @@ class PipelineSummary:
         if self.execution_mode == "parallel":
             return f"Auto DAG concurrency up to {self.max_parallel_tasks} tasks"
         return "Dependency-aware sequential flow"
-
-
-def utc_now() -> datetime:
-    """Return the current UTC timestamp."""
-    return datetime.now(timezone.utc)

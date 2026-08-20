@@ -6,15 +6,10 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from piply.api.auth import SESSION_COOKIE, require_permission, resolve_user
+from piply.api.auth import SESSION_COOKIE, get_service, require_permission, resolve_user
 from piply.core.auth import PERMISSIONS, AuthError, constant_time_equals, issue_session
 
 router = APIRouter(tags=["accounts"])
-
-
-def _service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
 
 
 def _user_payload(user) -> dict[str, object]:
@@ -43,7 +38,7 @@ def _safe_next(target: str | None) -> str:
 
 def _require_admin(request: Request):
     """Raise unless the caller is an administrator."""
-    service = _service(request)
+    service = get_service(request)
     if not service.auth_required:
         return None
     user = resolve_user(request)
@@ -60,7 +55,7 @@ def _require_admin(request: Request):
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, next: str = "/", error: str | None = None) -> HTMLResponse:
     """Render the sign-in form."""
-    service = _service(request)
+    service = get_service(request)
     if resolve_user(request) is not None:
         return RedirectResponse(url=_safe_next(next), status_code=303)
     return request.app.state.templates.TemplateResponse(
@@ -84,7 +79,7 @@ def login_submit(
     next: str = Form("/"),
 ):
     """Verify credentials and start a session."""
-    service = _service(request)
+    service = get_service(request)
     if service.login_retry_after(username):
         return RedirectResponse(
             url="/login?error=Too+many+failed+attempts.+Try+again+in+a+few+minutes.",
@@ -130,7 +125,7 @@ def logout(request: Request):
 @router.get("/api/me", response_model=dict[str, object])
 def whoami(request: Request) -> dict[str, object]:
     """Return the current account and what it may do."""
-    service = _service(request)
+    service = get_service(request)
     user = resolve_user(request)
     if user is None:
         return {"authenticated": False, "auth_required": service.auth_required}
@@ -168,7 +163,7 @@ class PermissionRequest(BaseModel):
 def list_users(request: Request) -> list[dict[str, object]]:
     """List every account."""
     _require_admin(request)
-    return [_user_payload(item) for item in _service(request).list_users()]
+    return [_user_payload(item) for item in get_service(request).list_users()]
 
 
 @router.post("/api/users", response_model=dict[str, object])
@@ -176,7 +171,7 @@ def create_user(request: Request, payload: CreateUserRequest) -> dict[str, objec
     """Create one account."""
     _require_admin(request)
     try:
-        user = _service(request).create_user(
+        user = get_service(request).create_user(
             payload.username,
             payload.password,
             role=payload.role,
@@ -192,7 +187,7 @@ def update_user(request: Request, username: str, payload: UpdateUserRequest) -> 
     """Change one account's password, role, or active flag."""
     _require_admin(request)
     try:
-        user = _service(request).update_user(
+        user = get_service(request).update_user(
             username,
             password=payload.password,
             role=payload.role,
@@ -208,7 +203,7 @@ def delete_user(request: Request, username: str) -> dict[str, str]:
     """Delete one account."""
     _require_admin(request)
     try:
-        _service(request).delete_user(username)
+        get_service(request).delete_user(username)
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "deleted", "username": username}
@@ -219,7 +214,7 @@ def set_permission(request: Request, username: str, payload: PermissionRequest) 
     """Grant or clear pipeline actions for a user."""
     _require_admin(request)
     try:
-        user = _service(request).grant_permission(username, payload.pipeline_id, payload.actions)
+        user = get_service(request).grant_permission(username, payload.pipeline_id, payload.actions)
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _user_payload(user)

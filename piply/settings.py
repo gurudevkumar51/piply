@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def read_secret(env: Mapping[str, str], name: str) -> str | None:
+    """Return a secret from ``NAME``, or from the file named by ``NAME_FILE``.
+
+    The ``_FILE`` form is the Docker and Kubernetes convention for mounted
+    secrets. It is preferred on a server because an environment variable is
+    readable through ``docker inspect``, ``/proc/<pid>/environ``, and most
+    crash reporters, while a mounted file is not.
+    """
+    path_value = env.get(f"{name}_FILE")
+    if path_value:
+        try:
+            content = Path(path_value).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read {name}_FILE at {path_value}: {exc}") from exc
+        if content:
+            return content
+    return env.get(name) or None
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -218,8 +238,8 @@ def load_settings(
     metrics_enabled = _parse_bool(merged_env.get("PIPLY_METRICS_ENABLED"), True)
 
     auth_username = merged_env.get("PIPLY_AUTH_USERNAME")
-    auth_password = merged_env.get("PIPLY_AUTH_PASSWORD")
-    api_token = merged_env.get("PIPLY_API_TOKEN")
+    auth_password = read_secret(merged_env, "PIPLY_AUTH_PASSWORD")
+    api_token = read_secret(merged_env, "PIPLY_API_TOKEN")
     auth_enabled = _parse_bool(merged_env.get("PIPLY_AUTH_ENABLED")) or any(
         [auth_username and auth_password, api_token]
     )

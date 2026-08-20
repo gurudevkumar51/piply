@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from piply.api.auth import (
     filter_by_pipeline,
+    get_service,
     require_admin,
     require_permission,
     resolve_user,
@@ -25,16 +26,11 @@ def _templates(request: Request):
     return request.app.state.templates
 
 
-def _service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
-
-
 @router.get("/", response_class=HTMLResponse)
 def dashboard_page(request: Request) -> HTMLResponse:
     """Render the dashboard page, narrowed to what the caller may see."""
     require_permission(request, "view")
-    service = _service(request)
+    service = get_service(request)
     payload = service.dashboard()
     return _templates(request).TemplateResponse(
         request,
@@ -71,7 +67,7 @@ def _pipeline_group_key(summary) -> tuple[str, str]:
 def pipelines_page(request: Request) -> HTMLResponse:
     """Render the pipeline list page."""
     require_permission(request, "view")
-    service = _service(request)
+    service = get_service(request)
     summaries = visible_pipelines(request, service.list_pipelines())
 
     groups: dict[str, dict[str, object]] = {}
@@ -149,7 +145,7 @@ def pipelines_page(request: Request) -> HTMLResponse:
 def diagnostics_page(request: Request) -> HTMLResponse:
     """Render the runtime diagnostics page. Administrators only."""
     require_admin(request, "Only administrators can view diagnostics.")
-    service = _service(request)
+    service = get_service(request)
     payload = service.diagnostics()
     return _templates(request).TemplateResponse(
         request,
@@ -167,7 +163,7 @@ def diagnostics_page(request: Request) -> HTMLResponse:
 def pipeline_detail_page(request: Request, pipeline_id: str) -> HTMLResponse:
     """Render the pipeline detail page."""
     require_permission(request, "view", pipeline_id)
-    service = _service(request)
+    service = get_service(request)
     try:
         detail = service.get_pipeline_detail(pipeline_id)
     except KeyError as exc:
@@ -262,7 +258,7 @@ def runs_page(
 ) -> HTMLResponse:
     """Render the run history page with filters, sorting, and trigger lineage."""
     require_permission(request, "view")
-    service = _service(request)
+    service = get_service(request)
 
     def _parse_moment(value: str | None, end_of_day: bool) -> datetime | None:
         """Accept a date or a datetime from the filter bar."""
@@ -320,7 +316,7 @@ def runs_page(
 @router.get("/runs/{run_id}", response_class=HTMLResponse)
 def run_detail_page(request: Request, run_id: str) -> HTMLResponse:
     """Render the run detail page."""
-    service = _service(request)
+    service = get_service(request)
     existing = service.store.get_run(run_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Unknown run '{run_id}'")
@@ -417,7 +413,7 @@ def execution_matrix_page(
 ) -> HTMLResponse:
     """Render the execution matrix page."""
     require_permission(request, "view", pipeline_id)
-    service = _service(request)
+    service = get_service(request)
     allowed = visible_pipeline_ids(request)
     if pipeline_id is None and allowed is not None:
         # Fall back to a pipeline this caller may actually see, not just the first.
@@ -449,7 +445,7 @@ def logs_page(
 ) -> HTMLResponse:
     """Render searchable logs, restricted to pipelines the caller may see."""
     require_permission(request, "view", pipeline_id)
-    service = _service(request)
+    service = get_service(request)
     return _templates(request).TemplateResponse(
         request,
         "logs.html",
@@ -475,7 +471,7 @@ def logs_page(
 def settings_page(request: Request) -> HTMLResponse:
     """Render settings, plus SMTP and account administration for admins."""
     require_permission(request, "view")
-    service = _service(request)
+    service = get_service(request)
     payload = service.dashboard()
     current = resolve_user(request)
     is_admin = current is None or current.is_admin

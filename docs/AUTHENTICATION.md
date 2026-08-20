@@ -47,6 +47,120 @@ because those already define an administrator.
 
 ---
 
+## 1b. Creating the first admin on a server
+
+On a server or in a container you usually cannot run an interactive command
+before the app starts. There are three ways in, in ascending order of how much
+you should like them.
+
+### A. Bootstrap with a mounted secret (recommended)
+
+Supply the password as a file. Nothing is generated, nothing is printed, and
+the secret never becomes an environment variable:
+
+```yaml
+# docker-compose.yml
+services:
+  piply:
+    environment:
+      PIPLY_AUTH_ENABLED: "true"
+      PIPLY_ADMIN_USERNAME: admin
+      PIPLY_ADMIN_PASSWORD_FILE: /run/secrets/piply_admin_password
+    secrets:
+      - piply_admin_password
+
+secrets:
+  piply_admin_password:
+    file: ./secrets/admin_password.txt
+```
+
+The account is created on first start. A trailing newline in the file is
+stripped. On later starts the account already exists, so nothing happens — the
+password is **not** reset, and changing the file does not change the password.
+
+The startup banner confirms the account without echoing a secret you already
+know:
+
+```
+====================================================================
+Piply created an initial administrator account:
+    username: admin
+    password: (as configured)
+====================================================================
+```
+
+Kubernetes is the same idea:
+
+```yaml
+env:
+  - name: PIPLY_AUTH_ENABLED
+    value: "true"
+  - name: PIPLY_ADMIN_PASSWORD_FILE
+    value: /etc/piply/admin-password
+volumeMounts:
+  - name: piply-secrets
+    mountPath: /etc/piply
+    readOnly: true
+```
+
+### B. Bootstrap with a generated password
+
+Set only `PIPLY_AUTH_ENABLED=true` and read the password out of the startup
+logs once:
+
+```bash
+docker compose up -d
+docker compose logs piply | grep -A3 "initial administrator"
+```
+
+Simple, but the password passes through your log pipeline. Sign in and change
+it, then treat those log lines as sensitive.
+
+### C. Exec into the running container
+
+```bash
+docker exec -it piply piply users create admin --role admin
+```
+
+Works, but needs shell access to production and only helps after the container
+is already up.
+
+### Which to use
+
+| Situation | Use |
+| --- | --- |
+| Docker Compose, Swarm, Kubernetes | A — `PIPLY_ADMIN_PASSWORD_FILE` |
+| A plain VM or systemd unit | A, with the file mode set to `0400` |
+| Quick evaluation | B |
+| Recovering an install with no working admin | C |
+
+### Secret files apply to every credential
+
+`PIPLY_AUTH_PASSWORD`, `PIPLY_API_TOKEN`, and `PIPLY_ADMIN_PASSWORD` each accept
+a `_FILE` variant. The file wins when both are set. An unreadable path is a
+startup error rather than a silent fallback, so a broken mount does not leave
+you with an unexpectedly open install.
+
+```bash
+PIPLY_API_TOKEN_FILE=/run/secrets/piply_api_token
+PIPLY_AUTH_PASSWORD_FILE=/run/secrets/piply_basic_password
+```
+
+### If you lock yourself out
+
+The password cannot be recovered, only reset. With filesystem access to the
+database:
+
+```bash
+piply users passwd admin              # prints a new generated password
+piply users create rescue --role admin
+```
+
+Both need the same `PIPLY_DATABASE` the server uses. If the store is
+PostgreSQL, run them anywhere that can reach it.
+
+---
+
 ## 2. Roles
 
 | Role | What it means |
@@ -98,16 +212,38 @@ the object:
 | `GET /api/pipelines/{id}`, `/pipelines/{id}` | `view` on that pipeline |
 | `POST /api/pipelines/{id}/run` | `run` |
 | `POST /api/pipelines/{id}/tasks/{task}/run` | `run` |
+| `POST /api/pipelines/{id}/chain/{target}` | `run` on **both** pipelines |
 | `POST /api/pipelines/{id}/pause` and `/resume` | `edit` |
 | `DELETE /api/pipelines/{id}` | `edit` |
+| `GET`/`POST /api/pipelines/{id}/preview` | `view` on that pipeline |
+| `POST /api/pipelines/{id}/backfill` | `run` |
 | `GET /api/runs`, `/runs` | `view`; filtered to visible pipelines |
 | `GET /api/runs/{id}` and its logs, tasks, outputs | `view` on the run's pipeline |
-| `POST /api/runs/{id}/retry`, `/cancel` | `run` on the run's pipeline |
+| `GET /api/runs/{id}/artifacts`, `/artifacts/download` | `view` on the run's pipeline |
+| `GET /api/runs/{id}/config` | `view` on the run's pipeline; credentials masked |
+| `POST /api/runs/{id}/retry`, `/cancel`, `/backfill` | `run` on the run's pipeline |
 | `DELETE /api/runs/{id}` | `edit` on the run's pipeline |
+| `GET /api/dashboard`, `/` | `view`; pipeline and run lists filtered |
+| `GET /api/logs`, `/api/logs/stream`, `/logs` | `view`; results filtered |
+| `GET /api/execution-matrix`, `/execution-matrix` | `view`; filtered |
+| `GET /api/sensors`, `/api/metrics`, `/metrics` | `view` |
+| `GET /api/diagnostics`, `/diagnostics` | `admin` |
+| `POST /api/maintenance/prune` | `admin` |
+| Any request sending `command_overrides` | `admin` |
 | `/api/users*`, `/api/settings/smtp*` | `admin` |
 
 A run inherits the permissions of the pipeline that produced it, so granting
 `view` on a pipeline grants its history too.
+
+Two rules are worth calling out because they are not obvious:
+
+- **`command_overrides` requires `admin`, not `run`.** An override replaces the
+  command a task executes, so allowing it under a `run` grant would turn "may
+  run this one pipeline" into "may execute any command as the Piply process".
+  Triggering a pipeline *as configured* still only needs `run`.
+- **Listing endpoints filter rather than refuse.** The dashboard, run list, log
+  search, and matrix return your pipelines and omit everyone else's, so a
+  restricted account gets a working page rather than a 403.
 
 ---
 
@@ -197,9 +333,16 @@ install is never redirected to a login form it has no credentials for.
 | `PIPLY_AUTH_ENABLED` | Require authentication even with no accounts; enables bootstrap |
 | `PIPLY_ADMIN_USERNAME` | Username for the bootstrapped admin (default `admin`) |
 | `PIPLY_ADMIN_PASSWORD` | Password for the bootstrapped admin (default: generated) |
+| `PIPLY_ADMIN_PASSWORD_FILE` | Read that password from a mounted file instead |
 | `PIPLY_AUTH_USERNAME` / `PIPLY_AUTH_PASSWORD` | Legacy single-admin Basic credentials |
+| `PIPLY_AUTH_PASSWORD_FILE` | Read the Basic password from a mounted file |
 | `PIPLY_API_TOKEN` | Bearer token for machine access |
+| `PIPLY_API_TOKEN_FILE` | Read the bearer token from a mounted file |
 | `PIPLY_SESSION_SECRET` | Session signing key; generated and stored if unset |
+
+Every `_FILE` variant takes precedence over its plain form and is the better
+choice on a server: an environment variable is readable through
+`docker inspect`, `/proc/<pid>/environ`, and most crash reporters.
 
 ---
 
@@ -211,4 +354,15 @@ install is never redirected to a login form it has no credentials for.
 - **Behind a proxy**, forward the `Authorization` header and `X-Forwarded-Proto`.
 - **Rotate the API token** by changing `PIPLY_API_TOKEN` and restarting.
 - **Password resets** are admin-driven; there is no email reset flow.
-- Deleting a user removes every grant it held.
+- Deleting a user removes every grant it held, in the same transaction, so a
+  recreated username never inherits the old account's access.
+- **Sign-in is throttled.** Eight failures within five minutes lock that
+  username out for five minutes. The counter is in memory and clears on
+  restart.
+- **Changing a password does not end existing sessions.** They expire after 12
+  hours. *Disabling* an account takes effect immediately, because the user is
+  re-read on every request. To force a global sign-out, rotate
+  `PIPLY_SESSION_SECRET` and restart.
+
+For the wider picture — what is deliberately not protected, and the deployment
+checklist — see [Security](SECURITY.md).

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from piply.api.auth import filter_by_pipeline, require_permission, visible_pipelines
+from piply.api.auth import filter_by_pipeline, get_service, require_permission, visible_pipelines
 from piply.api.schemas import (
     DashboardResponse,
     DashboardStatsResponse,
@@ -16,11 +16,6 @@ from piply.api.schemas import (
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
-def _get_service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
-
-
 @router.get("", response_model=DashboardResponse)
 def get_dashboard(request: Request) -> DashboardResponse:
     """Return the dashboard payload, narrowed to what the caller may see.
@@ -29,7 +24,7 @@ def get_dashboard(request: Request) -> DashboardResponse:
     filtered, so a restricted account never learns another tenant's run ids.
     """
     require_permission(request, "view")
-    payload = _get_service(request).dashboard()
+    payload = get_service(request).dashboard()
     return DashboardResponse(
         project=payload["project"],
         stats=DashboardStatsResponse.from_stats(payload["stats"]),
@@ -51,4 +46,4 @@ def get_dashboard(request: Request) -> DashboardResponse:
 def get_scheduler_snapshot(request: Request) -> SchedulerResponse:
     """Return lightweight scheduler status for nav and live UI polling."""
     require_permission(request, "view")
-    return SchedulerResponse(**_get_service(request).scheduler_snapshot())
+    return SchedulerResponse(**get_service(request).scheduler_snapshot())

@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
 from piply.api.auth import (
+    get_service,
     guard_run,
     require_admin,
     require_permission,
@@ -28,11 +29,6 @@ from piply.core.secrets import mask_env_values
 router = APIRouter(tags=["operations"])
 
 
-def _get_service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
-
-
 @router.post("/api/pipelines/{pipeline_id}/preview", response_model=dict[str, object])
 def preview_pipeline(
     request: Request,
@@ -45,7 +41,7 @@ def preview_pipeline(
         # Overriding a command means choosing what the server executes, so it is
         # an administrator action even though the preview itself runs nothing.
         require_admin(request, "Only administrators can preview overridden commands.")
-    service = _get_service(request)
+    service = get_service(request)
     try:
         preview = service.preview_pipeline(
             pipeline_id,
@@ -65,7 +61,7 @@ def preview_pipeline(
 def get_pipeline_preview(request: Request, pipeline_id: str) -> dict[str, object]:
     """Return the dry-run preview for a pipeline using its configured values."""
     require_permission(request, "view", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         return service.preview_pipeline(pipeline_id).as_dict()
     except KeyError as exc:
@@ -76,7 +72,7 @@ def get_pipeline_preview(request: Request, pipeline_id: str) -> dict[str, object
 def list_run_artifacts(request: Request, run_id: str, task_id: str | None = None) -> list[dict[str, object]]:
     """List the files produced by one run."""
     guard_run(request, run_id, "view")
-    service = _get_service(request)
+    service = get_service(request)
     try:
         return service.list_run_artifacts(run_id, task_id)
     except KeyError as exc:
@@ -91,7 +87,7 @@ def download_run_artifact(request: Request, run_id: str, path: str = Query(...))
     inside an allowed root, so a crafted path cannot read unrelated files.
     """
     guard_run(request, run_id, "view")
-    service = _get_service(request)
+    service = get_service(request)
     try:
         artifacts = service.list_run_artifacts(run_id)
     except KeyError as exc:
@@ -114,7 +110,7 @@ def download_run_artifact(request: Request, run_id: str, path: str = Query(...))
 def backfill_run(request: Request, run_id: str) -> RunResponse:
     """Re-execute one historic run using the configuration it originally captured."""
     guard_run(request, run_id, "run")
-    service = _get_service(request)
+    service = get_service(request)
     try:
         run = service.backfill_run(run_id, wait=False)
     except KeyError as exc:
@@ -128,7 +124,7 @@ def backfill_run(request: Request, run_id: str) -> RunResponse:
 def backfill_schedule(request: Request, pipeline_id: str, payload: BackfillScheduleRequest) -> dict[str, object]:
     """Queue one run per scheduled slot inside a historic window."""
     require_permission(request, "run", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         slots = service.backfill_schedule(
             pipeline_id,
@@ -153,7 +149,7 @@ def prune_history(request: Request, payload: PruneRequest | None = None) -> dict
     # Retention is installation-wide and irreversible, so it is never delegated
     # through a per-pipeline grant.
     require_admin(request, "Only administrators can prune history.")
-    service = _get_service(request)
+    service = get_service(request)
     overrides: dict[str, int] = {}
     if payload is not None:
         if payload.run_retention_days is not None:
@@ -177,7 +173,7 @@ def get_run_config(request: Request, run_id: str) -> dict[str, object]:
     the real values so a replay still works; only this view is redacted.
     """
     guard_run(request, run_id, "view")
-    service = _get_service(request)
+    service = get_service(request)
     snapshot = service.store.get_run_config(run_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="This run was created before runtime configuration was captured.")
@@ -205,7 +201,7 @@ def stream_logs(
     else:
         require_permission(request, "view")
 
-    lines = _get_service(request).tail_logs(
+    lines = get_service(request).tail_logs(
         run_id=run_id,
         pipeline_id=pipeline_id,
         task_id=task_id,
@@ -225,7 +221,7 @@ _SMTP_ADMIN_ONLY = "Only administrators can change SMTP settings."
 def get_smtp(request: Request) -> dict[str, object]:
     """Return the central SMTP configuration. The password is never included."""
     require_admin(request, _SMTP_ADMIN_ONLY)
-    return _get_service(request).get_smtp_settings()
+    return get_service(request).get_smtp_settings()
 
 
 @router.put("/api/settings/smtp", response_model=dict[str, object])
@@ -236,7 +232,7 @@ def put_smtp(request: Request, payload: SmtpSettingsRequest) -> dict[str, object
     without retyping a secret the form never displays.
     """
     require_admin(request, _SMTP_ADMIN_ONLY)
-    return _get_service(request).save_smtp_settings(payload.model_dump(exclude_none=True))
+    return get_service(request).save_smtp_settings(payload.model_dump(exclude_none=True))
 
 
 @router.post("/api/settings/smtp/test", response_model=dict[str, str])
@@ -244,7 +240,7 @@ def test_smtp(request: Request, payload: SmtpTestRequest) -> dict[str, str]:
     """Send one test message to confirm the configuration works."""
     require_admin(request, _SMTP_ADMIN_ONLY)
     try:
-        return {"status": "sent", "detail": _get_service(request).send_test_email(payload.recipient)}
+        return {"status": "sent", "detail": get_service(request).send_test_email(payload.recipient)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - surfaced to the admin as a message

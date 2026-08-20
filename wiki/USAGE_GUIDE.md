@@ -1335,7 +1335,7 @@ every legacy shape, and every environment variable, see the specification.
 | Topic | Where |
 | --- | --- |
 | Every config key, with defaults | [YAML Specification](../docs/YAML_SPECIFICATION.md) |
-| Aliases and legacy config shapes | [YAML Specification §11](../docs/YAML_SPECIFICATION.md#11-aliases-and-legacy-keys) |
+| Aliases and legacy config shapes | [YAML Specification §12](../docs/YAML_SPECIFICATION.md#12-aliases-and-legacy-keys) |
 | Runtime environment variables | [YAML Specification §10](../docs/YAML_SPECIFICATION.md#10-environment-variables) |
 | Templates and deployments migration | [Migration Guide](../docs/MIGRATION.md) |
 | Scheduler, task, retry, recovery lifecycles | [Runtime Lifecycles](../docs/LIFECYCLES.md) |

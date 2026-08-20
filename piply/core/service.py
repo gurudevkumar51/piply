@@ -19,7 +19,7 @@ import yaml
 
 from piply.engine.base import BaseEngine
 from piply.engine.local_engine import LocalEngine
-from piply.settings import PiplySettings, load_settings
+from piply.settings import PiplySettings, load_settings, read_secret
 
 from .auth import (
     ALL_PIPELINES,
@@ -1846,16 +1846,19 @@ class PipelineService:
 
     # --- Users and permissions ---------------------------------------------
 
-    def bootstrap_admin(self) -> tuple[str, str] | None:
+    def bootstrap_admin(self) -> tuple[str, str | None] | None:
         """Create the initial admin account when none exists.
 
-        Only runs when authentication has been switched on. An existing install
-        that never enabled auth keeps working with no accounts and no login
-        page, which is what backward compatibility requires here.
+        This is how a server install gets its first account without shell
+        access. Only runs when authentication has been switched on: an existing
+        install that never enabled auth keeps working with no accounts and no
+        login page, which is what backward compatibility requires here.
 
         Returns ``(username, password)`` exactly once, on the run that creates
-        it, so the caller can show the generated password. The password is
-        never stored in clear text and cannot be retrieved again.
+        the account. ``password`` is None when the operator supplied one, so
+        the caller knows not to echo a secret it was given into the logs. A
+        generated password is returned so it can be shown once; it is never
+        stored in clear text and cannot be retrieved again.
         """
         if not self.settings.auth_enabled or self.store.count_users() > 0:
             return None
@@ -1865,10 +1868,11 @@ class PipelineService:
             return None
 
         username = normalize_username(os.environ.get("PIPLY_ADMIN_USERNAME") or "admin")
-        password = os.environ.get("PIPLY_ADMIN_PASSWORD") or generate_password()
+        supplied = read_secret(os.environ, "PIPLY_ADMIN_PASSWORD")
+        password = supplied or generate_password()
         self.store.upsert_user(username, password_hash=hash_password(password), role="admin", is_active=True)
         self.store.set_meta("admin_bootstrapped_at", datetime.now(timezone.utc).isoformat())
-        return username, password
+        return username, (None if supplied else password)
 
     def get_user(self, username: str) -> User | None:
         """Return one account, or None."""

@@ -273,12 +273,6 @@ select {
     border-color: rgba(217, 90, 90, 0.16);
 }
 
-.button.violet {
-    background: rgba(106, 94, 156, 0.08);
-    color: var(--violet);
-    border-color: rgba(106, 94, 156, 0.18);
-}
-
 .button:disabled {
     opacity: 0.55;
     cursor: wait;
@@ -338,21 +332,7 @@ select {
     display: grid;
     grid-template-columns: 1.18fr 0.94fr;
     gap: 14px;
-}
-
-.run-focus-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1.16fr) minmax(360px, 0.84fr);
-    gap: 14px;
-    align-items: start;
-}
-
-.run-focus-grid > * {
-    min-height: 0;
-    align-self: start;
-}
-
-.dag-operator-grid {
+}.dag-operator-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
     gap: 14px;
@@ -403,37 +383,7 @@ select {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
     gap: 12px;
-}
-
-.pipeline-view-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-bottom: 12px;
-}
-
-.view-toggle {
-    display: inline-flex;
-    gap: 4px;
-    padding: 3px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--surface);
-}
-
-.view-toggle-button {
-    padding: 5px 10px;
-    font-size: 0.82rem;
-}
-
-.view-toggle-button.active {
-    border-color: var(--accent);
-    background: var(--accent);
-    color: var(--surface);
-}
-
-.pipeline-grid.pipeline-list {
+}.pipeline-grid.pipeline-list {
     grid-template-columns: 1fr;
 }
 
@@ -561,14 +511,7 @@ select {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
-}
-
-.hero-detail-grid {
-    margin-top: 14px;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
-.detail-card {
+}.detail-card {
     padding: 10px;
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.7);
@@ -672,14 +615,7 @@ select {
 
 .retryable:hover {
     transform: translateY(-1px);
-}
-
-.retry-selected {
-    border-color: rgba(57, 117, 255, 0.3);
-    box-shadow: 0 0 0 2px rgba(57, 117, 255, 0.08);
-}
-
-.task-card-focused {
+}.task-card-focused {
     border-color: rgba(57, 117, 255, 0.34);
     box-shadow: 0 0 0 2px rgba(57, 117, 255, 0.08);
 }
@@ -729,13 +665,7 @@ select {
     align-items: center;
     gap: 10px;
     margin-bottom: 8px;
-}
-
-.inspector-shell {
-    min-width: 0;
-}
-
-.dag-operator-grid.inspector-collapsed {
+}.dag-operator-grid.inspector-collapsed {
     grid-template-columns: minmax(0, 1fr);
 }
 
@@ -836,17 +766,7 @@ body.drawer-open {
 
 .dag-toolbar-label {
     margin-right: 4px;
-}
-
-.dag-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 10px;
-}
-
-.dag-stage {
+}.dag-stage {
     min-height: 220px;
     border-radius: var(--radius-md);
     border: 1px dashed var(--border-strong);
@@ -1066,27 +986,7 @@ body.drawer-open {
     text-align: center;
     color: var(--muted);
     background: rgba(255, 255, 255, 0.7);
-}
-
-.retry-panel {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    align-items: center;
-    margin-top: 16px;
-    padding: 18px;
-    border-radius: var(--radius-md);
-    border: 1px solid rgba(217, 90, 90, 0.16);
-    background: rgba(255, 246, 246, 0.9);
-}
-
-.retry-copy {
-    display: grid;
-    gap: 8px;
-    color: #4a5a73;
-}
-
-.command-override-grid {
+}.command-override-grid {
     display: grid;
     gap: 14px;
 }
@@ -1357,14 +1257,7 @@ body.drawer-open {
     margin-top: 10px;
     color: var(--muted);
     font-size: 0.92rem;
-}
-
-.sticky-panel {
-    position: sticky;
-    top: 108px;
-}
-
-.run-graph-panel .dag-shell {
+}.run-graph-panel .dag-shell {
     min-height: 0;
 }
 
@@ -1376,13 +1269,7 @@ body.drawer-open {
 
     .layout-two {
         grid-template-columns: 1fr;
-    }
-
-    .run-focus-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .dag-operator-grid,
+    }    .dag-operator-grid,
     .run-secondary-grid,
     .run-dag-grid {
         grid-template-columns: 1fr;
@@ -1414,11 +1301,6 @@ body.drawer-open {
     .log-line {
         grid-template-columns: 1fr;
         gap: 6px;
-    }
-
-    .retry-panel {
-        flex-direction: column;
-        align-items: flex-start;
     }
 
     .page-header,

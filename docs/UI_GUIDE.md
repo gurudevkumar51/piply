@@ -15,7 +15,7 @@ piply start --config piply.yaml
 | Run detail | `/runs/{id}` | Why did this run behave that way? |
 | Grid | `/execution-matrix` | Which task is flaky over time? |
 | Logs | `/logs` | Where did that message come from? |
-| Diagnostics | `/diagnostics` | Is the runtime itself healthy? |
+| Diagnostics | `/diagnostics` | Is the runtime itself healthy? **Admins only.** |
 | Settings | `/settings` | What configuration is active? |
 
 ---
@@ -154,6 +154,10 @@ workspace, the config directory, or `PIPLY_ARTIFACTS_DIR`.
 ## Diagnostics
 
 Runtime health, refreshed every five seconds.
+
+**Administrators only.** The payload names filesystem paths, the config
+location, the process id, and the metadata store, none of which a delegated
+pipeline operator needs. Non-admins get a 403 rather than a filtered page.
 
 - **Counters** — running runs, running tasks, queued triggers, due triggers,
   failing sensors.

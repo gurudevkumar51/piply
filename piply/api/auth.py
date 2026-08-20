@@ -100,6 +100,11 @@ def _challenge(path: str, *, has_accounts: bool) -> Response:
     return RedirectResponse(url=f"/login?next={quote(path, safe='/')}", status_code=303)
 
 
+def get_service(request: Request):
+    """Return the shared PipelineService attached to the app."""
+    return request.app.state.service
+
+
 def resolve_user(request: Request) -> User | None:
     """Return the authenticated user attached by the middleware."""
     return getattr(request.state, "user", None)
@@ -202,13 +207,16 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
-    # The UI ships its own CSS and JS and loads nothing remote, so a strict
-    # policy costs nothing. 'unsafe-inline' is still required because pages
-    # bootstrap their state from inline <script> blocks.
+    # Everything is same-origin except the Google Fonts stylesheet and its font
+    # files, which base.html loads. 'unsafe-inline' is required because pages
+    # bootstrap their state from inline <script> blocks; values interpolated
+    # into those blocks go through Jinja's `tojson`, which escapes the
+    # characters needed to break out of one.
     "Content-Security-Policy": (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data:; "
         "connect-src 'self'; "
         "frame-ancestors 'none'; "

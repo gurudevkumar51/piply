@@ -1219,6 +1219,7 @@ def load_project(
     raw_pipelines = _normalize_pipeline_definitions(raw_data)
 
     pipelines: dict[str, PipelineDefinition] = {}
+    project_warnings: list[str] = []
     for pipeline_id, raw_pipeline in raw_pipelines.items():
         pipeline_variables = dict(root_variables)
         pipeline_variables.update(
@@ -1281,9 +1282,23 @@ def load_project(
         if raw_pipeline.get("env_file"):
             env_file_paths.append(str(raw_pipeline["env_file"]))
         for env_file_path in env_file_paths:
+            expanded_env_file = _expand_string(str(env_file_path), pipeline_values)
+            # A missing env file loads nothing rather than raising, because it is
+            # legitimately absent in some environments. Record it so `validate`
+            # and `plan` can say so: the silent version of this presents much
+            # later as "my credentials aren't set", which is hard to trace back.
+            resolved_env_file = Path(expanded_env_file)
+            if not resolved_env_file.is_absolute():
+                resolved_env_file = workspace / resolved_env_file
+            if not resolved_env_file.exists():
+                project_warnings.append(
+                    f"Pipeline '{pipeline_id}' env_file '{env_file_path}' was not found at "
+                    f"{resolved_env_file}. Paths resolve against workspace ('{workspace}'), "
+                    "not the config file. No variables were loaded from it."
+                )
             pipeline_env.update(
                 load_secret_values(
-                    {"backend": "file", "path": _expand_string(str(env_file_path), pipeline_values)},
+                    {"backend": "file", "path": expanded_env_file},
                     workspace=workspace,
                     env_values=pipeline_values,
                 )
@@ -1397,4 +1412,5 @@ def load_project(
         default_python=default_python,
         timezone_name=timezone_name,
         pipelines=pipelines,
+        warnings=tuple(project_warnings),
     )

@@ -1044,3 +1044,87 @@ def test_backup_to_an_explicit_file_path(tmp_path: Path) -> None:
 
     assert written == target.resolve()
     assert written.is_file()
+
+
+def test_missing_env_file_warns_instead_of_failing_silently(tmp_path: Path) -> None:
+    """A declared env_file that does not resolve must be visible, not silent.
+
+    `env_file` resolves against `workspace:`, not the config file. When those
+    differ the file loads nothing and the pipeline runs with the variables
+    simply absent, which surfaces much later as "my credentials aren't set".
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    (tmp_path / ".env").write_text("SHARED=from_env_file\n", encoding="utf-8")
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Env File Warning",
+                "workspace: workspace",
+                "pipelines:",
+                "  demo:",
+                "    env_file: .env",
+                "    tasks:",
+                "      main: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    assert len(project.warnings) == 1
+    warning = project.warnings[0]
+    assert "env_file '.env' was not found" in warning
+    # The message has to name the path it actually looked at, or it does not help.
+    assert str(tmp_path / "workspace") in warning
+    # Loading still succeeds: an absent env file is legitimate in some environments.
+    assert "demo" in project.pipelines
+
+    # Once the file is where the workspace expects it, the warning clears and
+    # the values load.
+    (tmp_path / "workspace" / ".env").write_text("SHARED=from_env_file\n", encoding="utf-8")
+    project = load_project(config_path)
+    assert project.warnings == ()
+    assert project.pipelines["demo"].tasks["main"].env["SHARED"] == "from_env_file"
+
+
+def test_env_file_overrides_inline_pipeline_env(tmp_path: Path) -> None:
+    """Documented precedence: env_file wins over inline `env:` at pipeline level.
+
+    This surprises people, so it is pinned here: if it ever changes, it is a
+    behaviour change that needs a note, not a silent fix.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    (tmp_path / "workspace" / ".env").write_text("SHARED=from_env_file\n", encoding="utf-8")
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Env Precedence",
+                "workspace: workspace",
+                "defaults:",
+                "  env:",
+                "    SHARED: from_defaults",
+                "pipelines:",
+                "  demo:",
+                "    env_file: .env",
+                "    env:",
+                "      SHARED: from_pipeline_env",
+                "    tasks:",
+                "      plain: {type: cli, command: echo hi}",
+                "      overridden:",
+                "        type: cli",
+                "        command: echo hi",
+                "        env:",
+                "          SHARED: from_task_env",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    tasks = load_project(config_path).pipelines["demo"].tasks
+    assert tasks["plain"].env["SHARED"] == "from_env_file"
+    # Task-level env is the last word, which is how you win against an env file.
+    assert tasks["overridden"].env["SHARED"] == "from_task_env"

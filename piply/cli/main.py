@@ -10,17 +10,18 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
 from pathlib import Path
 
 import typer
 import uvicorn
 
 from piply.core.auth import AuthError, generate_password
+from piply.core.dialects import is_postgres_dsn
 from piply.core.loader import ConfigError, discover_config, load_project
 from piply.core.service import PipelineService
+from piply.core.store import RunStore
 from piply.settings import load_settings
+from piply.version import get_version
 
 app = typer.Typer(help="Piply: lightweight orchestration for task-based Python workflows.")
 tasks_app = typer.Typer(help="Inspect pipeline tasks.")
@@ -109,11 +110,7 @@ def _show_version(value: bool) -> None:
     """Print the installed Piply version for the top-level CLI option."""
     if not value:
         return
-    try:
-        current_version = package_version("mr-piply")
-    except PackageNotFoundError:
-        current_version = "0.1.6"
-    typer.echo(current_version)
+    typer.echo(get_version())
     raise typer.Exit()
 
 
@@ -555,6 +552,12 @@ def validate(
             f"  - {pipeline.pipeline_id}: {pipeline.task_count} tasks | triggers {list(pipeline.triggers_on_success) or ['none']}"
         )
 
+    if project.warnings:
+        typer.echo("")
+        typer.echo(f"{len(project.warnings)} warning(s):")
+        for warning in project.warnings:
+            typer.echo(f"  ! {warning}")
+
 
 @app.command("list")
 def list_pipelines(
@@ -833,6 +836,11 @@ def plan(
         for warning in preview.warnings:
             typer.echo(f"  warning: {warning}")
 
+    # Project-level problems apply to every pipeline, so they are printed once
+    # after the per-pipeline output rather than repeated inside each block.
+    for warning in service.project.warnings:
+        typer.echo(f"warning: {warning}")
+
 
 @app.command()
 def prune(
@@ -1015,6 +1023,74 @@ def restore(
         connection.close()
 
     typer.echo(f"Restored {source_path} -> {target}")
+
+
+@app.command("migrate-db")
+def migrate_db(
+    to: str = typer.Option(..., "--to", help="Target database, for example postgresql://user:pass@host:5432/piply"),
+    source: str | None = typer.Option(None, "--from", help="Source database. Defaults to the configured one."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Copy the runtime database to another backend, usually SQLite to PostgreSQL.
+
+    Run history, logs, artifacts, accounts, and schedules all move across with
+    their original ids, so retry chains and downstream links stay intact. The
+    target must be empty.
+
+    Stop the server first. Migrating while runs are executing would copy a
+    moving target and leave the new database inconsistent.
+    """
+    settings = load_settings(_resolve_config(config))
+    if source is not None:
+        origin: str | Path = source if is_postgres_dsn(source) else Path(source).resolve()
+    elif settings.database_dsn is not None:
+        origin = settings.database_dsn
+    else:
+        origin = settings.database_path or (_resolve_config(config).parent / ".piply" / "piply.db")
+
+    if isinstance(origin, Path) and not origin.is_file():
+        typer.echo(f"Source database not found: {origin}")
+        raise typer.Exit(code=1)
+
+    try:
+        source_store = RunStore(origin)
+        target_store = RunStore(to if is_postgres_dsn(to) else Path(to).resolve())
+    except (ImportError, RuntimeError, ValueError) as exc:
+        typer.echo(f"Could not open the databases: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    counts = source_store.row_counts()
+    total = sum(counts.values())
+    typer.echo(f"Source: {source_store.location} ({source_store.dialect.name}, {total} rows)")
+    typer.echo(f"Target: {target_store.location} ({target_store.dialect.name})")
+
+    if total == 0:
+        typer.echo("The source database is empty. Nothing to migrate.")
+        return
+    if not yes:
+        typer.echo("Stop the Piply server before migrating.")
+        if not typer.confirm("Copy this data to the target database?"):
+            typer.echo("Aborted. Nothing was changed.")
+            raise typer.Exit(code=1)
+
+    try:
+        copied = source_store.copy_into(target_store)
+    except ValueError as exc:
+        typer.echo(f"Migration refused: {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator verbatim
+        typer.echo(f"Migration failed: {exc}")
+        typer.echo("The target database may be partially written. Empty it before retrying.")
+        raise typer.Exit(code=1) from exc
+
+    for table, written in copied.items():
+        if written:
+            typer.echo(f"  {table:<20} {written}")
+    typer.echo(f"Copied {sum(copied.values())} rows.")
+    typer.echo("")
+    typer.echo("Point Piply at the new database and restart:")
+    typer.echo(f'  PIPLY_DATABASE="{to}"')
 
 
 @app.command()

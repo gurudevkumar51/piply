@@ -268,6 +268,7 @@ piply prune --dry-run
 piply prune --run-days 14 --max-runs 100
 piply backup /backups                                      # safe while running
 piply restore /backups/piply-20260804T074211Z.db           # stop the server first
+piply migrate-db --to postgresql://piply@db:5432/piply     # SQLite -> PostgreSQL
 
 # Serving
 piply users create admin --role admin                       # switches auth on
@@ -282,17 +283,21 @@ piply stop --config piply-demo/piply.yaml
 
 **Using Piply**
 
+- [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
 - [YAML Specification](docs/YAML_SPECIFICATION.md): every config key, with defaults
 - [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
 - [UI Guide](docs/UI_GUIDE.md): every page and what it answers
 - [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
+- [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
 - [Usage Guide](wiki/USAGE_GUIDE.md): longer-form walkthrough
 
 **Understanding Piply**
 
+- [Security](docs/SECURITY.md): trust model, what is protected, deployment checklist
 - [Runtime Lifecycles](docs/LIFECYCLES.md): scheduler, pipeline, task, retry, recovery, retention
 - [Technical Architecture](docs/architecture/technical_architecture.md): maintainer guide to the whole system
+- [Roadmap](docs/ROADMAP.md): what is planned for the next releases
 - [Future Features](docs/FUTURE_FEATURES.md): proposed ideas, ranked by value vs cost
 - [Wiki Overview](wiki/README.md): architecture and feature summary
 - [UI And API Guide](wiki/UI_API_GUIDE.md): screens, actions, and API examples
@@ -313,8 +318,16 @@ The schema is created and migrated automatically, and no pipeline configuration
 changes. `piply backup` / `piply restore` remain SQLite-only; use `pg_dump` and
 `pg_restore` for PostgreSQL. Run one Piply instance per database either way.
 
-Full details, including the Docker volume setup for the SQLite default, are in
-[YAML Specification §11](docs/YAML_SPECIFICATION.md#11-runtime-storage-and-external-databases).
+Already running on SQLite and want to keep the history? Stop the server and copy
+it across:
+
+```bash
+piply migrate-db --to "postgresql://piply:secret@db.internal:5432/piply"
+```
+
+Run ids are preserved, so retry chains, downstream lineage, and accounts all
+survive. Full details, the Docker volume setup for the SQLite default, and a
+column-by-column schema reference are in [Metadata Store](docs/DATABASE.md).
 
 ## Monitoring
 

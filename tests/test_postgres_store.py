@@ -441,6 +441,82 @@ def test_run_history_filters_and_sorting_on_postgres(tmp_path: Path, dsn: str) -
         assert [step["pipeline_id"] for step in chain] == ["upstream"]
 
 
+def test_migrating_sqlite_to_postgres_preserves_history(tmp_path: Path, dsn: str) -> None:
+    """`piply migrate-db` moves a SQLite runtime onto PostgreSQL intact."""
+    config = "\n".join(
+        [
+            'version: "1"',
+            "title: Migration Test",
+            "workspace: workspace",
+            "pipelines:",
+            "  upstream:",
+            "    triggers_on_success: [downstream]",
+            "    tasks:",
+            "      emit: {type: cli, command: echo emitted}",
+            "  downstream:",
+            "    tasks:",
+            "      consume: {type: cli, command: echo consumed}",
+        ]
+    )
+    config_path = _project(tmp_path, config)
+    sqlite_path = tmp_path / "piply.db"
+
+    source_service = PipelineService(config_path=config_path, database_path=sqlite_path)
+    source_service.create_user("root", "root-password", role="admin")
+    source_service.create_user("alice", "alice-password", permissions={"upstream": "view,run"})
+    parent = source_service.trigger_pipeline("upstream", wait=True)
+    for _ in range(60):
+        if source_service.list_runs(pipeline_id="downstream"):
+            break
+        time.sleep(0.2)
+    source_service.store.set_meta("smtp_host", "smtp.example.com")
+    before = source_service.store.row_counts()
+
+    copied = RunStore(sqlite_path).copy_into(RunStore(dsn))
+    assert copied == before
+
+    migrated = PipelineService(config_path=config_path, database_path=dsn)
+    assert migrated.store.row_counts() == before
+
+    # Ids are preserved, so retry chains and downstream links still resolve.
+    child = next(item for item in migrated.list_runs(limit=50) if item.pipeline_id == "downstream")
+    assert child.parent_run_id == parent.run_id
+    assert [step["pipeline_id"] for step in migrated.lineage_for_runs([child])[child.run_id]] == ["upstream"]
+
+    # Accounts survive with their grants, and the stored hash still verifies.
+    assert [user.username for user in migrated.list_users()] == ["alice", "root"]
+    assert migrated.get_user("alice").permissions == {"upstream": frozenset({"view", "run"})}
+    assert migrated.authenticate("alice", "alice-password") is not None
+    assert migrated.store.get_meta("smtp_host") == "smtp.example.com"
+    assert migrated.store.list_logs(parent.run_id, limit=100)
+
+    # The identity sequences must be advanced past the copied ids, or the first
+    # new insert collides on the primary key.
+    fresh = migrated.trigger_pipeline("upstream", wait=True)
+    assert fresh.status == "success"
+    assert migrated.store.list_logs(fresh.run_id, limit=100)
+
+
+def test_migration_refuses_a_non_empty_target(tmp_path: Path, dsn: str) -> None:
+    """Merging two histories has no safe answer, so it is refused rather than guessed."""
+    config_path = _project(tmp_path, SIMPLE)
+    sqlite_path = tmp_path / "piply.db"
+    source = PipelineService(config_path=config_path, database_path=sqlite_path)
+    source.trigger_pipeline("flow", wait=True)
+
+    target = PipelineService(config_path=config_path, database_path=dsn)
+    target.trigger_pipeline("flow", wait=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        RunStore(sqlite_path).copy_into(RunStore(dsn))
+    assert "already contains data" in str(excinfo.value)
+
+    # An empty source is a no-op rather than an error.
+    empty = tmp_path / "empty.db"
+    RunStore(empty)
+    assert sum(RunStore(empty).row_counts().values()) == 0
+
+
 def test_backup_command_refuses_a_server_store(tmp_path: Path, dsn: str) -> None:
     """`piply backup` explains that a server store needs its own tooling."""
     store = RunStore(dsn)

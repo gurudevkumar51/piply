@@ -4,15 +4,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from piply.api.auth import require_admin, require_permission, visible_pipelines
+from piply.api.auth import get_service, require_admin, require_permission, visible_pipelines
 from piply.api.schemas import PipelineDetailResponse, PipelineResponse, RunResponse, TaskResponse, TriggerRunRequest
 
 router = APIRouter(prefix="/api/pipelines", tags=["pipelines"])
-
-
-def _get_service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
 
 
 def _guard_command_overrides(request: Request, payload: TriggerRunRequest | None) -> None:
@@ -30,7 +25,7 @@ def _guard_command_overrides(request: Request, payload: TriggerRunRequest | None
 def list_pipelines(request: Request) -> list[PipelineResponse]:
     """List the pipelines the caller may see."""
     require_permission(request, "view")
-    service = _get_service(request)
+    service = get_service(request)
     return [PipelineResponse.from_summary(item) for item in visible_pipelines(request, service.list_pipelines())]
 
 
@@ -38,7 +33,7 @@ def list_pipelines(request: Request) -> list[PipelineResponse]:
 def get_pipeline(request: Request, pipeline_id: str) -> PipelineDetailResponse:
     """Return one pipeline with tasks and recent runs."""
     require_permission(request, "view", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         payload = service.get_pipeline_detail(pipeline_id)
     except KeyError as exc:
@@ -55,7 +50,7 @@ def trigger_pipeline(
     """Trigger one manual pipeline run."""
     require_permission(request, "run", pipeline_id)
     _guard_command_overrides(request, payload)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         initial_context = {}
         if payload is not None and payload.params:
@@ -79,7 +74,7 @@ def trigger_pipeline(
 def get_pipeline_task(request: Request, pipeline_id: str, task_id: str) -> TaskResponse:
     """Return one task definition from a pipeline."""
     require_permission(request, "view", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         pipeline = service.get_pipeline(pipeline_id)
         task = pipeline.tasks[task_id]
@@ -98,7 +93,7 @@ def trigger_pipeline_task(
     """Trigger one task and its upstream dependencies as a focused manual run."""
     require_permission(request, "run", pipeline_id)
     _guard_command_overrides(request, payload)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         initial_context = {}
         if payload is not None and payload.params:
@@ -130,7 +125,7 @@ def chain_pipeline(
     require_permission(request, "run", pipeline_id)
     require_permission(request, "run", target_pipeline_id)
     _guard_command_overrides(request, payload)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         service.get_pipeline(pipeline_id)
         initial_context = {"params": payload.params} if payload is not None and payload.params else {}
@@ -154,7 +149,7 @@ def chain_pipeline(
 def pause_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
     """Pause one pipeline schedule."""
     require_permission(request, "edit", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         summary = service.set_pipeline_paused(pipeline_id, True)
     except KeyError as exc:
@@ -166,7 +161,7 @@ def pause_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
 def resume_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
     """Resume one pipeline schedule."""
     require_permission(request, "edit", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         summary = service.set_pipeline_paused(pipeline_id, False)
     except KeyError as exc:
@@ -178,7 +173,7 @@ def resume_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
 def delete_pipeline(request: Request, pipeline_id: str) -> dict[str, str]:
     """Delete one pipeline definition and its stored history."""
     require_permission(request, "edit", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     try:
         service.delete_pipeline(pipeline_id)
     except KeyError as exc:

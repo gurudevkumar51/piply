@@ -681,12 +681,39 @@ the config.
 
 Setting a username/password pair or an API token enables auth implicitly.
 
+`PIPLY_AUTH_PASSWORD`, `PIPLY_API_TOKEN`, and `PIPLY_ADMIN_PASSWORD` each also
+accept a `_FILE` variant that reads the value from a mounted file, which is the
+better choice on a server. The file wins when both are set.
+
+### Task environment precedence
+
+The environment a task receives is layered. **Later wins:**
+
+1. `defaults.env` — project-wide
+2. pipeline `env:`
+3. pipeline `env_file:` / `env_files:`
+4. task `env:`
+5. the process environment, for any name not set above
+
+Two consequences worth knowing:
+
+- **`env_file` overrides inline pipeline `env:`.** To make an inline value win,
+  set it on the *task* rather than the pipeline.
+- **`env_file` paths resolve against `workspace:`, not the config file.** A file
+  that does not resolve loads nothing rather than raising, because an absent env
+  file is legitimate in some environments. `piply validate` and `piply plan`
+  warn and name the path they looked at.
+
 ---
 
 ## 11. Runtime Storage And External Databases
 
 Two different things get called "the database". They are unrelated: the store
 Piply keeps its *own* state in, and the databases *your* pipelines read from.
+
+> This section covers the configuration keys. For the full picture — choosing a
+> backend, migrating an existing install, the Docker volume setup, and a
+> column-by-column schema reference — see [Metadata Store](DATABASE.md).
 
 ### Piply's own runtime store
 

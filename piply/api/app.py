@@ -16,6 +16,7 @@ from piply.api.auth import AuthMiddleware, SecurityHeadersMiddleware
 from piply.core.scheduler import PipelineScheduler
 from piply.core.service import PipelineService
 from piply.settings import PiplySettings, load_settings
+from piply.version import get_version
 
 from .routes import accounts, dashboard, execution, maintenance, observability, pipelines, runs, ui
 
@@ -57,16 +58,21 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.scheduler = scheduler
         app.state.settings = settings
         app.state.templates = Jinja2Templates(directory=str(_ui_directory() / "templates"))
-        # Create the first admin when the install has no accounts yet. The
-        # generated password is printed once and never recoverable afterwards.
+        # Create the first admin when the install has no accounts yet. This is
+        # how a server deployment gets its first login without shell access.
         bootstrap = service.bootstrap_admin()
         if bootstrap is not None:
             name, secret = bootstrap
             print("=" * 68, flush=True)
             print("Piply created an initial administrator account:", flush=True)
             print(f"    username: {name}", flush=True)
-            print(f"    password: {secret}", flush=True)
-            print("Store it now. It cannot be shown again.", flush=True)
+            if secret is None:
+                # The operator supplied the password, so echoing it here would
+                # only copy a known secret into the container's log stream.
+                print("    password: (as configured)", flush=True)
+            else:
+                print(f"    password: {secret}", flush=True)
+                print("Store it now. It cannot be shown again.", flush=True)
             print("=" * 68, flush=True)
 
         scheduler.start()
@@ -93,7 +99,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app = FastAPI(
         title="Piply",
         description="Lightweight script orchestration with a modular runtime and professional UI.",
-        version="0.2.0",
+        version=get_version(),
         lifespan=lifespan,
     )
 

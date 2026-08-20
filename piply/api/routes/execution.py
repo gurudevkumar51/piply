@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query, Request
 
-from piply.api.auth import require_permission, visible_pipeline_ids
+from piply.api.auth import get_service, require_permission, visible_pipeline_ids
 from piply.api.schemas import (
     ExecutionMatrixResponse,
     LogResponse,
@@ -20,16 +20,11 @@ from piply.api.schemas import (
 router = APIRouter(tags=["execution"])
 
 
-def _get_service(request: Request):
-    """Resolve the shared PipelineService from the app state."""
-    return request.app.state.service
-
-
 @router.get("/api/metrics", response_model=dict[str, object])
 def get_runtime_metrics(request: Request) -> dict[str, object]:
     """Return queue and local worker metrics."""
     require_permission(request, "view")
-    return _get_service(request).runtime_metrics()
+    return get_service(request).runtime_metrics()
 
 
 @router.get("/api/execution-matrix", response_model=ExecutionMatrixResponse)
@@ -44,7 +39,7 @@ def get_execution_matrix(
 ) -> ExecutionMatrixResponse:
     """Return task-by-run matrix data for the grid UI."""
     require_permission(request, "view", pipeline_id)
-    service = _get_service(request)
+    service = get_service(request)
     allowed = visible_pipeline_ids(request)
     if pipeline_id is None and allowed is not None:
         # Without an explicit choice the service picks the first pipeline, which
@@ -92,7 +87,7 @@ def search_logs(
 ) -> list[LogResponse]:
     """Search recent logs across runs, restricted to pipelines the caller may see."""
     require_permission(request, "view", pipeline_id)
-    logs = _get_service(request).search_logs(
+    logs = get_service(request).search_logs(
         query=q,
         pipeline_id=pipeline_id,
         pipeline_ids=visible_pipeline_ids(request),
