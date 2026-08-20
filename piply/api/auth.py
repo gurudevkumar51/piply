@@ -17,8 +17,7 @@ import secrets
 from urllib.parse import quote
 
 from fastapi import HTTPException, Request
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from piply.core.auth import ALL_PIPELINES, User, constant_time_equals, read_session
 from piply.settings import PiplySettings
@@ -230,64 +229,70 @@ SECURITY_HEADERS = {
 }
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Attach hardening headers to every response."""
+async def security_headers_middleware(request: Request, call_next):
+    """Attach hardening headers to every response.
 
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        for header, value in SECURITY_HEADERS.items():
-            response.headers.setdefault(header, value)
-        return response
+    Registered through FastAPI's own ``@app.middleware("http")`` rather than
+    Starlette's ``BaseHTTPMiddleware``, so Piply imports only from the package
+    it actually declares as a dependency.
+    """
+    response = await call_next(request)
+    for header, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    return response
 
 
-class AuthMiddleware(BaseHTTPMiddleware):
+async def auth_middleware(request: Request, call_next):
     """Resolve the caller's identity and reject anonymous requests."""
+    path = request.url.path
+    service = getattr(request.app.state, "service", None)
+    settings: PiplySettings = request.app.state.settings
 
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        service = getattr(request.app.state, "service", None)
-        settings: PiplySettings = request.app.state.settings
-
-        if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES) or path in PUBLIC_PATHS:
-            request.state.user = self._identify(request, service, settings)
-            return await call_next(request)
-
-        auth_required = bool(settings.auth_enabled)
-        if service is not None:
-            auth_required = service.auth_required
-
-        user = self._identify(request, service, settings)
-        request.state.user = user
-
-        if not auth_required:
-            return await call_next(request)
-        if user is None:
-            has_accounts = service is not None and service.store.count_users() > 0
-            return _challenge(path, has_accounts=has_accounts)
+    if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES) or path in PUBLIC_PATHS:
+        request.state.user = identify_caller(request, service, settings)
         return await call_next(request)
 
-    def _identify(self, request: Request, service, settings: PiplySettings) -> User | None:
-        """Return the user behind this request, or None."""
-        if service is not None:
-            token = request.cookies.get(SESSION_COOKIE)
-            username = read_session(service.store, token)
-            if username:
-                user = service.get_user(username)
-                if user is not None and user.is_active:
-                    return user
-                # A session issued for the env-var admin has no stored account.
-                if settings.auth_username and username == settings.auth_username:
-                    return _LEGACY_USER
+    auth_required = bool(settings.auth_enabled)
+    if service is not None:
+        auth_required = service.auth_required
 
-        authorization = request.headers.get("Authorization", "")
-        if authorization.startswith("Basic ") and service is not None:
-            credentials = _decode_basic_credentials(authorization)
-            if credentials is not None:
-                user = service.authenticate(*credentials)
-                if user is not None:
-                    return user
-        if _valid_legacy_basic(authorization, settings):
-            return _LEGACY_USER
-        if _valid_bearer_token(authorization, settings):
-            return _TOKEN_USER
-        return None
+    user = identify_caller(request, service, settings)
+    request.state.user = user
+
+    if not auth_required:
+        return await call_next(request)
+    if user is None:
+        has_accounts = service is not None and service.store.count_users() > 0
+        return _challenge(path, has_accounts=has_accounts)
+    return await call_next(request)
+
+
+def identify_caller(request: Request, service, settings: PiplySettings) -> User | None:
+    """Return the user behind this request, or None.
+
+    Tried in order: session cookie, HTTP Basic against a stored account, the
+    legacy env-var pair, then the API bearer token.
+    """
+    if service is not None:
+        token = request.cookies.get(SESSION_COOKIE)
+        username = read_session(service.store, token)
+        if username:
+            user = service.get_user(username)
+            if user is not None and user.is_active:
+                return user
+            # A session issued for the env-var admin has no stored account.
+            if settings.auth_username and username == settings.auth_username:
+                return _LEGACY_USER
+
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Basic ") and service is not None:
+        credentials = _decode_basic_credentials(authorization)
+        if credentials is not None:
+            user = service.authenticate(*credentials)
+            if user is not None:
+                return user
+    if _valid_legacy_basic(authorization, settings):
+        return _LEGACY_USER
+    if _valid_bearer_token(authorization, settings):
+        return _TOKEN_USER
+    return None
