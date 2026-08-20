@@ -158,6 +158,47 @@ Task 'extract' still contains unresolved placeholder(s): {practice}
 Usually it means the variable is defined on a *deployment* but you are running
 the *template's* pipeline directly, or the name is misspelled.
 
+If the pipeline genuinely takes its values at run time — the common case for a
+downstream pipeline started by hand — supply them instead of hard-coding:
+
+```bash
+piply run Bronze_to_Silver --var practice=BENNETT --var batch_id=B-42
+```
+
+In the UI, *Run* asks for them automatically. See
+[the next question](#how-do-i-run-a-downstream-pipeline-manually).
+
+### How do I run a downstream pipeline manually?
+
+A pipeline that normally receives `{practice}` from the deployment that triggers
+it has nothing to fill it in when you start it by hand.
+
+**In the UI:** press *Run*. A dialog lists the missing values, says which
+pipeline normally supplies them, and starts the run once you fill them in.
+Cancel creates no run.
+
+**On the CLI:** supply them with `--var`, or add `--prompt` to be asked:
+
+```bash
+piply run Bronze_to_Silver --var practice=BENNETT --var batch_id=B-42
+piply run Bronze_to_Silver --prompt
+```
+
+**Over the API:** ask what is needed, then send it:
+
+```bash
+curl /api/pipelines/Bronze_to_Silver/runtime-inputs
+curl -X POST /api/pipelines/Bronze_to_Silver/run      -d '{"variables": {"practice": "BENNETT", "batch_id": "B-42"}}'
+```
+
+The values are applied exactly the way an upstream pipeline's variables are, and
+they are stored with the run — so a **retry or backfill reuses them** rather
+than asking again.
+
+Without `--var` or `--prompt`, the CLI reports what is missing and runs anyway,
+which is what it did before this existed. Prompting is opt-in so a scheduled job
+can never hang waiting for input.
+
 ### What is the env precedence order?
 
 Later wins:
@@ -980,7 +1021,7 @@ What the message means and what to do about it.
 | Do relative paths resolve against the config file? | No — against `workspace:` |
 | Does `env_file` override inline `env:`? | Yes |
 | Does a missing `env_file` raise? | No — it loads nothing, but `validate` warns |
-| Does an unknown `{placeholder}` become empty? | No, it stays literal |
+| Does an unknown `{placeholder}` become empty? | No, it stays literal — the UI asks for a value first |
 | Do deployment variables reach downstream pipelines? | Yes, at any depth |
 | Can I retry a downstream run without the upstream? | Yes, `piply backfill <run_id>` |
 | Does `priority` override `depends_on`? | No |

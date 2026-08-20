@@ -120,24 +120,39 @@ user off-site. Only same-site absolute paths are accepted now.
 outermost middleware, so they are present on 401 and login-redirect responses
 too.
 
-The policy is same-origin apart from Google Fonts, which `base.html` loads:
+The policy is same-origin apart from three CDN origins the bundled UI loads:
 
 ```
-default-src 'self'; script-src 'self' 'unsafe-inline';
+default-src 'self';
+script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
 font-src 'self' https://fonts.gstatic.com; img-src 'self' data:;
 connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
 ```
+
+| Origin | Loaded for |
+| --- | --- |
+| `fonts.googleapis.com` | the web-font stylesheet in `base.html` |
+| `fonts.gstatic.com` | the font files themselves |
+| `cdn.jsdelivr.net` | `dagre` and `graphlib`, the DAG layout libraries |
+
+A test scans every template and script for `https://` references and asserts
+the policy permits each one, because the failure mode here is silent: a blocked
+CDN means the graph or the typography stops rendering with nothing in the
+server log.
 
 `'unsafe-inline'` is required for scripts and styles because pages bootstrap
 their state from inline `<script>` blocks. Values interpolated into those
 blocks go through Jinja's `tojson`, which escapes `<`, `>`, `&`, and `'`, so a
 `</script>` cannot be injected through data.
 
-> **Air-gapped or privacy-sensitive installs.** The two `fonts.g*.com` entries
-> are the only remote origins Piply's UI touches. Removing the font `<link>`
-> from `base.html` and tightening the policy to `'self'` costs only the web
-> fonts — the layout falls back to system fonts and stays usable.
+> **Air-gapped or privacy-sensitive installs.** Those three are the only remote
+> origins Piply's UI touches, and no data is sent to them — they serve static
+> assets. To remove them entirely, vendor the two jsDelivr scripts into
+> `piply/ui/static/`, drop the font `<link>` from `base.html`, and tighten the
+> policy to `'self'`. The cost is web fonts, which fall back to system fonts.
+> The DAG will not render without the layout libraries, so those must be
+> vendored rather than simply removed.
 
 ---
 

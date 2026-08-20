@@ -43,6 +43,16 @@ PLAN_PARAM_OPTION = typer.Option(
     "--param",
     help="Preview parameter as KEY=VALUE. Repeat for multiple params; JSON values are accepted.",
 )
+RUN_VAR_OPTION = typer.Option(
+    None,
+    "--var",
+    help="Value for a {placeholder} the config leaves to run time, as NAME=VALUE. Repeat for more.",
+)
+RUN_PROMPT_OPTION = typer.Option(
+    False,
+    "--prompt",
+    help="Ask for any {placeholder} values still missing instead of running without them.",
+)
 BACKFILL_START_OPTION = typer.Option(None, "--from", help="Start of the schedule window to backfill.")
 BACKFILL_END_OPTION = typer.Option(None, "--to", help="End of the schedule window to backfill.")
 USER_GRANT_OPTION = typer.Option(
@@ -191,6 +201,68 @@ def _format_log_line(line: dict[str, object], use_color: bool) -> str:
         f"{_ANSI['pipeline']}[{pipeline_label}]{_ANSI['reset']} "
         f"{color}[{task_label}]{_ANSI['reset']} {message}"
     )
+
+
+def _parse_vars(var_items: list[str] | None) -> dict[str, str]:
+    """Parse repeated NAME=VALUE runtime variables from the command line."""
+    parsed: dict[str, str] = {}
+    for item in var_items or []:
+        if "=" not in item:
+            raise typer.BadParameter("--var must use NAME=VALUE.")
+        name, value = item.split("=", 1)
+        parsed[name.strip()] = value
+    return parsed
+
+
+def _resolve_runtime_inputs(
+    service: PipelineService,
+    pipeline_id: str,
+    supplied: dict[str, str],
+    *,
+    task_id: str | None = None,
+    prompt: bool = False,
+) -> dict[str, str]:
+    """Collect any runtime values this run still needs.
+
+    Prompting is opt-in rather than inferred from the terminal. `isatty()` is
+    not trustworthy for this: on Windows it reports true for NUL, so a job
+    redirecting stdin from /dev/null would be asked a question nobody can
+    answer. Being explicit also means CI can never hang waiting for input.
+
+    Without `--prompt`, missing values are reported and the run proceeds, which
+    is what it did before this existed.
+    """
+    details = service.runtime_inputs(pipeline_id, provided=supplied, task_id=task_id)
+    if details["ready"]:
+        return supplied
+
+    missing = [str(item["name"]) for item in details["required"]]  # type: ignore[index]
+    upstreams = [str(item) for item in (details.get("triggered_by") or [])]  # type: ignore[union-attr]
+
+    typer.echo("Missing runtime values:")
+    if upstreams:
+        typer.echo(f"  normally supplied by {', '.join(upstreams)} when it triggers this pipeline")
+
+    if not prompt:
+        for name in missing:
+            typer.echo(f"  {{{name}}}")
+        typer.echo("Supply them with --var NAME=VALUE, or add --prompt to be asked.")
+        typer.echo("Continuing; these placeholders will appear literally in the command.")
+        return supplied
+
+    collected = dict(supplied)
+    for name in missing:
+        try:
+            value = typer.prompt(f"  {name}").strip()
+        except (EOFError, typer.Abort) as exc:
+            typer.echo("")
+            typer.echo("Aborted. No run was created.")
+            raise typer.Exit(code=1) from exc
+        if not value:
+            typer.echo(f"No value given for '{name}'. Aborted; no run was created.")
+            raise typer.Exit(code=1)
+        collected[name] = value
+    return collected
 
 
 def _parse_params(param_items: list[str] | None) -> dict[str, object]:
@@ -592,6 +664,8 @@ def run(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
     tenant: str | None = typer.Option(None, "--tenant", help="Tenant id to attach to this run."),
     param: list[str] | None = RUN_PARAM_OPTION,
+    var: list[str] | None = RUN_VAR_OPTION,
+    prompt: bool = RUN_PROMPT_OPTION,
     wait: bool = typer.Option(
         True,
         "--wait/--detach",
@@ -602,6 +676,7 @@ def run(
     try:
         params = _parse_params(param)
         initial_context = {"params": params} if params else {}
+        variables = _resolve_runtime_inputs(service, pipeline_id, _parse_vars(var), prompt=prompt)
         run_record = service.trigger_pipeline(
             pipeline_id,
             trigger="manual",
@@ -609,6 +684,7 @@ def run(
             on_log=typer.echo if wait else None,
             tenant_id=tenant,
             initial_context=initial_context,
+            inherited_variables=variables or None,
         )
     except KeyError as exc:
         typer.echo(str(exc))

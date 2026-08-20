@@ -207,14 +207,18 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
-    # Everything is same-origin except the Google Fonts stylesheet and its font
-    # files, which base.html loads. 'unsafe-inline' is required because pages
-    # bootstrap their state from inline <script> blocks; values interpolated
-    # into those blocks go through Jinja's `tojson`, which escapes the
-    # characters needed to break out of one.
+    # Everything is same-origin except three CDN origins the bundled UI loads:
+    # Google Fonts (stylesheet plus font files) and jsDelivr, which serves the
+    # dagre/graphlib layout libraries the DAG view needs. `UI_REMOTE_ORIGINS`
+    # below is the single list; a test keeps it in step with the markup, because
+    # a policy that blocks the app's own assets is worse than no policy.
+    #
+    # 'unsafe-inline' is required because pages bootstrap their state from
+    # inline <script> blocks; values interpolated into those blocks go through
+    # Jinja's `tojson`, which escapes the characters needed to break out of one.
     "Content-Security-Policy": (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data:; "

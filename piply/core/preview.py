@@ -17,6 +17,85 @@ from .models import PipelineDefinition, TaskDefinition
 
 _PLACEHOLDER_PATTERN = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
 
+#: Task fields that can carry a `{name}` placeholder and are worth prompting for.
+#:
+#: `run_if` is excluded on purpose: its placeholders are resolved at execution
+#: time against entity values, and are quoted as literals when they are, so
+#: asking a user to fill them in would be wrong.
+_PLACEHOLDER_FIELDS = (
+    "command",
+    "path",
+    "cwd",
+    "url",
+    "body",
+    "token",
+    "host",
+    "user",
+    "key_file",
+    "email_subject",
+    "email_body",
+    "smtp_host",
+    "smtp_user",
+    "call",
+    "python",
+    "shell",
+)
+
+#: Fields holding a collection whose members can carry placeholders.
+_PLACEHOLDER_COLLECTION_FIELDS = ("args", "artifact_paths", "email_to")
+_PLACEHOLDER_MAPPING_FIELDS = ("env", "kwargs", "headers")
+
+
+def _placeholders_in(value: object) -> set[str]:
+    """Return the `{name}` placeholders inside one value, however nested."""
+    if value is None or isinstance(value, bool | int | float):
+        return set()
+    if isinstance(value, str):
+        return set(_PLACEHOLDER_PATTERN.findall(value))
+    if isinstance(value, dict):
+        found: set[str] = set()
+        for key, item in value.items():
+            found |= _placeholders_in(key) | _placeholders_in(item)
+        return found
+    if isinstance(value, list | tuple | set):
+        found = set()
+        for item in value:
+            found |= _placeholders_in(item)
+        return found
+    # Path and anything else stringifiable.
+    return set(_PLACEHOLDER_PATTERN.findall(str(value)))
+
+
+def unresolved_placeholders(pipeline: PipelineDefinition) -> dict[str, tuple[str, ...]]:
+    """Return each unresolved placeholder and the tasks that still reference it.
+
+    A placeholder that a variable already satisfied has been substituted by the
+    time this runs, so anything still spelled `{name}` genuinely has no value.
+    Entity values are per-task, so they are checked per task rather than
+    globally.
+
+    This is what lets a manual run of a normally-downstream pipeline ask for the
+    values its upstream would have supplied, instead of executing a command with
+    a literal `{practice}` in it.
+    """
+    found: dict[str, list[str]] = {}
+    for task_id, task in pipeline.tasks.items():
+        names: set[str] = set()
+        for field_name in _PLACEHOLDER_FIELDS:
+            names |= _placeholders_in(getattr(task, field_name, None))
+        for field_name in _PLACEHOLDER_COLLECTION_FIELDS:
+            names |= _placeholders_in(getattr(task, field_name, ()))
+        for field_name in _PLACEHOLDER_MAPPING_FIELDS:
+            names |= _placeholders_in(getattr(task, field_name, {}))
+
+        # An entity placeholder is filled in when the task runs, so it is not
+        # something to ask a person for.
+        names -= set(task.entity_values)
+        for name in names:
+            found.setdefault(name, []).append(task_id)
+
+    return {name: tuple(sorted(task_ids)) for name, task_ids in sorted(found.items())}
+
 
 @dataclass(slots=True)
 class PreviewTask:

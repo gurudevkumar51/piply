@@ -39,6 +39,7 @@ It stays small on purpose:
 
 - Schedules, sensors, retries, cancellation, reruns, and searchable logs
 - Dry-run preview: `piply plan`, plus an in-UI execution preview
+- Manual runs prompt for `{placeholder}` values an upstream would normally supply
 - Live log streaming: `piply logs --follow` with pipeline/run/task filters
 - Retention and cleanup: `piply prune` with automatic SQLite `VACUUM`
 - Backfill a single run or a whole schedule window
@@ -210,7 +211,9 @@ Each deployment becomes a normal runnable pipeline id, so the scheduler, UI, CLI
 
 ### Deployment Variables In Downstream Pipelines
 
-Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run; a manual run of the downstream pipeline uses the downstream pipeline's own variables or top-level defaults.
+Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run.
+
+A **manual** run has no parent to inherit from, so it uses the downstream pipeline's own variables or top-level defaults. When that leaves a `{placeholder}` with no value, Piply asks for it rather than running the command literally — see [Missing runtime values](docs/UI_GUIDE.md#missing-runtime-values).
 
 ```yaml
 pipelines:
@@ -250,6 +253,8 @@ piply plan extract_flow --config piply-demo/piply.yaml     # dry run, nothing ex
 # Running
 piply run extract_flow --config piply-demo/piply.yaml --wait
 piply run extract_flow --tenant acme --param batch=2026-05-26
+piply run Bronze_to_Silver --var practice=BENNETT       # fill a {placeholder}
+piply run Bronze_to_Silver --prompt                     # or be asked for them
 piply tasks list extract_flow
 piply tasks run extract_flow validate --tenant acme --param region=west
 piply tasks retry <run_id> <task_id> --mode resume

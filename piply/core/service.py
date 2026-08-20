@@ -46,7 +46,7 @@ from .models import (
     RunRecord,
     TaskDefinition,
 )
-from .preview import PipelinePreview, build_pipeline_preview
+from .preview import PipelinePreview, build_pipeline_preview, unresolved_placeholders
 from .processes import is_process_alive
 from .retry import build_retry_plan
 from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor
@@ -98,6 +98,10 @@ def _format_relative_time(delta_seconds: float) -> str:
     hours = max(1, round(delta_seconds / 3600))
     suffix = "" if hours == 1 else "s"
     return f"in {hours} hour{suffix}"
+
+
+#: A runtime input has to be a valid placeholder name or it can never match one.
+_RUNTIME_INPUT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class PipelineService:
@@ -1206,17 +1210,22 @@ class PipelineService:
         tenant_id: str | None = None,
         initial_context: dict[str, object] | None = None,
         source_run_id: str | None = None,
+        inherited_variables: dict[str, str] | None = None,
     ) -> RunRecord:
         """Create and dispatch one run scoped to a selected task and its dependencies.
 
         ``source_run_id`` replays the configuration of an earlier run so a single
         failed task can be repaired with the variables and environment it was
-        originally given.
+        originally given. ``inherited_variables`` supplies values directly, which
+        is how a manual run answers placeholders an upstream would normally fill.
         """
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         replay = self._replay_arguments(source_run_id) if source_run_id else {}
-        inherited_variables = replay.get("inherited_variables") or None
+        # Explicit values win over a replay: the caller just typed them in.
+        merged_variables = dict(replay.get("inherited_variables") or {})
+        merged_variables.update(inherited_variables or {})
+        inherited_variables = merged_variables or None
         inherited_env = replay.get("inherited_env") or None
         effective_overrides = command_overrides or replay.get("command_overrides") or None
         pipeline = self._clone_pipeline_for_task(
@@ -1750,6 +1759,77 @@ class PipelineService:
     def preview_project(self) -> list[PipelinePreview]:
         """Build dry-run previews for every configured pipeline."""
         return [build_pipeline_preview(pipeline) for pipeline in self.project.pipelines.values()]
+
+    def runtime_inputs(
+        self,
+        pipeline_id: str,
+        *,
+        provided: dict[str, str] | None = None,
+        task_id: str | None = None,
+        source_run_id: str | None = None,
+    ) -> dict[str, object]:
+        """Describe the values a manual run of this pipeline still needs.
+
+        A pipeline that normally receives its variables from an upstream trigger
+        has nothing to fill them in when it is started by hand. Rather than
+        running a command containing a literal ``{practice}``, this reports what
+        is missing so the caller can ask for it.
+
+        ``provided`` is applied first, so a caller can re-check after collecting
+        answers and confirm nothing is left.
+        """
+        pipeline = self.get_pipeline(pipeline_id)
+        replay = self._replay_arguments(source_run_id) if source_run_id else {}
+
+        merged: dict[str, str] = {}
+        merged.update(replay.get("inherited_variables") or {})  # type: ignore[arg-type]
+        merged.update(provided or {})
+
+        resolved = self._clone_pipeline_with_inherited_variables(
+            pipeline,
+            merged or None,
+            replay.get("inherited_env"),  # type: ignore[arg-type]
+        )
+        if task_id is not None:
+            resolved = self._clone_pipeline_for_task(resolved, task_id)
+
+        missing = unresolved_placeholders(resolved)
+        # A pipeline that something else triggers has an obvious source for these
+        # values, which is worth saying in the prompt: it tells the user this is
+        # a normal manual run of a downstream pipeline, not a broken config.
+        upstreams = sorted(
+            other.pipeline_id for other in self.project.pipelines.values() if pipeline_id in other.triggers_on_success
+        )
+        return {
+            "pipeline_id": pipeline_id,
+            "pipeline_title": pipeline.title,
+            "ready": not missing,
+            "triggered_by": upstreams,
+            "required": [{"name": name, "tasks": list(task_ids)} for name, task_ids in missing.items()],
+            "provided": dict(merged),
+        }
+
+    @staticmethod
+    def validate_runtime_inputs(values: dict[str, object] | None) -> dict[str, str]:
+        """Normalise and check user-supplied runtime values.
+
+        Names have to look like placeholders or they could never match one, and
+        a blank value is rejected because substituting an empty string silently
+        produces a different broken command rather than an obvious one.
+        """
+        cleaned: dict[str, str] = {}
+        for raw_name, raw_value in (values or {}).items():
+            name = str(raw_name).strip()
+            if not _RUNTIME_INPUT_NAME.fullmatch(name):
+                raise ValueError(
+                    f"'{name}' is not a usable variable name. Use letters, digits, and underscores, "
+                    "starting with a letter or underscore."
+                )
+            value = "" if raw_value is None else str(raw_value).strip()
+            if not value:
+                raise ValueError(f"'{name}' needs a value.")
+            cleaned[name] = value
+        return cleaned
 
     def list_run_artifacts(self, run_id: str, task_id: str | None = None) -> list[dict[str, object]]:
         """Return artifacts recorded for one run, refreshing size and mtime from disk."""

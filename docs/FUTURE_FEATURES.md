@@ -83,6 +83,11 @@ a suggestion rather than requiring a hand-tuned number.
 
 ### 1.3 Run parameters as a first-class form
 
+Partly delivered: a manual run now prompts for any `{placeholder}` the config
+leaves unresolved, and `piply run --var NAME=VALUE` supplies them from the CLI.
+What is still open is a *declared* contract with types, defaults, and
+validation.
+
 **Problem.** `--param key=value` exists on the CLI but the UI cannot supply
 parameters, and nothing declares what a pipeline accepts.
 

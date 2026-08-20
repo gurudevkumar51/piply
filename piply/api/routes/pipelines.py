@@ -29,6 +29,40 @@ def list_pipelines(request: Request) -> list[PipelineResponse]:
     return [PipelineResponse.from_summary(item) for item in visible_pipelines(request, service.list_pipelines())]
 
 
+def _runtime_variables(request: Request, payload: TriggerRunRequest | None) -> dict[str, str] | None:
+    """Validate the runtime values supplied with a manual run."""
+    if payload is None or not payload.variables:
+        return None
+    service = get_service(request)
+    try:
+        return service.validate_runtime_inputs(payload.variables)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{pipeline_id}/runtime-inputs", response_model=dict[str, object])
+def get_runtime_inputs(
+    request: Request,
+    pipeline_id: str,
+    task_id: str | None = None,
+    source_run_id: str | None = None,
+) -> dict[str, object]:
+    """Report the values a manual run of this pipeline still needs.
+
+    The UI calls this before starting a run so it can ask for missing values
+    instead of executing a command containing a literal `{practice}`.
+    """
+    require_permission(request, "run", pipeline_id)
+    try:
+        return get_service(request).runtime_inputs(
+            pipeline_id,
+            task_id=task_id,
+            source_run_id=source_run_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/{pipeline_id}", response_model=PipelineDetailResponse)
 def get_pipeline(request: Request, pipeline_id: str) -> PipelineDetailResponse:
     """Return one pipeline with tasks and recent runs."""
@@ -51,6 +85,7 @@ def trigger_pipeline(
     require_permission(request, "run", pipeline_id)
     _guard_command_overrides(request, payload)
     service = get_service(request)
+    runtime_variables = _runtime_variables(request, payload)
     try:
         initial_context = {}
         if payload is not None and payload.params:
@@ -62,6 +97,7 @@ def trigger_pipeline(
             command_overrides=(payload.command_overrides if payload is not None else None),
             tenant_id=(payload.tenant_id if payload is not None else None),
             initial_context=initial_context,
+            inherited_variables=runtime_variables,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -94,6 +130,7 @@ def trigger_pipeline_task(
     require_permission(request, "run", pipeline_id)
     _guard_command_overrides(request, payload)
     service = get_service(request)
+    runtime_variables = _runtime_variables(request, payload)
     try:
         initial_context = {}
         if payload is not None and payload.params:
@@ -106,6 +143,7 @@ def trigger_pipeline_task(
             command_overrides=(payload.command_overrides if payload is not None else None),
             tenant_id=(payload.tenant_id if payload is not None else None),
             initial_context=initial_context,
+            inherited_variables=runtime_variables,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -126,6 +164,7 @@ def chain_pipeline(
     require_permission(request, "run", target_pipeline_id)
     _guard_command_overrides(request, payload)
     service = get_service(request)
+    runtime_variables = _runtime_variables(request, payload)
     try:
         service.get_pipeline(pipeline_id)
         initial_context = {"params": payload.params} if payload is not None and payload.params else {}
@@ -137,6 +176,7 @@ def chain_pipeline(
             tenant_id=(payload.tenant_id if payload is not None else None),
             initial_context=initial_context,
             command_overrides=(payload.command_overrides if payload is not None else None),
+            inherited_variables=runtime_variables,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

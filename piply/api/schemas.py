@@ -36,6 +36,11 @@ class TriggerRunRequest(BaseModel):
     command_overrides: dict[str, str] = Field(default_factory=dict)
     params: dict[str, object] = Field(default_factory=dict)
     tenant_id: str | None = None
+    #: Values for `{placeholder}` variables the config does not supply, used
+    #: when running a normally-downstream pipeline by hand. They are applied the
+    #: same way an upstream pipeline's variables are, so nothing new has to
+    #: understand them.
+    variables: dict[str, str] = Field(default_factory=dict)
 
 
 class PreviewRequest(BaseModel):

@@ -8,6 +8,7 @@ someone exercises it from an account that should have been refused.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -225,22 +226,29 @@ def test_responses_carry_hardening_headers(restricted) -> None:
 def test_csp_allows_every_origin_the_ui_actually_loads(restricted) -> None:
     """A policy that blocks the app's own assets is worse than no policy.
 
-    base.html loads its web fonts from Google, so the policy has to permit
-    those two origins. Tightening it without removing the <link> silently
-    breaks the UI's typography.
+    Scans every template and script rather than a known list, because the way
+    this breaks is someone adding a CDN reference to one page and nobody
+    noticing the DAG or the fonts stopped rendering. Checked against the real
+    response header, not the constant.
     """
     client, _service, _run, _mallory, admin = restricted
     policy = client.get("/pipelines", auth=admin).headers["content-security-policy"]
 
-    markup = (Path("piply/ui/templates/base.html")).read_text(encoding="utf-8")
-    for origin in ["https://fonts.googleapis.com", "https://fonts.gstatic.com"]:
-        if origin in markup:
-            assert origin in policy, f"base.html loads {origin} but the CSP blocks it"
+    ui = Path("piply/ui")
+    sources = list(ui.glob("templates/*.html")) + list(ui.glob("static/*.js"))
+    referenced = set()
+    for source in sources:
+        referenced.update(re.findall(r"https://[a-zA-Z0-9.-]+", source.read_text(encoding="utf-8")))
+
+    assert referenced, "expected the UI to reference at least one remote origin"
+    for origin in sorted(referenced):
+        assert origin in policy, f"the UI loads {origin} but the CSP would block it"
 
     # The parts that make the policy worth having.
     assert "default-src 'self'" in policy
     assert "frame-ancestors 'none'" in policy
     assert "form-action 'self'" in policy
+    assert "object-src" not in policy or "'none'" in policy
 
 
 # --- Server bootstrap --------------------------------------------------------

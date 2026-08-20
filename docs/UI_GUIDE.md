@@ -53,6 +53,46 @@ Sort and filter choices persist in local storage.
 **Row actions** — *Run* triggers immediately, *Preview* opens the dry-run drawer
 on the detail page, *Pause* / *Resume* toggles the schedule.
 
+### Missing runtime values
+
+Some pipelines cannot resolve on their own. A downstream pipeline normally
+receives `{practice}` from the deployment that triggers it, so starting it by
+hand leaves that placeholder with no value.
+
+Rather than running `dbt --target {practice}` literally, *Run* asks first:
+
+```
+Missing runtime values
+Bronze_to_Silver
+
+  These are normally supplied by BENNETT_ETL when it triggers this
+  pipeline. A manual run has to provide them.
+
+  practice      [____________________]  used by dbt
+  batch_id      [____________________]  used by dbt
+  report_date   [____________________]  used by report
+
+                              [Cancel]  [Run Pipeline]
+```
+
+- Each field names the tasks that use it, so you can tell what a value affects.
+- Every field is required. A blank one is highlighted and the dialog stays open.
+- *Cancel*, `Esc`, or clicking outside all close it **without creating a run**.
+- Pipelines that resolve on their own never show this — they run immediately.
+
+The values are stored with the run, so a later **retry** or **backfill** reuses
+them instead of asking again.
+
+This appears wherever a run starts: the pipelines list, the dashboard, and the
+pipeline detail page. Running a single task asks only for the values that task
+actually uses.
+
+**This is not an error dialog.** A genuine configuration problem — a missing
+script, an unknown task type, a dependency cycle — is rejected when the config
+loads, so those pipelines never reach the point of being runnable. Missing
+runtime values are a normal, expected part of running a downstream pipeline by
+hand.
+
 ---
 
 ## Pipeline detail

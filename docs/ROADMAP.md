@@ -173,7 +173,7 @@ Real demand should decide these, not this list.
 
 | Idea | Note |
 | --- | --- |
-| Run parameters as a declared form | `params:` schema rendered as a UI form; unlocks non-author operators |
+| Run parameters as a declared form | `params:` schema with types, defaults, and validation, rendered as a UI form. Manual runs already prompt for *undeclared* `{placeholder}` values; this would add declared, typed inputs |
 | Data-aware scheduling | "run when this table updates" rather than a clock |
 | Task result caching | Skip a task whose inputs did not change |
 | Plugin hooks | Lets the core stop growing; third parties add task types |
