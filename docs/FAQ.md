@@ -108,9 +108,14 @@ good config in place rather than taking the server down.
 
 ### Can I split the config across multiple files?
 
-Not currently. One config file per project. Use
-[templates and deployments](#7-templates-and-deployments) to remove the
-repetition that usually motivates splitting.
+Not yet — one config file per project today. An `include:` list is planned for
+0.3; see [Roadmap §0.3.0](ROADMAP.md#030-split-piplyyaml-across-files--requested).
+
+Until then, [templates and deployments](#7-templates-and-deployments) remove most
+of the repetition that makes a config long. A file that is long because it has 29
+deployments of 4 templates is already as compressed as the current format allows;
+a file that is long because 8 tenants each spell out the same 12 tasks is not, and
+templates will shrink it dramatically.
 
 ### How do I check my config without running anything?
 

@@ -34,11 +34,42 @@ an optional extra.
 
 ## 0.3 — Operability
 
-**Theme: know what happened, and who did it.**
+**Theme: know what happened, and who did it — and keep the config workable as
+it grows.**
 
 The security audit closed the "who can do what" question. The unanswered half is
-"who *did* what", and the reliability gap is that one flaky task still costs a
-whole run.
+"who *did* what", the reliability gap is that one flaky task still costs a whole
+run, and the authoring gap is that a real tenant rollout produces a config file
+nobody wants to edit.
+
+### 0.3.0 Split `piply.yaml` across files — **requested**
+
+A production config has reached 974 lines: 29 deployments, 8 pipelines, and 4
+templates in one file. Adding a tenant means editing it, and two people touching
+unrelated tenants conflict in git for no reason.
+
+An `include:` list in the root file, with the master file keeping the deployment
+inventory and the volatile definitions moving out:
+
+```yaml
+# piply.yaml keeps project settings + all 29 deployments
+include:
+  - config/templates/*.yaml
+  - config/pipelines/*.yaml
+```
+
+Edit history decided that split: across 35 commits, `pipelines` was touched
+alone 12 times and deployments only 4, while templates and their deployments
+changed together just 6 times. The churn belongs in its own files; the stable
+inventory belongs in the master.
+
+Purely additive — a config with no `include:` behaves exactly as it does now.
+The parts that need care are duplicate detection across files (an error, never
+last-wins), file provenance in every error message, and reload watching all
+included files rather than one. Full design, including the rules table, is in
+[Future Features §1.7](FUTURE_FEATURES.md#17-splitting-piplyyaml-across-files).
+
+**Cost:** M · no new dependency
 
 ### 0.3.1 Audit log — **highest value**
 

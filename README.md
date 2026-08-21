@@ -295,7 +295,7 @@ piply stop --config piply-demo/piply.yaml
 - [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
 - [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
-- [Usage Guide](wiki/USAGE_GUIDE.md): longer-form walkthrough
+- [HTTP API Reference](docs/API.md): every route, with the permission it requires
 - [Changelog](CHANGELOG.md): what changed per release, and what to check before upgrading
 
 **Understanding Piply**
@@ -305,8 +305,6 @@ piply stop --config piply-demo/piply.yaml
 - [Technical Architecture](docs/architecture/technical_architecture.md): maintainer guide to the whole system
 - [Roadmap](docs/ROADMAP.md): what is planned for the next releases
 - [Future Features](docs/FUTURE_FEATURES.md): proposed ideas, ranked by value vs cost
-- [Wiki Overview](wiki/README.md): architecture and feature summary
-- [UI And API Guide](wiki/UI_API_GUIDE.md): screens, actions, and API examples
 
 ## Metadata Store
 
