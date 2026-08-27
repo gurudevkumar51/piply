@@ -18,7 +18,8 @@ from piply.core.service import PipelineService
 from piply.settings import PiplySettings, load_settings
 from piply.version import get_version
 
-from .routes import accounts, dashboard, execution, maintenance, observability, pipelines, runs, ui
+from .routes import accounts, dashboard, execution, maintenance, observability, pipelines, runs, setup, ui
+from .routes.setup import is_first_run
 
 
 def _ui_directory() -> Path:
@@ -58,6 +59,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.scheduler = scheduler
         app.state.settings = settings
         app.state.templates = Jinja2Templates(directory=str(_ui_directory() / "templates"))
+        # Decided here, before the scheduler starts. `piply init` generates
+        # scheduled pipelines, so a few seconds later the database would no
+        # longer look empty and a genuinely fresh install would miss setup.
+        app.state.setup_required = is_first_run(settings, service)
         # Create the first admin when the install has no accounts yet. This is
         # how a server deployment gets its first login without shell access.
         bootstrap = service.bootstrap_admin()
@@ -75,7 +80,11 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 print("Store it now. It cannot be shown again.", flush=True)
             print("=" * 68, flush=True)
 
-        scheduler.start()
+        # Nothing is scheduled until the operator has chosen where data goes.
+        # Running pipelines first would write history into a database they may
+        # be about to replace.
+        if not app.state.setup_required:
+            scheduler.start()
 
         async def _shutdown_watcher():
             while True:
@@ -111,6 +120,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     # returns without ever reaching a route.
     app.middleware("http")(security_headers_middleware)
     app.mount("/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
+    app.include_router(setup.router)
     app.include_router(accounts.router)
     app.include_router(ui.router)
     app.include_router(dashboard.router)

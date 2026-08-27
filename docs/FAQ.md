@@ -63,6 +63,42 @@ piply start --host 0.0.0.0 --port 8080   # bind on all interfaces
 Piply binds `127.0.0.1` by default. If you change that, put it behind a proxy
 and turn on authentication.
 
+### Why am I seeing a setup page instead of the dashboard?
+
+A brand-new install asks once where to keep its own data — a SQLite file or
+PostgreSQL — because the fallback location is a poor default on a server. Piply
+connects before saving, so a wrong value is caught immediately, then writes
+`PIPLY_DATABASE` to `.env` and continues.
+
+Set `PIPLY_DATABASE` before the first start to skip it entirely. Existing
+installs never see it: the page only appears while the default database is still
+empty. See [Metadata Store §5](DATABASE.md#5-first-run-setup).
+
+### A user I just created cannot sign in.
+
+Check the account actually exists — `piply users list`. The usual cause was a
+bug fixed in 0.2.3: creating the **first** account switches authentication on,
+which used to lock out the page that created it, so the *next* account was
+silently never created. If you are on an older version, sign in first, then
+create the rest.
+
+Other causes: usernames are stored lower-cased (signing in is not
+case-sensitive, so that is rarely it), and eight failed attempts lock an account
+for five minutes.
+
+### Why did my queued pipeline never run?
+
+Ask the queue. A trigger that cannot run yet stays queued and records why:
+
+```
+Skipping trigger for 'Bronze_to_Silver': a run is already in progress
+```
+
+The same reason appears on the parent run's downstream panel, so you can see it
+without reading the server log. Common reasons are *pipeline is paused*,
+*pipeline is disabled in the config*, and *a run is already in progress* —
+the last is `max_concurrent_runs: 1` doing its job.
+
 ### How do I stop it?
 
 `piply stop` from the project directory, or Ctrl+C in the foreground. Both wind
@@ -529,6 +565,100 @@ re-deriving them. This was the cause of a downstream `dbt` run reverting
 Yes — deployment keys are deep-merged over the template, so you can override a
 single task's `command` or `timeout` without restating the rest.
 
+### Where do I put `max_parallel_tasks` — template or deployment?
+
+**Either. Every pipeline key works in both places, and the deployment wins.**
+There is no key that only a template may set.
+
+The useful question is which one it *belongs* to:
+
+- **Template** when it is a property of the work: `tasks`, `entities`, `retry`,
+  `timeout`, `max_parallel_tasks`, `execution`, shared `env`,
+  `triggers_on_success`.
+- **Deployment** when it is a property of this tenant: `variables`, `schedule`
+  (to stagger tenants apart), `tenant`, `environment`.
+
+```yaml
+pipeline_templates:
+  tenant_ingest:
+    max_parallel_tasks: 2      # every tenant gets 2...
+    timeout: 1h
+
+pipeline_deployments:
+  bigcorp_ingest:
+    template: tenant_ingest
+    variables: {tenant: bigcorp}
+    max_parallel_tasks: 8      # ...except this one
+    timeout: 4h
+```
+
+Full key table and merge rules:
+[YAML Specification §8](YAML_SPECIFICATION.md#which-keys-go-where).
+
+### If a deployment overrides `variables`, do the template's variables survive?
+
+Yes. **Mappings merge key by key; lists are replaced wholesale.**
+
+| Key shape | Behaviour |
+| --- | --- |
+| `variables`, `env`, `retry`, `notify` | merged — the template's other entries survive |
+| `tags`, `triggers_on_success` | replaced — the template's list is discarded |
+| `timeout`, `max_parallel_tasks`, `description` | replaced |
+
+So a deployment setting `retry: {attempts: 5}` keeps the template's `mode` and
+`delay_seconds`, but `tags: [gamma]` discards the template's tags rather than
+appending to them.
+
+### My deployment's `schedule` is being ignored.
+
+If the template uses `cron:` and your deployment sets `every:`, the merged
+schedule mapping contains **both**, and `cron` wins. The deployment silently
+runs on the template's cron.
+
+```yaml
+pipeline_templates:
+  base:
+    schedule: {cron: "0 3 * * 0"}     # weekly
+
+pipeline_deployments:
+  frequent:
+    template: base
+    schedule: {every: 5m}             # ignored — still runs weekly
+```
+
+The other direction works: `every:` on the template, `cron:` on the deployment.
+To switch a single deployment from cron to an interval, either change the
+template or give that pipeline its own `pipelines:` entry.
+
+`piply plan` shows each deployment's effective schedule, which is the quickest
+way to catch this.
+
+### Does a child pipeline inherit the parent's `max_parallel_tasks` or `timeout`?
+
+**No.** A child inherits *data*, not *execution settings*.
+
+| Inherited | Kept from the child's own definition |
+| --- | --- |
+| `variables`, `env`, task outputs, `tenant_id` | `max_parallel_tasks`, `execution`, `timeout`, `retry`, `max_concurrent_runs`, `schedule`, `notify`, `sensors`, `tasks` |
+
+A child declaring `max_parallel_tasks: 1`, triggered by a parent with `8`, still
+runs one task at a time.
+
+That is deliberate: a shared downstream pipeline triggered by eight different
+tenants would otherwise behave differently depending on which one fired it. To
+vary a downstream stage per tenant, give it its own deployment.
+
+### Do the child's own variables survive?
+
+The ones the parent does not define, yes. Parent variables **override** the
+child's defaults for that run:
+
+```
+child declares  practice: CHILD_DEFAULT, child_only: mine
+parent supplies practice: BENNETT
+child run gets  practice=BENNETT, child_only=mine
+```
+
 ---
 
 ## 8. Conditionals and priority
@@ -876,12 +1006,24 @@ exists.
 
 ### How do I create the first user?
 
+A brand-new install offers it as the second step of setup, straight after
+choosing a database. That step is optional and closes for good once any account
+exists.
+
+Otherwise:
+
 ```bash
 piply users create admin --role admin
 ```
 
 On a server, use a mounted secret instead — see
 [Authentication §1b](AUTHENTICATION.md#1b-creating-the-first-admin-on-a-server).
+
+### I skipped the first-admin step. Can I get it back?
+
+No — the page closes permanently once any account exists, and while none does it
+would be an open door on a running system. Use `piply users create` or the Users
+panel under Settings, both of which work on an install with no accounts.
 
 ### What can I grant?
 
@@ -916,17 +1058,30 @@ piply users create rescue --role admin
 
 The database was in the container's writable layer. Mount a volume, or use
 PostgreSQL. Full setup, including the `chown`-before-`USER` detail that is easy
-to miss, is in [Metadata Store §5](DATABASE.md#5-docker-not-losing-your-data).
+to miss, is in [Metadata Store §6](DATABASE.md#6-docker-not-losing-your-data).
 
 ### How do I move an existing SQLite install to PostgreSQL?
+
+From the UI, as an admin: **Settings → Database**, pick PostgreSQL, paste the
+connection URL, leave *Copy the current data across* ticked, and press **Test and
+switch**. No restart, and a wrong URL is refused on the page.
+
+Or from the command line, with Piply stopped:
 
 ```bash
 piply stop
 piply migrate-db --to "postgresql://piply:secret@db:5432/piply"
 ```
 
-Run ids are preserved, so retry chains, lineage, and accounts survive. The
-target must be empty.
+Either way run ids are preserved, so retry chains, lineage, and accounts
+survive, and the target must be empty.
+
+### Settings says my database cannot be changed from there. Why?
+
+`PIPLY_DATABASE` is set as a real environment variable — usually a compose file,
+systemd unit, or Kubernetes manifest. The process environment overrides `.env`,
+so saving would write a file that nothing reads. Change it where it is set and
+restart. Piply refuses rather than appearing to succeed.
 
 ### Can I run two Piply instances against one database?
 
@@ -1032,6 +1187,8 @@ What the message means and what to do about it.
 | Does `priority` override `depends_on`? | No |
 | Do entity stars appear in the value? | No |
 | Is auth on by default? | No, until the first account exists |
+| Does Piply record who ran a pipeline? | Yes, on the run and in the server log |
+| Will an existing install be sent to the setup page? | No, only a genuinely fresh one |
 | Can `run` permission execute arbitrary commands? | No, that needs `admin` |
 | Is `/metrics` public? | No, but it accepts the API token |
 | Two instances on one database? | No |

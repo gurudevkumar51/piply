@@ -349,6 +349,8 @@ class RunRecord:
     parent_run_id: str | None = None
     parent_pipeline_id: str | None = None
     tenant_id: str | None = None
+    #: Account that asked for this run; None for scheduler and sensor runs.
+    actor: str | None = None
 
     @property
     def duration_seconds(self) -> float | None:

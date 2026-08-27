@@ -20,6 +20,35 @@ piply start --config piply.yaml
 
 ---
 
+## First-run setup
+
+A brand-new install opens `/setup` instead of the dashboard, asking where Piply
+should keep its own data: a SQLite file or PostgreSQL. Piply connects before
+saving, so a wrong host or an unreachable server is reported on the page rather
+than at the next restart. The choice is written to `.env` and applied straight
+away — no restart.
+
+No pipelines run while this page is pending — the scheduler starts once you
+have chosen, so nothing is written into a database you might replace.
+
+You will not see this page if `PIPLY_DATABASE` is already set, or if the default
+database already holds runs or accounts, so existing installs are unaffected.
+Once configured, the page redirects away and cannot be used to repoint a running
+system — changing the database later is an admin action under
+[Settings](#database).
+
+### Creating the first admin
+
+Step 2 is optional: create the first administrator. Piply is open to anyone who
+can reach it until an account exists, and creating one switches sign-in on for
+everybody, so do this before putting Piply on a shared network. You are signed in
+as the new account immediately — there is no separate sign-in step.
+
+Skipping leaves authentication off, which is fine on a laptop. The step closes
+permanently once any account exists.
+
+---
+
 ## Pipelines
 
 An Airflow-style listing rather than a wall of cards.
@@ -52,6 +81,29 @@ Sort and filter choices persist in local storage.
 
 **Row actions** — *Run* triggers immediately, *Preview* opens the dry-run drawer
 on the detail page, *Pause* / *Resume* toggles the schedule.
+
+### Collapsing template groups
+
+With one template deployed per tenant, a single group can hold a row per tenant
+and the page becomes a wall of near-identical entries. Click a group heading to
+collapse it, or use *Expand all* / *Collapse all*.
+
+A collapsed group keeps the information you scan for:
+
+```
+▸ Template: ECW_Extract   9        2 running   1 failed
+▸ Template: Monthly_Flow  9                    1 paused
+▾ Standalone pipelines    4
+```
+
+- The count pill and the running / failed / paused chips stay visible, so a
+  group that needs attention is obvious while closed.
+- Each group is remembered separately, and the state persists per browser.
+- **Searching temporarily opens every group**, so a match can never hide behind
+  a collapsed heading. Clearing the search restores what you had collapsed.
+- The controls disappear when *Group by template* is off, since there are no
+  groups to act on.
+- Headings are real buttons, so they work by keyboard and with a screen reader.
 
 ### Missing runtime values
 
@@ -112,6 +164,23 @@ Laid out so the DAG is the first substantial thing on screen.
 4. **Manual command overrides** — edit a CLI command for one manual run.
 5. **Tasks** and **Recent runs**.
 
+### Long task names
+
+Entity expansion produces names like `payer_claim_status_dashboard / Load Bronze`,
+which are wider than a node. Rather than letting them spill across the box, the
+graph shortens them **from the middle** and keeps the full value on hover:
+
+```
+payer_claim_statu…ard / Load Bronze
+```
+
+The middle is dropped because both ends carry meaning — the entity distinguishes
+`payer_` from `patient_`, and the suffix says which task it is. Nodes are sized
+so the status line (`queued | priority 1 | timeout 300s`) always fits and most
+names survive intact; only the longest are shortened.
+
+The task-focus panel always shows the full, untruncated name.
+
 ### Execution preview
 
 *Preview* opens a drawer showing exactly what a run would do, without running
@@ -138,6 +207,10 @@ range. **Sort** by newest, oldest, longest, shortest, pipeline name, status, or
 trigger. **Rows** picks 50 / 100 / 200 / 500.
 
 Every control submits on change; *Reset* clears them.
+
+A run started by a person also records **who**: the run page shows
+`triggered via manual by alice`, and the same line goes to the server log along
+with pauses and resumes.
 
 **Trigger & lineage** is the column that answers "why did this run?". A coloured
 chip names the trigger — `manual` blue, `schedule` teal, `pipeline` violet,
@@ -188,6 +261,25 @@ link. Downloads are restricted to paths the run actually recorded, inside the
 workspace, the config directory, or `PIPLY_ARTIFACTS_DIR`.
 
 **Raw logs** — newest first, filterable to one task. Every line shows its task.
+
+### Why a downstream pipeline has not started
+
+The downstream panel used to report every not-yet-started pipeline as
+*pending*, which hid the ones that were never going to start on their own. It
+now names the actual state, with a one-line reason:
+
+| Chip | Meaning |
+| --- | --- |
+| `waiting` | This run has not finished yet |
+| `skipped` | This run did not succeed, so nothing was triggered |
+| `queued` | Trigger is queued; the reason it has not dispatched is shown |
+| `paused` | **Will not run** until the pipeline is resumed |
+| `disabled` | **Will not run**: disabled in the config |
+| `unknown` | The target is no longer defined in the config |
+| a run status | It ran; the chip shows how it went |
+
+A queued chip carries the scheduler's own reason, such as *a run is already in
+progress* — the same text written to the server log.
 
 ---
 
@@ -251,9 +343,33 @@ recent failures, a run-duration trend, and the scheduler chip.
 
 ## Settings
 
-Read-only view of the effective runtime configuration: config and database
-paths, auth state, worker defaults, heartbeat and poll intervals, queue
-settings, and retention.
+A read-only view of the effective runtime configuration — config and database
+paths, auth state, worker defaults, heartbeat and poll intervals, queue settings,
+and retention — plus the admin-only panels below.
+
+### Database
+
+Admins can move Piply's own metadata store without editing files or restarting.
+Pick SQLite or PostgreSQL, give the path or connection URL, and press **Test and
+switch**. Piply opens the target before saving, so a wrong value is refused on
+the page rather than at the next restart.
+
+Leave **Copy the current data across** ticked to bring runs, logs, and accounts
+with you. The old database is never deleted, so it stays available as a rollback,
+and copying refuses a target that already holds data rather than merging two
+histories.
+
+Switching is refused while any run is in progress, because an in-flight run
+would be stranded between the two databases. Wait for it, or pause the schedules.
+
+The panel is hidden when `PIPLY_DATABASE` is set as a real environment variable,
+because the process environment overrides `.env` and the change could not take
+effect. See [Metadata Store](DATABASE.md#52-changing-the-database-later).
+
+### Email and accounts
+
+SMTP settings and account administration are also admin-only. Non-admins see the
+runtime configuration alone.
 
 ---
 

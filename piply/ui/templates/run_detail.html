@@ -9,7 +9,7 @@
             <div class="eyebrow">Dag run</div>
             <h1 class="panel-title" style="font-size:1.55rem; margin:0;">{{ run.pipeline_title }}</h1>
             <p class="page-header-copy" style="margin:8px 0 0;">
-                Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>.
+                Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>{% if run.actor %} by <span class="mono">{{ run.actor }}</span>{% endif %}.
                 Select a task in the graph to inspect it, filter logs, or retry from the failing point.
             </p>
         </div>
@@ -18,6 +18,7 @@
             <span class="meta-pill">pipeline <a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_id }}</a></span>
             <span class="meta-pill">duration <span id="run-duration">{% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</span></span>
             <span class="meta-pill">tasks <span id="run-task-count">{{ run.successful_tasks }}/{{ run.task_count }}</span></span>
+            {% if run.actor %}<span class="meta-pill">by {{ run.actor }}</span>{% endif %}
             <span class="meta-pill">exit <span id="run-exit-code">{{ run.exit_code if run.exit_code is not none else "pending" }}</span></span>
             {% if run.retry_of %}
             <span class="meta-pill">retry of {{ run.retry_of }}</span>
@@ -478,6 +479,7 @@ function renderDownstream(links) {
                 <a class="pipeline-row-title" href="${target}">${escapeHtml(link.pipeline_title || link.pipeline_id)}</a>
                 <div class="pipeline-row-sub mono">${escapeHtml(link.pipeline_id)}${link.run_id ? " | run " + escapeHtml(link.run_id) : ""}</div>
                 ${link.error ? `<p class="footer-note">${escapeHtml(link.error)}</p>` : ""}
+                ${link.reason ? `<p class="footer-note">${escapeHtml(link.reason)}</p>` : ""}
             </div>
             <div class="pipeline-row-cell">
                 <div class="cell-label">Status</div>

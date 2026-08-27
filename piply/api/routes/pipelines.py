@@ -10,6 +10,11 @@ from piply.api.schemas import PipelineDetailResponse, PipelineResponse, RunRespo
 router = APIRouter(prefix="/api/pipelines", tags=["pipelines"])
 
 
+def _actor(user) -> str | None:
+    """Return the username to record against an action, if authenticated."""
+    return None if user is None else user.username
+
+
 def _guard_command_overrides(request: Request, payload: TriggerRunRequest | None) -> None:
     """Restrict command overrides to administrators.
 
@@ -82,7 +87,7 @@ def trigger_pipeline(
     payload: TriggerRunRequest | None = None,
 ) -> RunResponse:
     """Trigger one manual pipeline run."""
-    require_permission(request, "run", pipeline_id)
+    user = require_permission(request, "run", pipeline_id)
     _guard_command_overrides(request, payload)
     service = get_service(request)
     runtime_variables = _runtime_variables(request, payload)
@@ -98,6 +103,7 @@ def trigger_pipeline(
             tenant_id=(payload.tenant_id if payload is not None else None),
             initial_context=initial_context,
             inherited_variables=runtime_variables,
+            actor=_actor(user),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -127,7 +133,7 @@ def trigger_pipeline_task(
     payload: TriggerRunRequest | None = None,
 ) -> RunResponse:
     """Trigger one task and its upstream dependencies as a focused manual run."""
-    require_permission(request, "run", pipeline_id)
+    user = require_permission(request, "run", pipeline_id)
     _guard_command_overrides(request, payload)
     service = get_service(request)
     runtime_variables = _runtime_variables(request, payload)
@@ -144,6 +150,7 @@ def trigger_pipeline_task(
             tenant_id=(payload.tenant_id if payload is not None else None),
             initial_context=initial_context,
             inherited_variables=runtime_variables,
+            actor=_actor(user),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -188,10 +195,10 @@ def chain_pipeline(
 @router.post("/{pipeline_id}/pause", response_model=PipelineResponse)
 def pause_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
     """Pause one pipeline schedule."""
-    require_permission(request, "edit", pipeline_id)
+    user = require_permission(request, "edit", pipeline_id)
     service = get_service(request)
     try:
-        summary = service.set_pipeline_paused(pipeline_id, True)
+        summary = service.set_pipeline_paused(pipeline_id, True, actor=_actor(user))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return PipelineResponse.from_summary(summary)
@@ -200,10 +207,10 @@ def pause_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
 @router.post("/{pipeline_id}/resume", response_model=PipelineResponse)
 def resume_pipeline(request: Request, pipeline_id: str) -> PipelineResponse:
     """Resume one pipeline schedule."""
-    require_permission(request, "edit", pipeline_id)
+    user = require_permission(request, "edit", pipeline_id)
     service = get_service(request)
     try:
-        summary = service.set_pipeline_paused(pipeline_id, False)
+        summary = service.set_pipeline_paused(pipeline_id, False, actor=_actor(user))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return PipelineResponse.from_summary(summary)

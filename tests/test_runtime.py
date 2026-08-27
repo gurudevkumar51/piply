@@ -403,3 +403,140 @@ def wait_for_run_completion(client, run_id, timeout=5.0):
         time.sleep(0.1)
 
     raise AssertionError(f"Run {run_id} did not reach a terminal state within {timeout} seconds.")
+
+
+def test_parallel_python_tasks_keep_their_output_separate(tmp_path: Path) -> None:
+    """Two Python tasks running at once must not land in each other's log.
+
+    Capture used to swap the process-global `sys.stdout`, so with
+    `max_parallel_tasks` above one the enter/exit order interleaved: most of one
+    task's output was recorded against the other, and the real stream was never
+    put back.
+    """
+    import sys
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "",
+                "",
+                "def alpha():",
+                "    for index in range(30):",
+                "        print(f'ALPHA-{index}')",
+                "        time.sleep(0.01)",
+                "",
+                "",
+                "def beta():",
+                "    for index in range(30):",
+                "        print(f'BETA-{index}')",
+                "        time.sleep(0.01)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Parallel Capture",
+                "workspace: workspace",
+                "pipelines:",
+                "  race:",
+                "    max_parallel_tasks: 2",
+                "    tasks:",
+                "      a:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: alpha",
+                "      b:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: beta",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    real_stdout, real_stderr = sys.stdout, sys.stderr
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("race", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+
+    by_task: dict[str, set[str]] = {}
+    for line in logs:
+        marker = line.message.split("-")[0]
+        if marker in {"ALPHA", "BETA"}:
+            by_task.setdefault(line.task_id, set()).add(marker)
+
+    assert by_task == {"a": {"ALPHA"}, "b": {"BETA"}}
+    # Every line is accounted for, so nothing was dropped to fix the mixing.
+    assert sum(1 for line in logs if line.message.startswith("ALPHA")) == 30
+    assert sum(1 for line in logs if line.message.startswith("BETA")) == 30
+
+    # The process keeps the streams it started with.
+    assert sys.stdout is real_stdout
+    assert sys.stderr is real_stderr
+
+
+def test_a_timed_out_python_task_releases_the_process_streams(tmp_path: Path) -> None:
+    """A runaway task cannot be killed, but it must not keep stdout either."""
+    import sys
+
+    from piply.engine import task_runner
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "",
+                "",
+                "def slow():",
+                "    print('SLOW-start')",
+                "    time.sleep(30)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Timeout Capture",
+                "workspace: workspace",
+                "pipelines:",
+                "  slow_flow:",
+                "    tasks:",
+                "      slow:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: slow",
+                "        timeout: 2s",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    real_stdout, real_stderr = sys.stdout, sys.stderr
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("slow_flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "timed_out"
+    # Whatever it printed before the deadline is still recorded.
+    assert any(line.message == "SLOW-start" for line in logs)
+    assert any("timed out" in line.message for line in logs)
+
+    assert sys.stdout is real_stdout
+    assert sys.stderr is real_stderr
+    assert task_runner._capture_users == 0

@@ -203,6 +203,44 @@ location, the process id, and the metadata store.
 | `GET` | `/api/settings/smtp` | `admin` | Central SMTP; password never returned |
 | `PUT` | `/api/settings/smtp` | `admin` | Update SMTP; blank password keeps the stored one |
 | `POST` | `/api/settings/smtp/test` | `admin` | Send one test message |
+| `GET` | `/api/settings/database` | `admin` | Where Piply keeps its own data; credentials masked |
+| `PUT` | `/api/settings/database` | `admin` | Point Piply at a different metadata store |
+
+### Changing the metadata store
+
+`PUT /api/settings/database` takes the same choice as the first-run setup page:
+
+```json
+{"backend": "postgres", "dsn": "postgresql://piply:secret@db:5432/piply", "migrate": true}
+```
+
+For SQLite send `{"backend": "sqlite", "sqlite_path": "/var/lib/piply/piply.db"}`;
+a relative path resolves against the config folder.
+
+The target is **opened before anything is written**, so a wrong DSN fails here
+with `400` rather than at the next restart. `migrate` copies the current runs,
+logs, and accounts across with their ids intact; it refuses a target that
+already holds data (`400`) rather than merging two histories. Without it the new
+database starts from whatever it already contains. The old database is never
+deleted either way.
+
+On success the setting is written to `.env` and applied to the running process —
+no restart, and the scheduler is rebuilt against the new store:
+
+```json
+{"status": "updated", "backend": "postgres", "location": "postgresql://piply:***@db:5432/piply", "migrated": {"runs": 412, "users": 6}}
+```
+
+Two cases return `409`. The first is a run still in flight — an in-flight run
+holds the old store, so it would finish writing there while the new database
+kept the half-copied row, stranding it at `running`. Wait for it, or pause the
+schedules first.
+
+The second is `PIPLY_DATABASE` set as a real environment variable. The
+process environment overrides `.env`, so writing the file would change nothing.
+Change it where it is set — compose file, systemd unit, Kubernetes manifest —
+and restart. `GET` reports this as `"env_managed": true`, and the settings page
+hides the form.
 
 `/api/me` is public so a client can ask whether it is signed in without
 triggering a challenge:

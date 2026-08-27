@@ -26,7 +26,7 @@ SESSION_COOKIE = "piply_session"
 
 #: Paths reachable without authentication.
 # /api/me must answer anonymously so a client can ask whether it is signed in.
-PUBLIC_PATHS = frozenset({"/login", "/logout", "/health", "/api/me"})
+PUBLIC_PATHS = frozenset({"/login", "/logout", "/health", "/api/me", "/setup", "/setup/admin"})
 PUBLIC_PREFIXES = ("/static",)
 
 #: A token-authenticated caller is a machine integration and is treated as an
@@ -251,6 +251,15 @@ async def auth_middleware(request: Request, call_next):
     if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES) or path in PUBLIC_PATHS:
         request.state.user = identify_caller(request, service, settings)
         return await call_next(request)
+
+    # A genuinely fresh install has to choose where its data lives before
+    # anything else is worth showing. Only rendered pages are redirected: an API
+    # caller gets the normal response so a script sees a clear failure, not HTML.
+    if not _is_api_path(path):
+        from piply.api.routes.setup import setup_required
+
+        if setup_required(request):
+            return RedirectResponse(url="/setup", status_code=303)
 
     auth_required = bool(settings.auth_enabled)
     if service is not None:

@@ -152,6 +152,17 @@ class PiplySettings:
     api_token: str | None
     env_values: dict[str, str]
 
+    @property
+    def database_configured(self) -> bool:
+        """Return whether a metadata store was chosen explicitly.
+
+        False means nothing set `PIPLY_DATABASE`, so Piply would silently fall
+        back to a file under the config directory. On a server that default is
+        usually wrong — it is the container path that gets wiped on redeploy —
+        so a fresh install is sent to the setup page to choose deliberately.
+        """
+        return self.database_path is not None or self.database_dsn is not None
+
 
 def _candidate_env_files(config_path: Path | None) -> list[Path]:
     """Return the .env files to load in precedence order."""
@@ -170,7 +181,9 @@ def load_settings(
     environ: dict[str, str] | None = None,
 ) -> PiplySettings:
     """Load settings from .env files and environment variables."""
-    env_source = dict(environ or os.environ)
+    # `is None` rather than a truth test: an explicitly empty mapping means "no
+    # environment", which is how a caller asks for the unconfigured defaults.
+    env_source = dict(os.environ if environ is None else environ)
     resolved_config = Path(config_path).resolve() if config_path else None
 
     merged_env: dict[str, str] = {}

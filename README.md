@@ -47,8 +47,12 @@ It stays small on purpose:
 - Prometheus metrics at `GET /metrics` and a runtime Diagnostics page
 - Airflow-style pipeline listing with template grouping, sorting, and filtering
 - Last-five-runs status dots on every pipeline row, each linking to its run
-- Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`
+- Guided first-run setup: choose SQLite or PostgreSQL, and create the first
+  admin, before anything is written
+- Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`, movable
+  later from Settings with the existing history copied across
 - Accounts, roles, and per-pipeline view/edit/run permissions
+- Runs record who started them; pauses and manual runs are attributed by name
 - Central SMTP configured once, reused by email tasks and run notifications
 - Runs page with filters, sorting, and full multi-level trigger lineage
 
@@ -291,6 +295,7 @@ piply stop --config piply-demo/piply.yaml
 - [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
 - [YAML Specification](docs/YAML_SPECIFICATION.md): every config key, with defaults
 - [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
+- [Sensors](docs/SENSORS.md): file, SQL, and API triggers, and how polling actually behaves
 - [UI Guide](docs/UI_GUIDE.md): every page and what it answers
 - [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
 - [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema

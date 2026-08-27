@@ -356,3 +356,108 @@ def test_health_is_public_and_reveals_nothing_sensitive(restricted) -> None:
     # Making it public must not have opened anything else.
     assert client.get("/api/pipelines").status_code == 401
     assert client.get("/api/diagnostics").status_code == 401
+
+
+def test_creating_the_first_admin_does_not_lock_out_the_session(tmp_path: Path, monkeypatch) -> None:
+    """The reported "new users cannot log in" bug, from the other end.
+
+    Creating the first account switches authentication on. The page that just
+    created it holds no session cookie, so every following request returned 401
+    — including the request that created the *next* user. The account was never
+    created, and the person who tried to sign in as it could not, which is what
+    got reported.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(CONFIG, encoding="utf-8")
+    monkeypatch.setenv("PIPLY_DATABASE", str(tmp_path / "piply.db"))
+    monkeypatch.delenv("PIPLY_AUTH_ENABLED", raising=False)
+
+    with TestClient(create_app(str(config_path))) as admin_session:
+        service = admin_session.app.state.service
+        assert service.auth_required is False
+
+        created = admin_session.post(
+            "/api/users",
+            json={"username": "admin", "password": "Admin-Pass-1", "role": "admin"},
+        )
+        assert created.status_code == 200
+        # Authentication is now on, and this session was signed in as the admin
+        # it just created rather than being locked out.
+        assert service.auth_required is True
+        assert created.cookies.get("piply_session")
+
+        # The action that used to fail with 401 now succeeds.
+        follow_up = admin_session.post(
+            "/api/users",
+            json={
+                "username": "bob",
+                "password": "Bob-Pass-123",
+                "role": "user",
+                "permissions": {"other": ["view", "run"]},
+            },
+        )
+        assert follow_up.status_code == 200
+        assert {user.username for user in service.list_users()} == {"admin", "bob"}
+
+        # And the created user can actually sign in, with the right permissions.
+        with TestClient(admin_session.app) as bob:
+            signed_in = bob.post(
+                "/login",
+                data={"username": "bob", "password": "Bob-Pass-123"},
+                follow_redirects=False,
+            )
+            assert signed_in.status_code == 303
+            assert signed_in.headers["location"] == "/"
+            assert bob.get("/api/pipelines").status_code == 200
+            # bob is not an admin, and the auto-login must not have changed that.
+            assert bob.get("/api/users").status_code == 403
+
+
+def test_creating_a_non_admin_first_account_does_not_auto_sign_in(tmp_path: Path, monkeypatch) -> None:
+    """Auto-login is only for the bootstrapping admin, never a plain user."""
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(CONFIG, encoding="utf-8")
+    monkeypatch.setenv("PIPLY_DATABASE", str(tmp_path / "piply.db"))
+    monkeypatch.delenv("PIPLY_AUTH_ENABLED", raising=False)
+
+    with TestClient(create_app(str(config_path))) as client:
+        created = client.post(
+            "/api/users",
+            json={"username": "someone", "password": "Some-Pass-1", "role": "user"},
+        )
+        assert created.status_code == 200
+        assert not created.cookies.get("piply_session")
+
+
+def test_a_user_created_by_an_admin_can_sign_in(restricted) -> None:
+    """The whole create -> authenticate -> authorize chain, end to end."""
+    client, service, _run, _mallory, admin = restricted
+
+    created = client.post(
+        "/api/users",
+        json={
+            "username": "carol",
+            "password": "Carol-Pass-9",
+            "role": "user",
+            "permissions": {"other": ["view"]},
+        },
+        auth=admin,
+    )
+    assert created.status_code == 200
+
+    with TestClient(client.app) as carol:
+        assert (
+            carol.post(
+                "/login", data={"username": "carol", "password": "Carol-Pass-9"}, follow_redirects=False
+            ).status_code
+            == 303
+        )
+        assert [item["pipeline_id"] for item in carol.get("/api/pipelines").json()] == ["other"]
+        # `view` only: running is refused.
+        assert carol.post("/api/pipelines/other/run", json={}).status_code == 403
+
+    # A username is stored lower-cased, so the sign-in form must not be
+    # case-sensitive on it.
+    assert service.authenticate("CAROL", "Carol-Pass-9") is not None

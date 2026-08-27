@@ -1128,3 +1128,173 @@ def test_env_file_overrides_inline_pipeline_env(tmp_path: Path) -> None:
     assert tasks["plain"].env["SHARED"] == "from_env_file"
     # Task-level env is the last word, which is how you win against an env file.
     assert tasks["overridden"].env["SHARED"] == "from_task_env"
+
+
+def test_deployment_merge_semantics_match_the_documentation(tmp_path: Path) -> None:
+    """Pin the template/deployment merge rules documented in YAML_SPECIFICATION §8.
+
+    Mappings merge key by key, lists are replaced wholesale, and scalars are
+    replaced. People rely on this to override one tenant without restating a
+    template, so a change here is a breaking change that needs a doc update.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Merge Rules",
+                "workspace: workspace",
+                "pipeline_templates:",
+                "  base:",
+                "    max_parallel_tasks: 2",
+                "    timeout: 1h",
+                "    tags: [alpha, beta]",
+                "    retry: {attempts: 1, mode: resume, delay_seconds: 7}",
+                "    variables: {practice: DEFAULT, shared: from_template}",
+                "    env: {SHARED_ENV: tpl, ONLY_TPL: keep}",
+                "    notify:",
+                "      on_failure: [tpl@example.com]",
+                "      on_success: [ok@example.com]",
+                "    tasks:",
+                "      one: {type: cli, command: echo one, timeout: 5m}",
+                "      two: {type: cli, command: echo two, depends_on: [one]}",
+                "pipeline_deployments:",
+                "  OVERRIDE:",
+                "    template: base",
+                "    max_parallel_tasks: 8",
+                "    timeout: 4h",
+                "    tags: [gamma]",
+                "    retry: {attempts: 5}",
+                "    variables: {practice: TENANT_B}",
+                "    env: {SHARED_ENV: dep}",
+                "    notify:",
+                "      on_failure: [dep@example.com]",
+                "    tasks:",
+                "      two: {timeout: 30m}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    pipeline = load_project(config_path).pipelines["OVERRIDE"]
+
+    # Scalars: the deployment replaces.
+    assert pipeline.max_parallel_tasks == 8
+    assert pipeline.timeout_seconds == 4 * 3600
+
+    # Mappings: merged key by key, so the template's other entries survive.
+    assert pipeline.variables["practice"] == "TENANT_B"
+    assert pipeline.variables["shared"] == "from_template"
+    assert pipeline.tasks["one"].env["SHARED_ENV"] == "dep"
+    assert pipeline.tasks["one"].env["ONLY_TPL"] == "keep"
+    assert pipeline.retry_policy.attempts == 5
+    assert pipeline.retry_policy.mode == "resume"
+    assert pipeline.retry_policy.delay_seconds == 7
+    assert pipeline.notify_on_failure == ("dep@example.com",)
+    assert pipeline.notify_on_success == ("ok@example.com",)
+
+    # Lists: replaced wholesale. Tags do not accumulate.
+    assert pipeline.tags == ("gamma",)
+
+    # Tasks merge per key, so one field changes without restating the task.
+    assert pipeline.tasks["two"].timeout_seconds == 30 * 60
+    assert pipeline.tasks["two"].command == "echo two"
+    assert pipeline.tasks["one"].timeout_seconds == 5 * 60
+
+
+def test_schedule_merge_lets_cron_win_over_every(tmp_path: Path) -> None:
+    """A documented trap: `schedule` merges, so `cron` beats a deployment's `every`.
+
+    The merged mapping holds both keys and the parser prefers `cron`, so the
+    deployment silently keeps the template's schedule. Pinned here because the
+    failure is invisible — the pipeline simply runs on the wrong cadence.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+
+    def build(template_schedule: str, deployment_schedule: str) -> str:
+        return "\n".join(
+            [
+                'version: "1"',
+                "title: Schedule Merge",
+                "workspace: workspace",
+                "pipeline_templates:",
+                "  base:",
+                f"    schedule: {{{template_schedule}}}",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+                "pipeline_deployments:",
+                "  DEP:",
+                "    template: base",
+                f"    schedule: {{{deployment_schedule}}}",
+            ]
+        )
+
+    # Template cron + deployment every: cron wins, the `every` is ignored.
+    config_path.write_text(build('cron: "0 3 * * 0"', "every: 5m"), encoding="utf-8")
+    assert "Cron" in load_project(config_path).pipelines["DEP"].schedule.describe()
+
+    # The other direction works, which is why this is a trap rather than a rule.
+    config_path.write_text(build("every: 15m", 'cron: "0 3 * * 0"'), encoding="utf-8")
+    assert "Cron" in load_project(config_path).pipelines["DEP"].schedule.describe()
+
+
+def test_child_pipeline_keeps_its_own_execution_settings(tmp_path: Path) -> None:
+    """A triggered child inherits data, not execution settings.
+
+    A shared downstream pipeline must behave the same whichever tenant fired it,
+    so `max_parallel_tasks`, `timeout`, and `retry` stay the child's own.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Child Inheritance",
+                "workspace: workspace",
+                "pipelines:",
+                "  child:",
+                "    max_parallel_tasks: 1",
+                "    timeout: 10m",
+                "    retry: {attempts: 0}",
+                "    variables: {practice: CHILD_DEFAULT, child_only: mine}",
+                "    tasks:",
+                "      a: {type: cli, command: echo a}",
+                "pipeline_templates:",
+                "  parent_tpl:",
+                "    max_parallel_tasks: 8",
+                "    timeout: 4h",
+                "    retry: {attempts: 3}",
+                "    triggers_on_success: [child]",
+                "    tasks:",
+                "      go: {type: cli, command: echo parent}",
+                "pipeline_deployments:",
+                "  BENNETT_PARENT:",
+                "    template: parent_tpl",
+                "    variables: {practice: BENNETT}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "piply.db")
+    parent = service.trigger_pipeline("BENNETT_PARENT", wait=True)
+
+    children = []
+    for _ in range(80):
+        children = service.store.list_child_runs(parent.run_id)
+        if children:
+            break
+        time.sleep(0.25)
+    assert children, "the downstream pipeline never ran"
+
+    snapshot = service.store.get_run_config(children[0].run_id)
+
+    # Data crosses the boundary; the parent's value wins over the child's default.
+    assert snapshot["inherited_variables"]["practice"] == "BENNETT"
+
+    # Execution settings do not: these are the child's own, not the parent's.
+    assert snapshot["settings"]["max_parallel_tasks"] == 1
+    assert snapshot["settings"]["timeout_seconds"] == 600
+    assert snapshot["settings"]["retry"]["attempts"] == 0

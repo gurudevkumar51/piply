@@ -9,12 +9,32 @@ rather than buried in the feature list.
 
 ---
 
-## 0.2.2 — 2026-08-20
+## 0.2.3 — 2026-08-26
 
 A hardening and operability release. Every existing `piply.yaml` keeps working
 untouched.
 
 ### Fixed — upgrade recommended
+
+- **Newly created users could not sign in.** Creating the *first* account
+  switches authentication on, which locked out the very page that created it:
+  every following request returned 401, so the *next* account was silently never
+  created. The person then could not sign in as an account that did not exist.
+  The session that creates the first admin is now signed in as it.
+- **Parallel Python tasks logged against the wrong task.** Output capture swapped
+  the process-global `sys.stdout`, so with `max_parallel_tasks` above one the
+  tasks' enter/exit order interleaved. In a two-task reproduction, 29 of the
+  first task's 30 lines were recorded against the second. Capture is now scoped
+  to the thread running the task.
+
+  The same bug left `sys.stdout` pointing at a discarded buffer once a run
+  finished, so **everything the server printed afterwards disappeared** —
+  uvicorn's access log included. A task that runs past its timeout no longer
+  holds the streams either.
+
+- **Downstream pipelines reported `pending` when they were never going to run.**
+  The run page now names the real state — `paused`, `disabled`, `queued`,
+  `waiting` — with the reason.
 
 - **The server could not start on a clean install.** The sign-in form required
   `python-multipart`, which `pip install mr-piply` never installed — `fastapi`
@@ -57,12 +77,50 @@ Read this section before upgrading a multi-user install.
 
 ### Added
 
+- **First-run database setup.** A brand-new install opens a setup page instead
+  of the dashboard and asks where Piply should keep its own data — a SQLite file
+  or PostgreSQL. The choice is validated by opening the database before anything
+  is saved, written to `.env`, and applied without a restart. The scheduler is
+  held back until you choose, so nothing is written into a database you may be
+  about to replace. Existing installs are never redirected, and the page cannot
+  repoint a system that is already configured.
+- **An optional first-admin step after database setup.** Piply is open to
+  anyone who can reach it until an account exists, which is easy to miss when
+  deploying to a server. Setup now offers to create the first administrator and
+  signs you in as it, so the account that switches authentication on cannot lock
+  out the page that created it. Skipping is one click and leaves the old
+  behaviour. The step closes permanently once any account exists.
+- **Admins can change the database from Settings.** Move Piply's own metadata
+  store to another SQLite file or to PostgreSQL, optionally copying runs, logs,
+  and accounts across with their ids intact — no file editing and no restart.
+  The target is opened before anything is saved, the old database is left as a
+  rollback, and copying refuses a non-empty target. Admin-only, and refused
+  outright when `PIPLY_DATABASE` comes from the process environment, where
+  writing `.env` would silently do nothing, and while any run is in flight,
+  which would otherwise strand that run between the two databases.
+- **Actor attribution.** Runs record the account that started them, shown on the
+  run page and returned as `actor` by the API. Pausing, resuming, and manual runs
+  are logged as `Pipeline 'x' paused by alice`. Schedule and sensor runs have no
+  actor rather than an invented one.
+- **Queued triggers explain themselves.** A trigger that cannot run yet records
+  why — `Skipping trigger for 'x': pipeline is paused` — logged once per change
+  rather than on every ten-second tick, and kept on the queue row.
 - **Interactive runtime inputs.** Starting a pipeline by hand that normally
   receives variables from an upstream trigger now prompts for the missing
   `{placeholder}` values instead of running a command containing them literally.
   Available in the UI, as `piply run --var NAME=VALUE`, `--prompt`, and through
   `GET /api/pipelines/{id}/runtime-inputs`. Values are stored with the run, so a
   retry or backfill reuses them.
+- **Collapsible template groups on the pipelines page.** With one template
+  deployed per tenant the list becomes a wall of near-identical rows. Groups
+  collapse individually or in bulk, keep their running / failed / paused counts
+  visible while closed, persist per browser, and open automatically while
+  searching so a match cannot hide behind a collapsed heading.
+- **DAG nodes no longer overflow with long task names.** Entity expansion
+  produces names like `payer_claim_status_dashboard / Load Bronze`, which used
+  to paint outside the node box and across the edges. Labels are now measured
+  and shortened from the middle, with the full value on hover, and nodes are
+  wide enough that the status line always fits.
 - **`piply migrate-db --to <dsn>`** copies a SQLite runtime onto PostgreSQL with
   ids intact, so retry chains, lineage, and accounts survive.
 - **`GET /health`** — a public liveness probe for load balancers and container

@@ -16,13 +16,123 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
 from piply.core.context import RuntimeTaskContext
 from piply.core.models import TaskDefinition
 from piply.core.store import RunStore
+
+#: Per-thread capture buffers, consulted by the proxy installed on `sys.stdout`
+#: and `sys.stderr` while any Python task is running.
+_capture_bindings = threading.local()
+
+#: Guards installing and removing the proxy. `_capture_users` counts the threads
+#: currently capturing, so the last one out restores the real streams.
+_capture_lock = threading.Lock()
+_capture_users = 0
+_captured_streams: tuple[object, object] | None = None
+
+
+class _ThreadRoutedStream:
+    """Writes to the calling thread's capture buffer, or the real stream.
+
+    `contextlib.redirect_stdout` swaps the process-global `sys.stdout`, which is
+    wrong as soon as two Python tasks run at once: their enter/exit order
+    interleaves, so one task's output is recorded against another task's log and
+    the real stream is never put back. Routing per thread keeps each task's
+    output its own, and leaves anything else printing in the process — uvicorn's
+    logs, say — going where it always did.
+    """
+
+    def __init__(self, slot: str, real_stream) -> None:
+        self._slot = slot
+        self._real_stream = real_stream
+
+    def _target(self):
+        return getattr(_capture_bindings, self._slot, None) or self._real_stream
+
+    def write(self, text: str) -> int:
+        return self._target().write(text)
+
+    def writelines(self, lines) -> None:
+        self._target().writelines(lines)
+
+    def flush(self) -> None:
+        target = self._target()
+        # Flushing a StringIO is a no-op; only the real stream needs it.
+        if target is self._real_stream:
+            self._real_stream.flush()
+
+    def writable(self) -> bool:
+        return True
+
+    def __getattr__(self, name: str):
+        # `encoding`, `fileno`, `buffer`, and friends belong to the real stream.
+        return getattr(self._real_stream, name)
+
+
+def _acquire_routing() -> None:
+    """Install the routing proxy, if this is the first capture in flight."""
+    global _capture_users, _captured_streams
+
+    with _capture_lock:
+        if _capture_users == 0:
+            # Remember exactly what was replaced. Restoring `sys.__stdout__`
+            # instead would fight pytest and anything else that legitimately
+            # wraps the stream.
+            _captured_streams = (sys.stdout, sys.stderr)
+            sys.stdout = _ThreadRoutedStream("stdout", sys.stdout)
+            sys.stderr = _ThreadRoutedStream("stderr", sys.stderr)
+        _capture_users += 1
+
+
+def _release_routing() -> None:
+    """Put the real streams back, once the last capture has finished."""
+    global _capture_users, _captured_streams
+
+    with _capture_lock:
+        _capture_users -= 1
+        if _capture_users == 0 and _captured_streams is not None:
+            sys.stdout, sys.stderr = _captured_streams
+            _captured_streams = None
+
+
+class _OutputCapture:
+    """One task's claim on `print` output, released exactly once.
+
+    Used as a context manager on the thread running the task. A timed-out task
+    is abandoned on a daemon thread that cannot be killed, so `release` may also
+    be called from the waiting thread to stop that thread holding the process's
+    streams hostage; whichever happens second does nothing.
+    """
+
+    def __init__(self, stdout_buffer, stderr_buffer) -> None:
+        self._buffers = (stdout_buffer, stderr_buffer)
+        self._lock = threading.Lock()
+        self._holding = False
+
+    def __enter__(self) -> _OutputCapture:
+        _acquire_routing()
+        with self._lock:
+            self._holding = True
+        _capture_bindings.stdout, _capture_bindings.stderr = self._buffers
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        # Only the running thread can clear its own bindings. An abandoned
+        # thread keeps writing into a buffer nobody reads, which is what we want.
+        _capture_bindings.stdout = None
+        _capture_bindings.stderr = None
+        self.release()
+
+    def release(self) -> None:
+        """Give up this task's claim. Safe to call twice, or from any thread."""
+        with self._lock:
+            if not self._holding:
+                return
+            self._holding = False
+        _release_routing()
 
 
 @dataclass(slots=True)
@@ -329,20 +439,27 @@ class TaskRunner:
             callable_object = getattr(callable_object, attribute_name)
         return callable_object
 
-    def _call_with_timeout(self, callable_object, task: TaskDefinition):
+    def _call_with_timeout(self, callable_object, task: TaskDefinition, stdout_buffer, stderr_buffer):
         """Invoke a callable, raising TimeoutError when the task timeout elapses.
 
         Python threads cannot be force-killed, so an over-running callable is
         abandoned on a daemon thread while the task itself is marked timed out.
+
+        Output capture is bound here rather than by the caller because it is
+        thread-scoped: with a timeout the callable runs on a worker thread, and a
+        binding made on the calling thread would not reach it.
         """
+        capture = _OutputCapture(stdout_buffer, stderr_buffer)
         if task.timeout_seconds is None:
-            return self._invoke_callable(callable_object, task)
+            with capture:
+                return self._invoke_callable(callable_object, task)
 
         box: dict[str, object] = {}
 
         def _invoke() -> None:
             try:
-                box["value"] = self._invoke_callable(callable_object, task)
+                with capture:
+                    box["value"] = self._invoke_callable(callable_object, task)
             except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
                 box["error"] = exc
 
@@ -350,6 +467,9 @@ class TaskRunner:
         worker.start()
         worker.join(timeout=task.timeout_seconds)
         if worker.is_alive():
+            # The thread cannot be killed, so drop its claim on the process
+            # streams rather than let a runaway task hold them indefinitely.
+            capture.release()
             raise TimeoutError(f"Task timed out after {task.timeout_seconds} seconds.")
         error = box.get("error")
         if isinstance(error, BaseException):
@@ -363,8 +483,7 @@ class TaskRunner:
 
         try:
             callable_object = self._load_callable(task)
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                result = self._call_with_timeout(callable_object, task)
+            result = self._call_with_timeout(callable_object, task, stdout_buffer, stderr_buffer)
         except TimeoutError as exc:
             for output in [stdout_buffer.getvalue().rstrip(), stderr_buffer.getvalue().rstrip()]:
                 for line in output.splitlines():

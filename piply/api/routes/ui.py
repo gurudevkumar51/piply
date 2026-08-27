@@ -16,7 +16,10 @@ from piply.api.auth import (
     visible_pipeline_ids,
     visible_pipelines,
 )
+from piply.api.routes.setup import database_is_env_managed
 from piply.api.schemas import RunResponse
+from piply.core.dialects import is_postgres_dsn
+from piply.core.sql_adapters import mask_connection_secret
 
 router = APIRouter(tags=["ui"])
 
@@ -467,6 +470,21 @@ def logs_page(
     )
 
 
+def _database_panel(request: Request) -> dict:
+    """Summarise the metadata store for the admin settings panel."""
+    service = get_service(request)
+    settings = request.app.state.settings
+    location = service.database_location
+    return {
+        "backend": "PostgreSQL" if is_postgres_dsn(location) else "SQLite",
+        # Never render a DSN with its password in the page source.
+        "location": mask_connection_secret(location) or location,
+        "configured": settings.database_configured,
+        "env_managed": database_is_env_managed(),
+        "row_counts": service.store.row_counts(),
+    }
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request) -> HTMLResponse:
     """Render settings, plus SMTP and account administration for admins."""
@@ -485,6 +503,7 @@ def settings_page(request: Request) -> HTMLResponse:
             "scheduler": payload["scheduler"],
             "runtime_metrics": payload["runtime_metrics"],
             "smtp": service.get_smtp_settings() if is_admin else None,
+            "database": _database_panel(request) if is_admin else None,
             "users": [
                 {
                     "username": item.username,
