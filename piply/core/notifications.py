@@ -154,7 +154,7 @@ def parse_notifications(
         if not is_valid_webhook(webhook):
             if _looks_unresolved(webhook):
                 warnings.append(
-                    f"{label}: webhook '{webhook}' did not resolve to a value, " "so this destination will be skipped."
+                    f"{label}: webhook '{webhook}' did not resolve to a value, so this destination will be skipped."
                 )
             else:
                 raise NotificationError(f"{label}.webhook must be an https URL (a Teams webhook always is)")
