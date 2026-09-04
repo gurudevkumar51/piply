@@ -17,7 +17,15 @@ An item that costs one of those to buy another is called out as such.
 
 ## Where things stand
 
-Shipped in 0.2.x, so the roadmap does not relitigate them:
+Shipped in 0.3.x, so the roadmap does not relitigate them:
+
+multi-file config with `include:` · Microsoft Teams notifications with an alerts
+panel · first-run database setup and the optional first admin · admin database
+management · sensor variables handed to the tasks they trigger · entity
+dimension selection and partial expansion · streamed task output including
+`logging` · full-width task graph.
+
+Shipped in 0.2.x:
 
 pipeline templates and deployments · entity expansion · conditional values ·
 task and entity priority · timeouts and kill grace · dry-run preview · artifacts
@@ -37,12 +45,12 @@ an optional extra.
 **Theme: know what happened, and who did it — and keep the config workable as
 it grows.**
 
-The security audit closed the "who can do what" question. The unanswered half is
-"who *did* what", the reliability gap is that one flaky task still costs a whole
-run, and the authoring gap is that a real tenant rollout produces a config file
-nobody wants to edit.
+The config-size problem is solved (`include:`, shipped in 0.3.0) and outbound
+alerting is in (Teams, 0.3.0–0.3.1). What remains is the audit trail — "who
+*did* what" — and the reliability gap where one flaky task still costs a whole
+run.
 
-### 0.3.0 Split `piply.yaml` across files — **shipped in 0.3.0**
+### Split `piply.yaml` across files — **shipped in 0.3.0**
 
 A production config has reached 974 lines: 29 deployments, 8 pipelines, and 4
 templates in one file. Adding a tenant means editing it, and two people touching
@@ -72,7 +80,7 @@ included files rather than one. Full design, including the rules table, is in
 Shipped as `include:`, with duplicate detection across files, both file
 names in every conflict error, and reload watching every included file.
 
-### 0.3.1 Audit log — **highest value**
+### 0.3.2 Audit log — **highest value**
 
 There is currently no record of who triggered, retried, cancelled, deleted, or
 reconfigured anything. For a tool sitting in front of healthcare or financial
@@ -94,7 +102,7 @@ existing prune settings.
 
 **Cost:** S · no new dependency · one table
 
-### 0.3.2 Task-level retry
+### 0.3.3 Task-level retry
 
 Pipeline-level `retry:` means one flaky vendor API forces a whole-run retry.
 Most real flakiness is one task.
@@ -112,7 +120,7 @@ Retries happen inside the task slot, so the DAG never sees the failure.
 
 **Cost:** S · no new dependency
 
-### 0.3.3 Session and token management
+### 0.3.4 Session and token management
 
 Follow-through on the auth work:
 
@@ -125,7 +133,7 @@ the permission model.
 
 **Cost:** M · no new dependency
 
-### 0.3.4 SLA tracking
+### 0.3.5 SLA tracking
 
 A pipeline that normally takes 10 minutes and is now at 55 is invisible until
 its hard timeout. `expected_duration: 15m` plus a warning state, reusing the
@@ -133,7 +141,7 @@ its hard timeout. `expected_duration: 15m` plus a warning state, reusing the
 
 **Cost:** S
 
-### 0.3.5 Polish
+### 0.3.6 Polish
 
 - **Dark mode.** The palette is already CSS variables; this is one media query
   and a toggle.
@@ -239,9 +247,9 @@ Recorded so it is not relitigated. Full reasoning in
 | --- | --- | --- |
 | Lightweight | Nothing pressing — 8 runtime dependencies | Hold the line: new backends stay extras |
 | Fast | Log table growth on long-lived installs | 0.4.3 log persistence, existing prune |
-| Secure | No audit trail; global API token | 0.3.1 audit log, 0.3.3 token management |
+| Secure | No audit trail; global API token | 0.3.2 audit log, 0.3.4 token management |
 | Easy to use | UI cannot supply run parameters | 0.5 declared `params:` |
 
-If only one thing gets built next, make it **0.3.1 audit logging**. It is small,
+If only one thing gets built next, make it **0.3.2 audit logging**. It is small,
 needs no new dependency, and it is the question every reviewer asks first once
 more than one person can press Run.

@@ -9,6 +9,56 @@ rather than buried in the feature list.
 
 ---
 
+## 0.3.1 — 2026-09-05
+
+Follow-on release to 0.3.0. Every 0.3.0 config keeps working untouched.
+
+### Added
+
+- **An Alerts panel under Settings**, admin-only. Shows every declared
+  destination, whether its webhook resolved, which pipelines use it — resolved
+  through groups — and a log of recent delivery attempts with the reason for
+  each failure. **Send test** posts a card immediately so a webhook can be
+  checked without waiting for a run. Every attempt is recorded, including the
+  case that used to be completely silent: a pipeline with only `on_failure`
+  that succeeds now records `nothing configured` rather than nothing at all,
+  because silence was indistinguishable from a delivery that failed.
+
+- **Sensor-triggered runs receive what changed.** A file sensor now hands its
+  tasks `{sensor_file}`, `{sensor_file_name}`, `{sensor_files}`, and
+  `{sensor_file_count}`; SQL and API sensors pass their table, cursors, and row
+  count. Python tasks get the whole event as `context["sensor"]`. Previously the
+  filenames were logged but unreachable, so every task had to re-scan the
+  directory and guess which file it had been woken for.
+
+- **`entities:` on a task accepts a list of dimension names**, selecting which
+  of the pipeline's entities it expands over instead of repeating their values.
+  A per-practice `login` beside per-practice-per-report tasks is now
+  `entities: [practice]` on that one task, with every other task needing no
+  entity declaration at all.
+
+- **The task graph uses the full page width**, with the task panel opening when
+  a node is clicked rather than permanently occupying a third of the screen.
+
+### Fixed
+
+- **A task can expand over fewer entity dimensions than its dependents.**
+  Declaring `practice` on the pipeline and `report` on one task gives a
+  per-practice `login` feeding per-practice-per-report `extract` tasks, with
+  each extract waiting only for *its own* practice's login. Previously every
+  extract depended on every login, so one practice failing stalled all of them.
+  Dependencies now match on entity values, and fall back to fanning in when the
+  match is ambiguous.
+
+- **`piply validate` warns when a project-level entity expands a pipeline that
+  never uses it.** A top-level `entities:` block applies to every pipeline, so a
+  nightly cleanup job beside one entity-driven pipeline quietly ran three times
+  and a summary email was sent three times — identical tasks, nothing failing,
+  nobody noticing. The docs now recommend scoping entities to the pipeline or
+  template that uses them.
+
+---
+
 ## 0.3.0 — 2026-08-26
 
 A hardening and operability release. Every existing `piply.yaml` keeps working
@@ -103,27 +153,6 @@ Read this section before upgrading a multi-user install.
 
 ### Added
 
-- **`piply validate` warns when a project-level entity expands a pipeline that
-  never uses it.** A top-level `entities:` block applies to every pipeline, so a
-  nightly cleanup job beside one entity-driven pipeline quietly ran three times
-  and a summary email was sent three times — identical tasks, nothing failing,
-  nobody noticing. The docs now recommend scoping entities to the pipeline or
-  template that uses them.
-
-- **`entities:` on a task accepts a list of dimension names**, selecting which
-  of the pipeline's entities it expands over instead of repeating their values.
-  A per-practice `login` beside per-practice-per-report tasks is now
-  `entities: [practice]` on that one task, with every other task needing no
-  entity declaration at all.
-
-- **A task can expand over fewer entity dimensions than its dependents.**
-  Declaring `practice` at project level and `report` on one task gives a
-  per-practice `login` feeding per-practice-per-report `extract` tasks, with
-  each extract waiting only for *its own* practice's login. Previously every
-  extract depended on every login, so one practice failing stalled all of them.
-  Dependencies now match on entity values, and fall back to fanning in when the
-  match is ambiguous.
-
 - **`include:` splits `piply.yaml` across files.** A production config had
   reached 974 lines, so adding a tenant meant editing one enormous file and two
   people touching unrelated tenants conflicted in git for no reason. The root
@@ -135,22 +164,6 @@ Read this section before upgrading a multi-user install.
   Different *blocks* of one pipeline may come from different files, so sensors
   can live in `piply_sensor.yaml` while the tasks stay in `piply_pipe.yaml`;
   the same block in two files is still an error.
-- **An Alerts panel under Settings**, admin-only. Shows every declared
-  destination, whether its webhook resolved, which pipelines use it — resolved
-  through groups — and a log of recent delivery attempts with the reason for
-  each failure. **Send test** posts a card immediately so a webhook can be
-  checked without waiting for a run. Every attempt is recorded, including the
-  case that used to be completely silent: a pipeline with only `on_failure`
-  that succeeds now records `nothing configured` rather than nothing at all,
-  because silence was indistinguishable from a delivery that failed.
-- **Sensor-triggered runs receive what changed.** A file sensor now hands its
-  tasks `{sensor_file}`, `{sensor_file_name}`, `{sensor_files}`, and
-  `{sensor_file_count}`; SQL and API sensors pass their table, cursors, and row
-  count. Python tasks get the whole event as `context["sensor"]`. Previously the
-  filenames were logged but unreachable, so every task had to re-scan the
-  directory and guess which file it had been woken for.
-- **The task graph uses the full page width**, with the task panel opening when
-  a node is clicked rather than permanently occupying a third of the screen.
 - **Microsoft Teams notifications.** Declare reusable destinations — channels
   and group chats — plus named groups, then reference them per pipeline under
   `on_failure` / `on_success`. Destinations are posted concurrently, each with
