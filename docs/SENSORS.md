@@ -35,6 +35,39 @@ This is what makes a sensor fire on *change* rather than on every poll. It also
 means state survives restarts: a file that arrived while Piply was down is still
 new when it comes back.
 
+### Sensors can live in their own file
+
+Sensors are declared inside the pipeline they trigger, but that block can live
+in a different file from the tasks:
+
+```yaml
+# piply.yaml
+include: [piply_pipe.yaml, piply_sensor.yaml]
+```
+
+```yaml
+# piply_pipe.yaml — what runs
+pipelines:
+  ingest_files:
+    tasks:
+      load: {type: cli, command: python load.py}
+```
+
+```yaml
+# piply_sensor.yaml — what triggers it
+pipelines:
+  ingest_files:
+    sensors:
+      inbox:
+        type: file_sensor
+        path: /mnt/237share/inbound
+        pattern: "*.csv"
+```
+
+Different *blocks* of one pipeline may come from different files. The same block
+in two files — two `tasks:` for one pipeline — is still an error naming both
+files. See [YAML §3](YAML_SPECIFICATION.md#include).
+
 ### Sensors do not fire on what already exists
 
 `ignore_existing` defaults to `true`. On the very first poll the sensor records
@@ -110,6 +143,72 @@ place does not re-fire — only a path that was not there before counts as new.
 > path first — a directory that does not exist is reported as a sensor failure
 > on the Diagnostics page.
 
+### Watching a network share (CIFS/SMB, NFS)
+
+Piply has no share-mounting feature and does not need one. Mount the share at
+the **operating system** level and give the sensor the ordinary local path —
+verified working with an absolute path, for both the sensor and `{variable}`
+interpolation in tasks.
+
+Mount it persistently, not with a one-off `sudo mount`. A manual mount does not
+survive a reboot, and Piply will start before you notice:
+
+```
+# /etc/fstab
+//10.15.51.237/Ddump$  /mnt/237share  cifs  credentials=/etc/piply/smb.cred,uid=piply,gid=piply,file_mode=0640,dir_mode=0750,iocharset=utf8,vers=3.0,_netdev,nofail  0  0
+```
+
+```
+# /etc/piply/smb.cred  — chmod 600, owned by root
+username=svc_piply
+password=...
+domain=YOURDOMAIN
+```
+
+Then use it like any other directory:
+
+```yaml
+variables:
+  share: /mnt/237share
+
+pipelines:
+  vendor_ingest:
+    sensors:
+      drop:
+        type: file_sensor
+        path: /mnt/237share/inbound      # absolute paths are used as-is
+        pattern: "*.csv"
+    tasks:
+      archive:
+        type: cli
+        command: cp {share}/inbound/*.csv {share}/archive/
+```
+
+Points that actually bite:
+
+- **`uid=`/`gid=` matter.** CIFS does not map users; every file appears owned by
+  whoever you specify. Set it to the account Piply runs as, or the sensor sees
+  the directory and the task cannot read the files.
+- **`nofail` and `_netdev`.** Without them a share that is down at boot can stop
+  the machine from finishing startup.
+- **A dropped mount is reported, not silent.** If the share disappears the
+  sensor turns `failing` with `Watched path does not exist: /mnt/237share/...`,
+  shown on the Diagnostics page and sorted to the top of the sensor list. It
+  does not stop other sensors.
+- **An empty mount point looks like an empty directory.** If the mount silently
+  fails, `/mnt/237share` still exists — it is just empty — so the sensor reports
+  healthy and never fires. Watch a subdirectory that only exists when mounted
+  (`/mnt/237share/inbound`), so a failed mount shows up as a failing sensor
+  rather than as silence.
+- **Writes are the share's business.** A task writing to `/mnt/237share` needs
+  write permission on the export *and* in `file_mode`/`dir_mode`.
+- **Latency.** Every poll lists the directory over the network. On a large or
+  slow share, widen the poll interval rather than watching a directory with tens
+  of thousands of files.
+
+If you cannot mount the share — no root, or a container without
+`CAP_SYS_ADMIN` — use the SFTP form below instead.
+
 ### Watching a remote directory over SFTP
 
 Give `path` an `sftp://` URI and the sensor lists the remote directory over SSH
@@ -179,6 +278,13 @@ database: local/app.db                    # a SQLite file, workspace-relative
 Prefer `@name` or `connection_env`. An inline DSN with a password ends up in the
 config file, and while the value is masked everywhere Piply displays it, it is
 still in git.
+
+> **`@name` must resolve to a connection string, not a file path.** A common
+> slip is `connections: {app_db: local/app.db}` with `connection: "@app_db"`.
+> That is a path, so it has no scheme and the sensor fails with a message
+> telling you to use `database:` or a `sqlite:///` DSN. For a SQLite file use
+> `database: local/app.db`, or write the connection as
+> `sqlite:///local/app.db`.
 
 ### What the query actually does
 
@@ -370,6 +476,8 @@ print(service.drain_trigger_queue()) # run ids dispatched
 ---
 
 ## Related
+
+- [Notifications](NOTIFICATIONS.md) — being told when a sensor-triggered run fails
 
 - [YAML Specification](YAML_SPECIFICATION.md) — every sensor key in the reference table
 - [Execution Examples](EXAMPLES.md) — runnable sensor projects

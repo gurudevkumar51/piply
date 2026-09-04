@@ -47,6 +47,7 @@ from .models import (
     RunRecord,
     TaskDefinition,
 )
+from .notifications import NotificationError, build_alert, send_alert
 from .preview import PipelinePreview, build_pipeline_preview, unresolved_placeholders
 from .processes import is_process_alive
 from .retry import build_retry_plan
@@ -181,7 +182,7 @@ class PipelineService:
     def reload_project(self, *, force: bool = False) -> ProjectDefinition:
         """Reload the config when it changes on disk."""
         with self._lock:
-            current_mtime = self.config_path.stat().st_mtime
+            current_mtime = self._config_fingerprint()
             if not force and self._project is not None and self._config_mtime == current_mtime:
                 return self._project
 
@@ -189,8 +190,29 @@ class PipelineService:
                 self.config_path,
                 default_max_parallel_tasks=self.settings.default_max_parallel_tasks,
             )
-            self._config_mtime = current_mtime
+            # Recomputed now that the project knows every file it was built from,
+            # so the next call compares like with like instead of reloading once more.
+            self._config_mtime = self._config_fingerprint()
             return self._project
+
+    def _config_fingerprint(self) -> float:
+        """Return a value that changes when any config file changes.
+
+        With `include:` the project spans several files, so watching only the
+        root one would mean edits to an included file never took effect.
+        """
+        total = self.config_path.stat().st_mtime
+        project = self._project
+        if project is not None:
+            for source in project.config_sources:
+                if source == self.config_path:
+                    continue
+                try:
+                    total += source.stat().st_mtime
+                except OSError:
+                    # A removed include shows up as a change, then as a load error.
+                    total += 1
+        return total
 
     def validate(self) -> ProjectDefinition:
         """Validate and return the current project config."""
@@ -1531,6 +1553,63 @@ class PipelineService:
         return queued
 
     def notify_run_outcome(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Tell everyone configured about a finished run.
+
+        Email and Teams are independent: one failing never stops the other, and
+        neither changes the run's status. A pipeline lists *who* to tell; how to
+        reach them lives in central settings or the `notifications:` block.
+        """
+        self._send_teams_alert(pipeline, run)
+        self._send_email_notification(pipeline, run)
+
+    def _send_teams_alert(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Post the standard alert card to this pipeline's Teams destinations."""
+        names = pipeline.alert_on_success if run.status == "success" else pipeline.alert_on_failure
+        if not names:
+            return
+
+        settings = getattr(self.project, "notifications", None)
+        if settings is None or not settings.configured:
+            self.store.append_log(
+                run.run_id,
+                "Teams notification skipped: no 'notifications:' destinations are declared.",
+                stream="stderr",
+            )
+            return
+
+        try:
+            destinations = settings.resolve(names)
+        except NotificationError as exc:
+            # A typo in a destination name is reported against the run rather
+            # than blocking the whole project from loading.
+            self.store.append_log(run.run_id, f"Teams notification failed: {exc}", stream="stderr")
+            return
+
+        def _log(message: str, is_error: bool) -> None:
+            self.store.append_log(run.run_id, message, stream="stderr" if is_error else "stdout")
+
+        send_alert(
+            destinations,
+            build_alert(
+                title=pipeline.title,
+                pipeline_id=pipeline.pipeline_id,
+                status=run.status,
+                run_id=run.run_id,
+                trigger=run.trigger,
+                tasks=f"{run.successful_tasks}/{run.task_count} succeeded",
+                duration="unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s",
+                error=run.error,
+                run_url=self._run_url(run.run_id),
+            ),
+            on_log=_log,
+        )
+
+    def _run_url(self, run_id: str) -> str | None:
+        """Return a link back to the run, when a public base URL is configured."""
+        base = (os.environ.get("PIPLY_BASE_URL") or "").strip().rstrip("/")
+        return f"{base}/runs/{run_id}" if base else None
+
+    def _send_email_notification(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Email the configured recipients about a finished run.
 
         Delivery uses the central SMTP settings, so a pipeline only lists who to

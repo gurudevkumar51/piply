@@ -239,6 +239,10 @@ class PipelineDefinition:
     #: settings so no pipeline needs its own server configuration.
     notify_on_failure: tuple[str, ...] = ()
     notify_on_success: tuple[str, ...] = ()
+    #: Names of `notifications:` destinations or groups, resolved at send time
+    #: so a typo is reported against the run rather than blocking the load.
+    alert_on_failure: tuple[str, ...] = ()
+    alert_on_success: tuple[str, ...] = ()
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     sensors: dict[str, SensorDefinition] = field(default_factory=dict)
 
@@ -310,6 +314,12 @@ class ProjectDefinition:
     default_python: str
     timezone_name: str
     pipelines: dict[str, PipelineDefinition]
+    #: Every file that fed this project: the root config plus anything it
+    #: included. Reload watches all of them, or editing an included file would
+    #: appear to do nothing until the root file happened to change.
+    config_sources: tuple[Path, ...] = ()
+    #: Declared Teams destinations and groups, shared by every pipeline.
+    notifications: Any = None
     #: Non-fatal problems found while loading, surfaced by `validate` and `plan`.
     #: A warning never blocks a run; it exists so a silent misconfiguration is
     #: visible before it produces a confusing failure at 3am.

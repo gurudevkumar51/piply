@@ -231,6 +231,18 @@ pruned is shown dashed and greyed rather than being silently dropped.
 
 ## Run detail
 
+While a run is `queued` or `running` the page refreshes itself every three
+seconds, so logs appear as the task produces them — including `type: python`
+tasks that call a `function:`. A long task shows progress rather than going
+silent until it finishes. `piply logs --follow` tails the same output from a
+terminal.
+
+Both `print()` and the `logging` module are captured, including tracebacks from
+`log.exception()`. Log records are recorded with their level, so a run log shows
+`INFO Extracted 1200 rows` rather than a bare message. Task output goes to the
+run log rather than the server console, which is how `type: cli` tasks have
+always behaved.
+
 **Header** — status, pipeline link, duration, task counts, exit code, retry
 lineage, and the upstream run when this run was triggered by another pipeline.
 
@@ -369,7 +381,8 @@ effect. See [Metadata Store](DATABASE.md#52-changing-the-database-later).
 ### Email and accounts
 
 SMTP settings and account administration are also admin-only. Non-admins see the
-runtime configuration alone.
+runtime configuration alone. Teams destinations are declared in YAML rather than
+here — see [Notifications](NOTIFICATIONS.md).
 
 ---
 

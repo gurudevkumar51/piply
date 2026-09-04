@@ -77,7 +77,7 @@ empty. See [Metadata Store §5](DATABASE.md#5-first-run-setup).
 ### A user I just created cannot sign in.
 
 Check the account actually exists — `piply users list`. The usual cause was a
-bug fixed in 0.2.3: creating the **first** account switches authentication on,
+bug fixed in 0.3.0: creating the **first** account switches authentication on,
 which used to lock out the page that created it, so the *next* account was
 silently never created. If you are on an older version, sign in first, then
 create the rest.
@@ -144,14 +144,24 @@ good config in place rather than taking the server down.
 
 ### Can I split the config across multiple files?
 
-Not yet — one config file per project today. An `include:` list is planned for
-0.3; see [Roadmap §0.3.0](ROADMAP.md#030-split-piplyyaml-across-files--requested).
+Yes, with `include:` in the root file:
 
-Until then, [templates and deployments](#7-templates-and-deployments) remove most
-of the repetition that makes a config long. A file that is long because it has 29
-deployments of 4 templates is already as compressed as the current format allows;
-a file that is long because 8 tenants each spell out the same 12 tasks is not, and
-templates will shrink it dramatically.
+```yaml
+include:
+  - piply_pipe.yaml
+  - piply_alert.yaml
+  - config/templates/*.yaml
+```
+
+Defining the same pipeline in two files is an error naming both files, never
+last-wins. Every included file is watched, so editing one takes effect without a
+restart. See [YAML §3](YAML_SPECIFICATION.md#include).
+
+Splitting is orthogonal to size: [templates and
+deployments](#7-templates-and-deployments) remove the *repetition* that makes a
+config long. A file that is long because 8 tenants each spell out the same 12
+tasks wants templates; a file that is long because it has 29 legitimate
+deployments wants `include:`. Most real projects want both.
 
 ### How do I check my config without running anything?
 
@@ -947,6 +957,86 @@ tasks:
 
 The files stay where they are. Downloads are restricted to paths that run
 actually recorded *and* that resolve inside an allowed root.
+
+### Can two runs of the same pipeline overlap?
+
+Yes. Nothing serialises a pipeline against itself. `type: cli` and
+`type: python` with only a `path:` run in separate OS processes, so they are
+fully isolated. `type: python` with a `function:` runs in the same process on a
+different thread — its own module is re-executed per run, but **anything it
+imports is shared**, so a singleton in a helper module will be overwritten by
+whichever run touched it last. Full detail in
+[Lifecycles §6](LIFECYCLES.md#6-concurrency-and-isolation).
+
+### I use Playwright/Selenium. Will two runs share a browser session?
+
+Only if you store it in an imported module. Playwright's sync API is not
+thread-safe, so use `type: cli` or `type: python` with just a `path:` — both
+give each run its own process and its own browser. If you must use `function:`,
+create the browser inside the function rather than at module scope.
+
+### How do I split `piply.yaml` into several files?
+
+Add `include:` to the root file:
+
+```yaml
+include:
+  - piply_pipe.yaml
+  - piply_alert.yaml
+  - config/templates/*.yaml
+```
+
+Defining the same pipeline in two files is an error naming both, never
+last-wins. See [YAML §3](YAML_SPECIFICATION.md#include).
+
+### How do I watch a Windows/CIFS network share?
+
+Mount it at the OS level, then use the ordinary path. Put it in `/etc/fstab`
+with `credentials=`, `uid=` set to the account Piply runs as, and `nofail`
+— then `path: /mnt/237share/inbound`. Watch a *subdirectory* that only exists
+when the share is mounted, so a silently failed mount shows up as a failing
+sensor instead of an empty directory that never fires. Full detail in
+[Sensors §2](SENSORS.md#watching-a-network-share-cifssmb-nfs).
+
+### Can sensors live in their own file?
+
+Yes. A pipeline's blocks may come from different files, so `piply_sensor.yaml`
+can hold `pipelines.<id>.sensors` while `piply_pipe.yaml` holds
+`pipelines.<id>.tasks`. Two files defining the *same* block is still an error.
+
+### My `sql_sensor` never fires and shows a connection error.
+
+Check whether `@name` points at a file path rather than a connection string.
+`connections: {app_db: local/app.db}` is a path — use `database: local/app.db`,
+or write it as `sqlite:///local/app.db`.
+
+### How do I send failures to Microsoft Teams?
+
+Declare destinations once, reference them per pipeline:
+
+```yaml
+notifications:
+  teams:
+    production_alerts: {type: channel, webhook: ${TEAMS_PROD_WEBHOOK}}
+
+pipelines:
+  claim_pipeline:
+    notifications:
+      on_failure: [production_alerts]
+```
+
+Set `TEAMS_PROD_WEBHOOK` in the environment or a secrets file — never write the
+URL into YAML, because the URL is the credential. Full guide, including how to
+get a webhook URL for a channel or a group chat, in
+[Notifications](NOTIFICATIONS.md).
+
+### A Teams alert did not arrive. Where do I look?
+
+The run log. Delivery never changes a run's status, so every outcome is recorded
+there instead: `HTTP 500`, `timed out after 10s`, `Unknown notification
+destination 'x'`, or `its webhook is not configured` when `${VAR}` never
+resolved. That last one is also a warning from `piply validate`. The full table
+of failure modes is in [Notifications §6](NOTIFICATIONS.md#6-when-delivery-fails).
 
 ### Can I inspect the database directly?
 

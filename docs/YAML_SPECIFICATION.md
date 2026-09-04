@@ -103,6 +103,90 @@ a condition can only see variables declared above it.
 
 ## 3. Top-Level Keys
 
+### `include`
+
+Splits the config across several files. Only the **root** file may use it.
+
+```yaml
+# piply.yaml — project settings and the deployment inventory stay here
+version: "1"
+title: Claims Platform
+workspace: .
+include:
+  - piply_pipe.yaml
+  - piply_alert.yaml
+  - config/templates/*.yaml       # globs are resolved next to piply.yaml
+```
+
+Purely additive: a config with no `include:` behaves exactly as it always has.
+
+**Merging rules**
+
+| Situation | Result |
+| --- | --- |
+| `pipelines:` in two files | Merged — that is the point |
+| Different *blocks* of one pipeline (tasks here, sensors there) | Merged |
+| The *same block* of one pipeline in two files | **Error**, naming both files |
+| Any top-level key in two files | **Error**, naming both files |
+| A pattern matching no files | **Error** — a silent no-match looks like the pipelines vanished |
+| `include:` inside an included file | **Error** — one level keeps merge order obvious |
+
+There is deliberately no last-wins. Silently preferring one file would mean
+editing a pipeline and watching nothing change.
+
+Blocks whose *members* may be spread across files: `pipelines`, `jobs`,
+`pipeline_templates`, `pipeline_deployments`, `notifications`, `connections`,
+`entities`, `variables`, `defaults`, `secrets`. Anywhere else, the same key in
+two files is a conflict.
+
+Every included file is watched for changes, so editing one takes effect without
+a restart, exactly as editing `piply.yaml` does.
+
+**A suggested layout**
+
+```
+piply.yaml          project settings + all deployments   (stable)
+piply_pipe.yaml     pipeline definitions                 (changes often)
+piply_sensor.yaml   sensors that trigger them            (occasionally)
+piply_alert.yaml    notification destinations            (rarely)
+```
+
+A pipeline's blocks may come from different files, so `piply_sensor.yaml` can
+attach sensors to a pipeline whose tasks live in `piply_pipe.yaml`:
+
+```yaml
+# piply_pipe.yaml
+pipelines:
+  ingest_files:
+    tasks:
+      load: {type: cli, command: python load.py}
+```
+```yaml
+# piply_sensor.yaml
+pipelines:
+  ingest_files:
+    sensors:
+      inbox: {type: file_sensor, path: /mnt/237share/inbound, pattern: "*.csv"}
+```
+
+Edit history decided that split: across 35 commits, `pipelines` was touched
+alone 12 times and deployments only 4. The churn belongs in its own file; the
+stable inventory belongs in the master.
+
+### `notifications`
+
+Declares reusable destinations. See section 13 for the full reference.
+
+```yaml
+notifications:
+  teams:
+    production_alerts:
+      type: channel               # channel | chat
+      webhook: ${TEAMS_PROD_WEBHOOK}
+  groups:
+    critical: [production_alerts]
+```
+
 ### `defaults`
 
 ```yaml
@@ -208,6 +292,10 @@ pipelines:
 
     schedule:                            # see section 5
       every: 15m
+
+    notifications:                       # Teams alerts, see section 13
+      on_failure: [production_alerts]
+      on_success: [data_engineering]
 
     variables:                           # merged over project variables
       batch_id: nightly
@@ -492,6 +580,9 @@ notify:
 
 A delivery failure is written to the run log and never changes the run's status.
 If no SMTP server is configured, the run log says so and the run still succeeds.
+
+See [Notifications](NOTIFICATIONS.md) for the Teams channel and for what
+happens when delivery fails.
 
 Configure the server once under **Settings → Email (SMTP)**, or with
 environment variables:
@@ -810,6 +901,7 @@ the config.
 | `PIPLY_ADMIN_USERNAME` | `admin` | bootstrapped admin username |
 | `PIPLY_ADMIN_PASSWORD` | generated | bootstrapped admin password |
 | `PIPLY_SESSION_SECRET` | generated | session cookie signing key |
+| `PIPLY_BASE_URL` | unset | public URL, used to link Teams alerts back to the run page |
 | `PIPLY_AUTH_ENABLED` | `false` | require authentication |
 | `PIPLY_AUTH_USERNAME` / `PIPLY_AUTH_PASSWORD` | unset | UI basic auth |
 | `PIPLY_API_TOKEN` | unset | API and `/metrics` bearer token |
@@ -1154,7 +1246,68 @@ sensors:
 
 ---
 
-## 13. Status Values
+## 13. Notifications
+
+Two independent channels. **Email** uses `notify:` with the central SMTP
+settings; **Microsoft Teams** uses `notifications:` with webhooks. Neither can
+change a run's status.
+
+Full guide, including how to get a webhook URL and what happens when delivery
+fails: **[Notifications](NOTIFICATIONS.md)**.
+
+### `notifications` (project level)
+
+```yaml
+notifications:
+  teams:
+    production_alerts:
+      type: channel                     # channel | chat, default channel
+      webhook: ${TEAMS_PROD_WEBHOOK}    # required, must resolve to https://
+      timeout_seconds: 10               # optional, default 10, must be > 0
+  groups:
+    critical: [production_alerts]       # reusable bundles of destinations
+```
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `teams.<name>.type` | `channel` | `channel` or `chat` |
+| `teams.<name>.webhook` | *required* | Incoming webhook URL |
+| `teams.<name>.timeout_seconds` | `10` | Per-request timeout |
+| `groups.<name>` | — | List of destination names |
+
+An unresolved `${VAR}` is a **warning**, not an error, and the destination is
+skipped at send time. A webhook URL is a credential — keep it in the
+environment or a `secrets:` file, never in YAML.
+
+### `notifications` (pipeline level)
+
+```yaml
+pipelines:
+  claim_pipeline:
+    notifications:
+      on_failure: [production_alerts, data_engineering]
+      on_success: [data_engineering]
+```
+
+A bare list means **on failure**: `notifications: [critical]`. Group names work
+anywhere a destination name does, and a destination named twice is notified
+once.
+
+### `notify` (pipeline level, email)
+
+```yaml
+notify: [oncall@example.com]            # bare list means on failure
+
+notify:
+  on_failure: [oncall@example.com]
+  on_success: [team@example.com]
+```
+
+Delivery uses the central SMTP settings, so a pipeline only lists *who* to tell.
+
+---
+
+## 14. Status Values
 
 | Run status | Meaning |
 | --- | --- |

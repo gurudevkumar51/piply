@@ -9,7 +9,7 @@ rather than buried in the feature list.
 
 ---
 
-## 0.2.3 — 2026-08-26
+## 0.3.0 — 2026-08-26
 
 A hardening and operability release. Every existing `piply.yaml` keeps working
 untouched.
@@ -21,6 +21,26 @@ untouched.
   every following request returned 401, so the *next* account was silently never
   created. The person then could not sign in as an account that did not exist.
   The session that creates the first admin is now signed in as it.
+- **`logging` output never reached the run log.** Only `print()` was captured
+  from a `type: python` task using `function:`. A `StreamHandler` binds
+  `sys.stderr` when it is *constructed*, so a module calling
+  `logging.basicConfig()` at import time — how most production code is written —
+  wrote straight past the capture. Every `log.info(...)` from an extraction was
+  missing from the run page and went to the server console instead. Existing
+  handlers are now pointed at the capture for the duration of the task and
+  handed back exactly as they were found, so `logging`, `log.exception()`
+  tracebacks, `print()`, and direct `sys.stderr` writes all land in the run log,
+  each line separately and with its level.
+
+- **Python callables showed no output until they finished.** A `type: python`
+  task using `function:` buffered everything it printed and flushed it only when
+  the callable returned, so a long extraction was indistinguishable from a hung
+  one — nothing to watch, no way to tell progress from a stall. Output now
+  streams line by line, as `type: cli` and script tasks always have, so the run
+  page (which polls every 3s) and `piply logs --follow` tail it live. stdout and
+  stderr are now interleaved in the order the task produced them, rather than
+  stdout-then-stderr at the end.
+
 - **Parallel Python tasks logged against the wrong task.** Output capture swapped
   the process-global `sys.stdout`, so with `max_parallel_tasks` above one the
   tasks' enter/exit order interleaved. In a two-task reproduction, 29 of the
@@ -31,6 +51,12 @@ untouched.
   finished, so **everything the server printed afterwards disappeared** —
   uvicorn's access log included. A task that runs past its timeout no longer
   holds the streams either.
+
+- **A `sql_sensor` given a file path where a DSN belongs said only
+  `Unsupported sql_sensor connection scheme '<none>'`.** It now names the value
+  and says to use `database:` or a `sqlite:///` DSN. The sensor already showed
+  as `failing` on Diagnostics with the error attached; only the wording was
+  unhelpful.
 
 - **Downstream pipelines reported `pending` when they were never going to run.**
   The run page now names the real state — `paused`, `disabled`, `queued`,
@@ -77,6 +103,25 @@ Read this section before upgrading a multi-user install.
 
 ### Added
 
+- **`include:` splits `piply.yaml` across files.** A production config had
+  reached 974 lines, so adding a tenant meant editing one enormous file and two
+  people touching unrelated tenants conflicted in git for no reason. The root
+  file can now pull in others by path or glob — the suggested split keeps
+  project settings and deployments in the master, with pipelines and alerts in
+  their own files. A repeated pipeline id is an **error naming both files**,
+  never last-wins, and every included file is watched so edits take effect
+  without a restart. Purely additive: a config with no `include:` is unchanged.
+  Different *blocks* of one pipeline may come from different files, so sensors
+  can live in `piply_sensor.yaml` while the tasks stay in `piply_pipe.yaml`;
+  the same block in two files is still an error.
+- **Microsoft Teams notifications.** Declare reusable destinations — channels
+  and group chats — plus named groups, then reference them per pipeline under
+  `on_failure` / `on_success`. Destinations are posted concurrently, each with
+  its own timeout. Webhook URLs come from the environment or a secrets file and
+  are never written to a log or an API response, because a Teams webhook URL is
+  itself the credential. Delivery lives outside pipeline execution, so a failed
+  or timed-out notification is recorded against the run and never changes its
+  status.
 - **First-run database setup.** A brand-new install opens a setup page instead
   of the dashboard and asks where Piply should keep its own data — a SQLite file
   or PostgreSQL. The choice is validated by opening the database before anything
@@ -137,8 +182,13 @@ Read this section before upgrading a multi-user install.
 ### Documentation
 
 New: [FAQ](docs/FAQ.md) with an error-message index,
-[Security](docs/SECURITY.md), [Metadata Store](docs/DATABASE.md) with a
-table-by-table schema reference, and [Roadmap](docs/ROADMAP.md).
+[Notifications](docs/NOTIFICATIONS.md), [Security](docs/SECURITY.md),
+[Metadata Store](docs/DATABASE.md) with a table-by-table schema reference, and
+[Roadmap](docs/ROADMAP.md).
+
+The notifications guide covers Teams and email together. They were previously
+documented in separate places, so "how do I get alerted when this fails" had no
+single answer.
 
 Two long-standing behaviours are now written down explicitly, because both cost
 real debugging time: `env_file` paths resolve against `workspace:` rather than

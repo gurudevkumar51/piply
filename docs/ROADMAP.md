@@ -42,7 +42,7 @@ The security audit closed the "who can do what" question. The unanswered half is
 run, and the authoring gap is that a real tenant rollout produces a config file
 nobody wants to edit.
 
-### 0.3.0 Split `piply.yaml` across files — **requested**
+### 0.3.0 Split `piply.yaml` across files — **shipped in 0.3.0**
 
 A production config has reached 974 lines: 29 deployments, 8 pipelines, and 4
 templates in one file. Adding a tenant means editing it, and two people touching
@@ -69,7 +69,8 @@ last-wins), file provenance in every error message, and reload watching all
 included files rather than one. Full design, including the rules table, is in
 [Future Features §1.7](FUTURE_FEATURES.md#17-splitting-piplyyaml-across-files).
 
-**Cost:** M · no new dependency
+Shipped as `include:`, with duplicate detection across files, both file
+names in every conflict error, and reload watching every included file.
 
 ### 0.3.1 Audit log — **highest value**
 

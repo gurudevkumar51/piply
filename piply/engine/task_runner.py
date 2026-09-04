@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
-import io
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -72,6 +72,54 @@ class _ThreadRoutedStream:
         return getattr(self._real_stream, name)
 
 
+#: Stream handlers retargeted at the proxy, and the stream each one had before.
+_retargeted_handlers: list[tuple[logging.StreamHandler, object]] = []
+
+
+def _existing_stream_handlers():
+    """Yield every `StreamHandler` currently attached anywhere."""
+    loggers = [logging.getLogger()]
+    loggers.extend(
+        item
+        for item in logging.Logger.manager.loggerDict.values()
+        if isinstance(item, logging.Logger)
+    )
+    for logger in loggers:
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.StreamHandler):
+                yield handler
+
+
+def _retarget_log_handlers(replaced: tuple[object, object], proxies: tuple[object, object]) -> None:
+    """Point existing log handlers at the proxy for the duration of a task.
+
+    Redirecting `sys.stdout` alone is not enough for real code. A
+    `StreamHandler` resolves `sys.stderr` when it is **constructed** and keeps a
+    direct reference, so a module that calls `logging.basicConfig()` at import
+    time — which is how most production code is written — writes straight past
+    the proxy and its output never reaches the run log.
+
+    Handlers created *after* this point need no help: they resolve `sys.stderr`
+    while the proxy is installed. Nothing is added to the root logger, because a
+    root handler would make a later `logging.basicConfig()` silently do nothing.
+    """
+    old_stdout, old_stderr = replaced
+    new_stdout, new_stderr = proxies
+    for handler in _existing_stream_handlers():
+        stream = getattr(handler, "stream", None)
+        if stream is old_stderr:
+            _retargeted_handlers.append((handler, handler.setStream(new_stderr)))
+        elif stream is old_stdout:
+            _retargeted_handlers.append((handler, handler.setStream(new_stdout)))
+
+
+def _restore_log_handlers() -> None:
+    """Give every retargeted handler its original stream back."""
+    while _retargeted_handlers:
+        handler, original = _retargeted_handlers.pop()
+        handler.setStream(original)
+
+
 def _acquire_routing() -> None:
     """Install the routing proxy, if this is the first capture in flight."""
     global _capture_users, _captured_streams
@@ -82,8 +130,12 @@ def _acquire_routing() -> None:
             # instead would fight pytest and anything else that legitimately
             # wraps the stream.
             _captured_streams = (sys.stdout, sys.stderr)
-            sys.stdout = _ThreadRoutedStream("stdout", sys.stdout)
-            sys.stderr = _ThreadRoutedStream("stderr", sys.stderr)
+            proxies = (
+                _ThreadRoutedStream("stdout", sys.stdout),
+                _ThreadRoutedStream("stderr", sys.stderr),
+            )
+            _retarget_log_handlers(_captured_streams, proxies)
+            sys.stdout, sys.stderr = proxies
         _capture_users += 1
 
 
@@ -94,8 +146,63 @@ def _release_routing() -> None:
     with _capture_lock:
         _capture_users -= 1
         if _capture_users == 0 and _captured_streams is not None:
+            _restore_log_handlers()
             sys.stdout, sys.stderr = _captured_streams
             _captured_streams = None
+
+
+class _StreamingLogSink:
+    """Emits each complete line as the task prints it, rather than at the end.
+
+    A long extraction that buffered its output until the task finished looked
+    identical to one that had hung: nothing to watch, no way to tell progress
+    from a stall. Subprocess tasks have always streamed line by line; this gives
+    Python callables the same behaviour.
+    """
+
+    def __init__(self, on_line: Callable[[str], None]) -> None:
+        self._on_line = on_line
+        self._pending = ""
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        with self._lock:
+            if self._closed:
+                return len(text)
+            self._pending += text
+            lines = self._pending.split("\n")
+            self._pending = lines.pop()
+        for line in lines:
+            self._on_line(line.rstrip("\r"))
+        return len(text)
+
+    def writelines(self, lines) -> None:
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        """No-op: lines are emitted as they complete, not on flush."""
+
+    def writable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        """Emit any trailing line that never ended in a newline, and stop.
+
+        Closing matters for a timed-out task: the thread cannot be killed, so
+        without this it would keep writing log lines against a task that has
+        already been reported as finished.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            trailing, self._pending = self._pending, ""
+        if trailing:
+            self._on_line(trailing.rstrip("\r"))
 
 
 class _OutputCapture:
@@ -477,40 +584,34 @@ class TaskRunner:
         return box.get("value")
 
     def _run_python_call_task(self, task: TaskDefinition) -> TaskExecutionResult:
-        """Run one imported Python callable and capture its printed output."""
-        stdout_buffer = io.StringIO()
-        stderr_buffer = io.StringIO()
+        """Run one imported Python callable, streaming its printed output."""
+
+        def _emit(line: str) -> None:
+            self.emit(line, task_id=task.task_id)
+
+        # Both streams emit through the same sink, so stdout and stderr appear
+        # interleaved in the order the task actually produced them.
+        stdout_sink = _StreamingLogSink(_emit)
+        stderr_sink = _StreamingLogSink(_emit)
 
         try:
             callable_object = self._load_callable(task)
-            result = self._call_with_timeout(callable_object, task, stdout_buffer, stderr_buffer)
+            result = self._call_with_timeout(callable_object, task, stdout_sink, stderr_sink)
         except TimeoutError as exc:
-            for output in [stdout_buffer.getvalue().rstrip(), stderr_buffer.getvalue().rstrip()]:
-                for line in output.splitlines():
-                    self.emit(line, task_id=task.task_id)
+            stdout_sink.close()
+            stderr_sink.close()
             message = str(exc)
             self.emit(message, task_id=task.task_id)
             return TaskExecutionResult(status="timed_out", exit_code=None, error=message)
         except Exception as exc:
-            stdio_output = [
-                stdout_buffer.getvalue().rstrip(),
-                stderr_buffer.getvalue().rstrip(),
-            ]
-            for output in stdio_output:
-                if output:
-                    for line in output.splitlines():
-                        self.emit(line, task_id=task.task_id)
+            stdout_sink.close()
+            stderr_sink.close()
             message = str(exc) or exc.__class__.__name__
             self.emit(message, task_id=task.task_id)
             return TaskExecutionResult(status="failed", error=message)
 
-        for output in [
-            stdout_buffer.getvalue().rstrip(),
-            stderr_buffer.getvalue().rstrip(),
-        ]:
-            if output:
-                for line in output.splitlines():
-                    self.emit(line, task_id=task.task_id)
+        stdout_sink.close()
+        stderr_sink.close()
 
         if self.is_cancelled and self.is_cancelled():
             self.emit("Task cancelled.", task_id=task.task_id)
