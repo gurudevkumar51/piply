@@ -24,6 +24,7 @@ from piply.api.routes.setup import (
 from piply.api.schemas import (
     BackfillScheduleRequest,
     DatabaseSettingsRequest,
+    NotificationTestRequest,
     PreviewRequest,
     PruneRequest,
     RunResponse,
@@ -267,6 +268,31 @@ def test_smtp(request: Request, payload: SmtpTestRequest) -> dict[str, str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - surfaced to the admin as a message
         raise HTTPException(status_code=502, detail=f"SMTP test failed: {exc}") from exc
+
+
+_NOTIFICATIONS_ADMIN_ONLY = "Only administrators can view notification delivery."
+
+
+@router.get("/api/settings/notifications", response_model=dict[str, object])
+def get_notification_settings(request: Request) -> dict[str, object]:
+    """Describe declared destinations and recent delivery attempts.
+
+    Webhook URLs are never returned — the URL is the credential.
+    """
+    require_admin(request, _NOTIFICATIONS_ADMIN_ONLY)
+    return get_service(request).notification_overview()
+
+
+@router.post("/api/settings/notifications/test", response_model=dict[str, str])
+def test_notification(request: Request, payload: NotificationTestRequest) -> dict[str, str]:
+    """Post one test card, so a webhook can be checked without waiting for a run."""
+    require_admin(request, _NOTIFICATIONS_ADMIN_ONLY)
+    try:
+        return {"status": "sent", "detail": get_service(request).send_test_notification(payload.destination)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced to the admin as a message
+        raise HTTPException(status_code=502, detail=f"Test notification failed: {exc}") from exc
 
 
 @router.get("/api/settings/database", response_model=dict[str, object])

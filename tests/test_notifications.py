@@ -282,3 +282,37 @@ def test_a_long_error_is_truncated_rather_than_dropped() -> None:
     error_fact = [f for f in card["sections"][0]["facts"] if f["name"] == "Error"][0]
     assert len(error_fact["value"]) < 1000
     assert error_fact["value"].endswith("…")
+
+
+def test_delivery_attempts_are_recorded_for_the_ui(tmp_path: Path, sink) -> None:
+    """A run log line is not enough: the panel needs queryable outcomes."""
+    receiver, base_url = sink
+    config = _project(tmp_path, base_url)
+    service = PipelineService(config_path=config, database_path=tmp_path / "runs.db")
+
+    service.trigger_pipeline("bad_pipeline", wait=True)
+    overview = service.notification_overview()
+
+    outcomes = {(item["destination"], item["outcome"]) for item in overview["deliveries"]}
+    assert ("production_alerts", "sent") in outcomes
+    assert ("data_engineering", "sent") in outcomes
+    # Groups are expanded, or a destination reached only via a group would read
+    # as "not used by any pipeline" — the most misleading thing the panel could say.
+    assert "bad_pipeline (on_failure)" in overview["used_by"]["production_alerts"]
+
+
+def test_a_run_with_no_matching_destinations_is_still_recorded(tmp_path: Path, sink) -> None:
+    """Silence is the hardest failure to debug, so it gets an explicit row."""
+    receiver, base_url = sink
+    config = _project(tmp_path, base_url)
+    (tmp_path / "piply.yaml").write_text(
+        (tmp_path / "piply.yaml").read_text(encoding="utf-8").replace("      on_success: [data_engineering]\n", ""),
+        encoding="utf-8",
+    )
+    service = PipelineService(config_path=config, database_path=tmp_path / "runs.db")
+
+    service.trigger_pipeline("ok_pipeline", wait=True)
+    deliveries = service.store.list_notification_deliveries(limit=10)
+
+    assert [item["outcome"] for item in deliveries] == ["not_configured"]
+    assert "no 'on_success' destinations" in deliveries[0]["detail"]

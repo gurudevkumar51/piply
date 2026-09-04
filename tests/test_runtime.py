@@ -792,3 +792,87 @@ def test_piply_own_logging_never_lands_in_a_run_log(tmp_path: Path) -> None:
     _, _, logs = service.get_run(runs[0].run_id)
 
     assert not [line for line in logs if "SCHEDULER-NOISE" in line.message]
+
+
+def test_a_file_sensor_hands_the_filenames_to_its_tasks(tmp_path: Path) -> None:
+    """A sensor that cannot say *what* changed forces every task to re-scan.
+
+    Worse, re-scanning races the next arrival, so the run can process a file it
+    was not woken for and miss the one it was.
+    """
+    import threading
+    import time as time_module
+
+    from piply.core.scheduler import PipelineScheduler
+
+    workspace = tmp_path / "workspace"
+    (workspace / "inbox").mkdir(parents=True)
+    (workspace / "handle.py").write_text(
+        "\n".join(
+            [
+                "def process(context=None):",
+                "    sensor = (context or {}).get('sensor') or {}",
+                "    print(f\"FILES={sensor.get('new_files')}\")",
+                "    return {'seen': sensor.get('file_count')}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Sensor Vars",
+                "workspace: workspace",
+                "pipelines:",
+                "  ingest:",
+                "    sensors:",
+                "      drop:",
+                "        type: file_sensor",
+                "        path: inbox",
+                "        pattern: '*.csv'",
+                "    tasks:",
+                "      announce:",
+                "        type: cli",
+                "        command: echo GOT {sensor_file_name}",
+                "      handle:",
+                "        type: python",
+                "        path: handle.py",
+                "        function: process",
+                "        depends_on: [announce]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    scheduler = PipelineScheduler(service)
+    scheduler.start()
+    try:
+        deadline = time_module.monotonic() + 20
+        while time_module.monotonic() < deadline and not service.sensor_health():
+            time_module.sleep(0.2)
+        time_module.sleep(1.5)  # let the baseline poll record an empty directory
+        (workspace / "inbox" / "claims_2026.csv").write_text("a,b\n", encoding="utf-8")
+
+        runs: list = []
+        deadline = time_module.monotonic() + 40
+        while time_module.monotonic() < deadline:
+            runs = service.list_runs(pipeline_id="ingest", limit=1)
+            if runs and runs[0].status in {"success", "failed"}:
+                break
+            time_module.sleep(0.5)
+    finally:
+        scheduler.stop()
+
+    assert runs and runs[0].status == "success", "the sensor never produced a finished run"
+    _, _, logs = service.get_run(runs[0].run_id)
+    messages = [line.message for line in logs]
+
+    # The name is available to a shell command...
+    assert any("GOT claims_2026.csv" in message for message in messages)
+    # ...and the whole event to a Python task.
+    assert any("FILES=" in message and "claims_2026.csv" in message for message in messages)
+    assert threading.active_count() >= 1

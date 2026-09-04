@@ -68,6 +68,27 @@
     <pre class="code-block" id="database-result" hidden></pre>
 </section>
 
+{# Alerts: what is declared, and what actually got delivered. #}
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title">Alerts (Microsoft Teams)</h2>
+            <p class="panel-copy">
+                Destinations come from the <span class="mono">notifications:</span> block in YAML,
+                not from this page &mdash; a webhook URL is a credential and belongs in the
+                environment. What you can do here is check that it works and see what was sent.
+            </p>
+        </div>
+        <span class="meta-pill" id="alerts-count">&mdash;</span>
+    </div>
+
+    <div id="alerts-body">
+        <div class="empty-state">Loading&hellip;</div>
+    </div>
+
+    <pre class="code-block" id="alerts-result" hidden></pre>
+</section>
+
 {# Admin-only panels: central SMTP and account management. #}
 <section class="panel">
     <div class="panel-header">

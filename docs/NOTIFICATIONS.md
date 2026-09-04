@@ -189,7 +189,30 @@ PIPLY_BASE_URL=https://piply.internal
 
 ---
 
-## 6. When delivery fails
+## 6. Seeing what was sent
+
+**Settings → Alerts (Microsoft Teams)**, admin only.
+
+It answers the question a run log cannot: *was anything even attempted?*
+
+- **Every declared destination**, its type, and whether its webhook resolved
+- **Used by** — which pipelines reference it, resolved **through groups**, so a
+  destination reached only via a group is not reported as unused
+- **Send test** — posts a card immediately, so a webhook can be checked without
+  waiting for a run to fail
+- **Recent deliveries** — pipeline, run, destination, outcome, and the reason
+
+Webhook URLs never appear on this page. Destinations are declared in YAML, not
+here, because the URL is a credential and belongs in the environment.
+
+The outcome column includes **`nothing configured`**, which exists because
+silence is the hardest case to debug: a pipeline with only `on_failure` that
+succeeds sends nothing, and without this row that is indistinguishable from a
+delivery that failed silently.
+
+---
+
+## 7. When delivery fails
 
 Nothing happens to the run. Every outcome is recorded in the run log instead:
 
@@ -209,7 +232,7 @@ at load time, because that is a static reference Piply can check.
 
 ---
 
-## 7. How delivery works
+## 8. How delivery works
 
 - Destinations are posted **concurrently** with `httpx.AsyncClient`, each with
   its own timeout, so four destinations cost one timeout rather than four.
@@ -220,11 +243,13 @@ at load time, because that is a static reference Piply can check.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 **The alert never arrives, and there is nothing in the run log.**
-The pipeline has no `notifications:` block, or the run's outcome does not match
-the list you filled in — `on_success` and `on_failure` are separate.
+Open **Settings → Alerts** first — it records outcomes a run log does not,
+including `nothing configured`. The usual causes are a pipeline with no
+`notifications:` block at all, or a run whose outcome does not match the list
+you filled in: `on_success` and `on_failure` are separate.
 
 **`its webhook is not configured`.**
 The `${VAR}` did not resolve. `piply validate` warns about this at load time.

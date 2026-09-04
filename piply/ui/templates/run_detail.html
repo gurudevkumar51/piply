@@ -236,7 +236,8 @@ let selectedRunTaskId = initialTaskRuns[0]?.task_id || null;
 let taskLogFilterId = null;
 let durationTicker = null;
 const taskFocusStorageKey = "piply.runTaskFocusCollapsed";
-let taskFocusCollapsed = window.localStorage.getItem(taskFocusStorageKey) === "true";
+// Collapsed by default so the graph gets the full width; clicking a node opens it.
+let taskFocusCollapsed = window.localStorage.getItem(taskFocusStorageKey) !== "false";
 
 function updateRunHeader(run) {
     document.getElementById("run-status").textContent = run.status;
@@ -436,6 +437,10 @@ function renderRunGraph(taskRuns) {
                     return;
                 }
                 focusRunTask(node.task_id, false, false);
+                if (taskFocusCollapsed) {
+                    taskFocusCollapsed = false;
+                    applyTaskFocusState();
+                }
             },
             defaultLayout: "flow",
         },

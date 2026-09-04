@@ -213,6 +213,7 @@ def test_run_history_does_not_add_queries_per_pipeline(tmp_path: Path) -> None:
     The dots come from the same windowed query that supplies the latest run, so
     showing five runs each must not reintroduce an N+1.
     """
+    import threading
     from contextlib import contextmanager
 
     import piply.core.store as store_mod
@@ -233,6 +234,10 @@ def test_run_history_does_not_add_queries_per_pipeline(tmp_path: Path) -> None:
 
         statements: list[str] = []
         original = store_mod.RunStore._connect
+        # `_connect` is patched on the class, so every RunStore in the process is
+        # counted — including a scheduler thread left running by another test.
+        # Only this thread's queries are the ones under measurement.
+        counting_thread = threading.get_ident()
 
         @contextmanager
         def counting(self):
@@ -240,7 +245,8 @@ def test_run_history_does_not_add_queries_per_pipeline(tmp_path: Path) -> None:
                 real = connection.execute
 
                 def wrapped(sql, parameters=()):
-                    statements.append(sql)
+                    if threading.get_ident() == counting_thread:
+                        statements.append(sql)
                     return real(sql, parameters)
 
                 connection.execute = wrapped  # type: ignore[method-assign]

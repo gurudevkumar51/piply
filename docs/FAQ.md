@@ -142,6 +142,14 @@ keeps the definition it started with; the next run picks up the edit.
 Structural mistakes are caught at load time, so a broken edit leaves the last
 good config in place rather than taking the server down.
 
+### The task graph is cramped. Can it use the whole width?
+
+It already does. The graph spans the full page, and clicking any task node opens
+the task panel beside it — id, type, status, duration, dependencies, the
+resolved command, and actions to run just that task or filter the logs to it.
+Closing the panel returns the graph to full width, and the choice is remembered
+per browser.
+
 ### Can I split the config across multiple files?
 
 Yes, with `include:` in the root file:
@@ -511,6 +519,109 @@ tasks:
     command: python extract.py --report {report}
     depends_on: [login]
 ```
+
+### Where should I declare entities — project, pipeline, or template?
+
+**On the pipeline or template that uses them.** A top-level `entities:` block
+applies to *every* pipeline in the project, including ones that never mention
+the variable — and they are still expanded. A nightly cleanup job beside one
+entity-driven pipeline will run its prune three times, and a summary email will
+be sent three times. The tasks are identical apart from their ids, so nothing
+fails and nobody notices.
+
+`piply validate` now warns about exactly this:
+
+```
+! Pipeline 'nightly_cleanup' is expanded 3x by the project-level entity
+  'practice', but no task uses {practice}. That runs identical tasks 3 times.
+```
+
+Use a top-level block only when *every* pipeline genuinely expands over that
+dimension. Otherwise put it on the pipeline, or on the template so its
+deployments inherit it and nothing else does.
+
+### What happens if I declare two entities?
+
+You get the **cross product** — one task per combination.
+`practice: [alpha, beta]` with `report: [payment, adjustment]` gives
+`alpha.payment.extract`, `alpha.adjustment.extract`, `beta.payment.extract`,
+`beta.adjustment.extract`.
+
+Dependencies pair up **within a combination**, so `alpha.payment.transform`
+waits only for `alpha.payment.extract` and one failing practice does not stall
+the others. A task with `entities: false` fans in and waits for all of them.
+
+Watch the multiplication: two sets multiply, they do not add. 29 practices × 8
+reports × 2 tasks is 464 tasks in *one run that fails as a unit*. If practices
+must succeed or fail independently, use one deployment per practice instead.
+
+### Do I have to repeat `entities:` on every downstream task?
+
+No. Declare every dimension once at pipeline level, then list the *names* a task
+should narrow to — a **list selects**, a mapping declares:
+
+```yaml
+entities:
+  practice: [alpha, beta]
+  report: [payment, adjustment]
+
+pipelines:
+  flow:
+    tasks:
+      login:
+        entities: [practice]        # one login per practice
+        command: playwright-login --practice {practice}
+      extract:                      # no entities key -> practice x report
+        depends_on: [login]
+      load:                         # nothing to declare here either
+        depends_on: [extract]
+```
+
+Each extract waits only for its own practice's login. You annotate the
+exception, not the rule, so adding a fourth task to the chain needs nothing.
+Selecting a name that was never declared is a load error.
+
+### Can a deployment have its own entities?
+
+Yes, and it is how one template serves tenants that process different things.
+The ordinary merge rules apply per dimension — **mappings merge, lists
+replace**:
+
+| The deployment declares | Result |
+| --- | --- |
+| Nothing | Inherits the project entities |
+| The **same** dimension | That list **replaces** the inherited one |
+| A **different** dimension | **Added**, so the two multiply |
+
+```yaml
+pipeline_deployments:
+  beta_scrape:
+    template: scrape
+    entities: {report: [refund]}     # beta only does refunds
+```
+
+### How do I deploy the same template several times?
+
+They are just sibling keys under `pipeline_deployments:`. Each one is its own
+pipeline with its own entities, schedule, and triggers:
+
+```yaml
+pipeline_deployments:
+  CLAIM_EXTRACT_Flow:
+    template: CLAIM_EXtract
+    entities:
+      practice: [CCCPC***, NYFP**, PAINZERO*]
+    schedule: {cron: "0 14 * * 1-5", timezone: "Asia/Kolkata"}
+    triggers_on_success: [CLAIM_EXTRACT_Bronze_to_Silver]
+
+  CLAIM_EXTRACT_Bronze_to_Silver:
+    template: CLAIM_Bronze
+    entities:
+      practice: [CCCPC, NYFP, PAINZERO]
+```
+
+Avoid spaces in a pipeline id. They work, but the id ends up in URLs and CLI
+arguments, so you will be quoting it forever.
 
 ### Can I control which entity runs first?
 
@@ -1030,13 +1141,25 @@ URL into YAML, because the URL is the credential. Full guide, including how to
 get a webhook URL for a channel or a group chat, in
 [Notifications](NOTIFICATIONS.md).
 
+### How does a task know which file the sensor found?
+
+Sensor-triggered runs get `{sensor_file}`, `{sensor_file_name}`,
+`{sensor_files}`, and `{sensor_file_count}` in any command, and Python tasks get
+the whole event as `context["sensor"]`. Quote the path — a share path can
+contain spaces. See [Sensors §2](SENSORS.md#what-the-triggered-run-receives).
+
 ### A Teams alert did not arrive. Where do I look?
 
 The run log. Delivery never changes a run's status, so every outcome is recorded
 there instead: `HTTP 500`, `timed out after 10s`, `Unknown notification
 destination 'x'`, or `its webhook is not configured` when `${VAR}` never
-resolved. That last one is also a warning from `piply validate`. The full table
-of failure modes is in [Notifications §6](NOTIFICATIONS.md#6-when-delivery-fails).
+resolved. That last one is also a warning from `piply validate`.
+
+The fastest answer is **Settings → Alerts**, which records every attempt —
+including the case that produces no log line at all, a pipeline with only
+`on_failure` that succeeded. It also has a **Send test** button so you can check
+a webhook without waiting for a run. Full table of failure modes in
+[Notifications §7](NOTIFICATIONS.md#7-when-delivery-fails).
 
 ### Can I inspect the database directly?
 
@@ -1245,6 +1368,16 @@ What the message means and what to do about it.
 | `Pipeline 'x' contains a cycle at task 'y'` | `depends_on` loops | Break the loop |
 | `Pipeline trigger cycle detected at 'x'` | `triggers_on_success` loops | Break the loop |
 | `Pipeline 'x' triggers unknown pipeline 'y'` | Typo, or the target is a template not a deployment | Use a real pipeline id |
+| `'pipelines.x' is defined in more than one config file` | The same pipeline, or the same block of it, in two included files | Keep each block in one file; the message names both |
+| `include pattern 'x' matched no files` | A glob that matches nothing — a silent no-match would look like the pipelines vanished | Fix the path, relative to `piply.yaml` |
+| `'x.yaml' uses 'include', which only the root config file may do` | Nested includes | Move the pattern into the root file |
+| `Task 'x' selects unknown entity 'y'` | `entities: [y]` names a dimension the pipeline never declared | Declare it, or fix the spelling |
+| `Entity expansion produced duplicate runtime task id 'x'` | Two entity values slug to the same id | Give them distinct values, or use the mapping form |
+| `sql_sensor connection 'x' is not a connection string` | A file path where a DSN belongs, usually `@name` pointing at one | Use `database:` for SQLite, or `sqlite:///path` |
+| `Unknown notification destination 'x'` | A typo in a pipeline's `notifications:` list | Match a name under `notifications.teams` or `notifications.groups` |
+| `notifications.teams.x.webhook must be an https URL` | A literal that is not a URL | Use `${VAR}`; a Teams webhook is always https |
+| `x run(s) are still in progress` | Switching the database while something is running | Wait, or pause the schedules first |
+| `PIPLY_DATABASE is set in this process's environment` | The variable wins over `.env`, so the Settings switch cannot take effect | Change it in the compose file or unit, and restart |
 | `Pipeline 'x' cannot trigger itself on success` | Self-reference | Remove it |
 | `... task 'y' requires command or path for cli tasks` | `type: cli` with neither | Add `command:` |
 | `... task 'y' points to a missing script` | Path wrong, or relative to the wrong base | Remember paths resolve against `workspace:` |

@@ -202,9 +202,37 @@ def _task_entity_map(
 ) -> EntityMap:
     if "entities" not in raw_task:
         return pipeline_entities
-    if raw_task.get("entities") in (None, "", False) or raw_task.get("entities") == {}:
+    declared = raw_task.get("entities")
+    if declared in (None, "", False) or declared == {}:
         return {}
+    if isinstance(declared, list):
+        # A list *selects* dimensions rather than adding them, so the exception
+        # is annotated once instead of repeating the shared dimensions on every
+        # other task: `entities: [practice]` on a per-practice login, while the
+        # tasks around it expand over everything declared for the pipeline.
+        return _selected_entity_map(template_id, declared, pipeline_entities)
     return merge_entity_maps(pipeline_entities, task_entities.get(template_id, {}))
+
+
+def _selected_entity_map(
+    template_id: str,
+    declared: list[Any],
+    pipeline_entities: EntityMap,
+) -> EntityMap:
+    """Keep only the named dimensions, in the order the pipeline declared them."""
+    wanted: list[str] = []
+    for item in declared:
+        name = str(item).strip()
+        if not name:
+            continue
+        if name not in pipeline_entities:
+            known = ", ".join(pipeline_entities) or "none"
+            raise ExpansionError(f"Task '{template_id}' selects unknown entity '{name}'. Declared entities: {known}")
+        if name not in wanted:
+            wanted.append(name)
+    # Pipeline order, not the order they were listed, so runtime ids stay
+    # consistent with every other task.
+    return {name: values for name, values in pipeline_entities.items() if name in wanted}
 
 
 def _runtime_title(template_id: str, raw_task: dict[str, Any], selection: EntitySelection | None) -> None:
@@ -212,6 +240,35 @@ def _runtime_title(template_id: str, raw_task: dict[str, Any], selection: Entity
         return
     human_task = template_id.replace("_", " ").replace("-", " ").title()
     raw_task["title"] = f"{selection.key} / {human_task}"
+
+
+def _narrower_dependency(
+    spec: RuntimeTaskTemplate,
+    dependency_map: dict[str, str],
+    values_by_runtime_id: dict[str, dict[str, str]],
+) -> str | None:
+    """Return the one dependency instance this task belongs to, if there is one.
+
+    A task may expand over fewer dimensions than the task depending on it — a
+    per-practice `login` feeding per-practice-per-report `extract` tasks. Without
+    this, `alpha.payment.extract` would depend on *every* login, so one
+    practice's failure would stall every other practice, which is the opposite
+    of what entity expansion is for.
+
+    Matching is on entity *values*, not on the id string, so it does not care
+    which order the dimensions were declared in. Only an unambiguous single
+    match counts; anything else falls back to depending on them all.
+    """
+    if not spec.entity_values:
+        return None
+    matches = [
+        runtime_id
+        for runtime_id in dependency_map.values()
+        if (candidate := values_by_runtime_id.get(runtime_id))
+        and candidate
+        and candidate.items() <= spec.entity_values.items()
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def expand_task_templates(
@@ -250,12 +307,14 @@ def expand_task_templates(
             )
 
     by_template: dict[str, dict[str, str]] = {}
+    values_by_runtime_id: dict[str, dict[str, str]] = {}
     seen_runtime_ids: set[str] = set()
     for spec in specs:
         if spec.runtime_id in seen_runtime_ids:
             raise ExpansionError(f"Entity expansion produced duplicate runtime task id '{spec.runtime_id}'")
         seen_runtime_ids.add(spec.runtime_id)
         by_template.setdefault(spec.template_id, {})[spec.entity_key or ""] = spec.runtime_id
+        values_by_runtime_id[spec.runtime_id] = spec.entity_values
 
     rewritten: list[RuntimeTaskTemplate] = []
     for spec in specs:
@@ -273,6 +332,8 @@ def expand_task_templates(
                 dependency_ids = [dependency_map[current_key]]
             elif "" in dependency_map:
                 dependency_ids = [dependency_map[""]]
+            elif matched := _narrower_dependency(spec, dependency_map, values_by_runtime_id):
+                dependency_ids = [matched]
             else:
                 dependency_ids = list(dependency_map.values())
             for dependency_id in dependency_ids:

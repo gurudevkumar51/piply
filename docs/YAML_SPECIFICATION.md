@@ -96,6 +96,24 @@ so `true` becomes `"true"`.
 **Prose is safe.** A value is only treated as a condition when it parses as a
 ternary. `message: run if you can else walk` stays a literal string.
 
+**Quoting the inline form.** A ternary whose first operand is a quoted string
+has to be quoted *as a whole*, because YAML otherwise reads the opening quote as
+the start of the value and fails on the rest of the line:
+
+```yaml
+# Wrong — YAML error pointing at the line above, which is confusing
+share: "/mnt/237share/inbound" if env == "prod" else "dev_inbox"
+
+# Right — the whole expression is one string
+share: '"/mnt/237share/inbound" if env == "prod" else "dev_inbox"'
+
+# Better — the mapping form has no quoting trap at all
+share:
+  if: env == "prod"
+  then: /mnt/237share/inbound
+  else: dev_inbox
+```
+
 Ordering matters, exactly as it already does for `{placeholder}` interpolation:
 a condition can only see variables declared above it.
 
@@ -245,6 +263,232 @@ declared as `extract` with `entities: {report: [...]}` produces runtime task ids
 of the form `payment.extract`, `adjustment.extract`, and so on. Set
 `entities: false` on a task to opt it out of expansion.
 
+#### Where to declare them
+
+Declare entities on the **pipeline or template that uses them**, not at project
+level.
+
+A top-level `entities:` block applies to *every* pipeline in the project,
+including ones that never mention the variable. Those pipelines are still
+expanded — so a nightly cleanup job beside one entity-driven pipeline runs its
+prune three times, and a summary email is sent three times. The generated tasks
+are identical apart from their ids, so nothing fails and nobody notices.
+
+```yaml
+# Avoid: applies to everything, including pipelines that do not want it
+entities:
+  practice: [alpha, beta, gamma]
+
+# Prefer: scoped to the pipeline that actually expands
+pipelines:
+  claim_extract:
+    entities:
+      practice: [alpha, beta, gamma]
+
+# Or scoped to a template, so every deployment of it inherits and nothing else does
+pipeline_templates:
+  scrape:
+    entities:
+      report: [payment, adjustment]
+```
+
+`piply validate` warns when a project-level entity expands a pipeline whose
+tasks never use it:
+
+```
+! Pipeline 'nightly_cleanup' is expanded 3x by the project-level entity
+  'practice', but no task uses {practice}. That runs identical tasks 3 times.
+```
+
+A top-level block is only appropriate when **every** pipeline in the project
+genuinely expands over that dimension. If even one does not, scope it down or
+set `entities: false` on the exception.
+
+#### Two or more entity sets
+
+Declaring two entities expands the **cross product** — one runtime task per
+combination:
+
+```yaml
+entities:
+  practice: [alpha, beta]
+  report: [payment, adjustment, refund]
+```
+
+```
+alpha.payment.extract     beta.payment.extract
+alpha.adjustment.extract  beta.adjustment.extract
+alpha.refund.extract      beta.refund.extract
+```
+
+The runtime id is the entity values in declaration order, then the task id. Both
+values are available to the task as `{practice}` and `{report}`.
+
+**Dependencies pair up per combination.** This is the part worth knowing:
+
+| Dependency | Behaviour |
+| --- | --- |
+| Expanded → expanded | Pairs **within the same combination**. `alpha.payment.transform` waits only for `alpha.payment.extract` |
+| `entities: false` → expanded | **Fans in**. One `summarise` waits for *every* generated task |
+
+So each practice/report lane is independent. One failing does not stall the
+others:
+
+```
+alpha.payment.extract      failed
+alpha.payment.transform    skipped     <- only this lane
+alpha.refund.extract       success
+beta.payment.extract       success
+beta.refund.extract        success
+summarise                  skipped     <- fan-in: one lane failed
+```
+
+A fan-in task is skipped when any dependency did not succeed. If the summary
+should still run, opt out of that rule:
+
+```yaml
+      summarise:
+        entities: false
+        on_upstream_failure: continue   # runs even when a lane failed
+        depends_on: [transform]
+```
+
+The run is still reported as `failed`, which is correct — something did fail.
+
+**Watch the multiplication.** Two sets multiply, they do not add: 29 practices
+× 8 reports × 2 tasks is 464 runtime tasks in a single run. That loads in about
+a tenth of a second and the DAG page handles it, but it is one run that fails as
+a unit. If practices genuinely need to succeed or fail independently, prefer one
+pipeline per practice — [templates and
+deployments](#8-templates-and-deployments) exist for exactly that — and keep
+entity expansion for the dimension that belongs inside one run.
+
+#### Entities per deployment
+
+A deployment may declare its own `entities:`, which is how one template serves
+tenants that do not all process the same things:
+
+```yaml
+pipeline_templates:
+  scrape:
+    entities:
+      report: [payment, adjustment]    # scoped to this template's deployments
+    tasks:
+      extract: {type: cli, command: "scrape --tenant {tenant} --report {report}"}
+
+pipeline_deployments:
+  alpha_scrape:
+    template: scrape
+    variables: {tenant: alpha}         # inherits payment + adjustment
+
+  beta_scrape:
+    template: scrape
+    variables: {tenant: beta}
+    entities:
+      report: [refund]                 # replaces: beta only does refunds
+
+  gamma_scrape:
+    template: scrape
+    variables: {tenant: gamma}
+    entities:
+      region: [eu, us]                 # adds a dimension: report x region
+```
+
+This follows the ordinary [deployment merge rules](#8-templates-and-deployments)
+— **mappings merge, lists replace** — applied per dimension:
+
+| Deployment declares | Result |
+| --- | --- |
+| Nothing | Inherits the project entities |
+| The **same** dimension | That list **replaces** the inherited one |
+| A **different** dimension | **Added**, so the two multiply |
+
+The example above produces:
+
+```
+alpha_scrape   payment.extract, adjustment.extract
+beta_scrape    refund.extract
+gamma_scrape   payment.eu.extract, payment.us.extract,
+               adjustment.eu.extract, adjustment.us.extract
+```
+
+Because each deployment is its own pipeline, this is also the answer when
+practices must succeed or fail independently: one deployment per practice, with
+entity expansion handling only the dimensions that belong inside a single run.
+
+#### Expanding over only some dimensions
+
+A task can expand over *fewer* dimensions than the tasks depending on it. Declare
+every dimension once, then **list the names** a task should use — a list selects
+dimensions, where a mapping declares new ones:
+
+```yaml
+entities:
+  practice: [alpha, beta]
+  report: [payment, adjustment]    # declared once, for the whole pipeline
+
+pipelines:
+  flow:
+    tasks:
+      login:
+        type: cli
+        entities: [practice]       # narrowed: one login per practice
+        command: playwright-login --practice {practice}
+      extract:
+        type: cli                  # no entities key -> practice x report
+        command: scrape --practice {practice} --report {report}
+        depends_on: [login]
+      load:
+        type: cli                  # nothing to declare here either
+        command: load --practice {practice} --report {report}
+        depends_on: [extract]
+```
+
+Annotating the **exception** rather than the rule is what makes this scale:
+adding a fourth task to the chain needs no entity declaration at all. Selecting
+a name that was never declared is an error, so a typo cannot quietly produce an
+unexpanded task.
+
+The mapping form still works and *adds* a dimension, which is the right choice
+when the extra values belong to one task rather than the pipeline:
+
+```yaml
+      extract:
+        entities:
+          report: [payment, adjustment]   # merged: practice x report
+```
+
+```
+alpha.login -> alpha.payment.extract      beta.login -> beta.payment.extract
+            -> alpha.adjustment.extract               -> beta.adjustment.extract
+```
+
+Each extract waits **only for its own practice's login**. Dependencies are
+matched on entity *values*, so a task depends on the one instance whose entity
+values it shares — regardless of which order the dimensions were declared in.
+
+That matters for isolation. `alpha.login` failing skips alpha's two extracts and
+leaves beta running:
+
+```
+alpha.login                failed
+alpha.payment.extract      skipped
+alpha.adjustment.extract   skipped
+beta.login                 success
+beta.payment.extract       success
+beta.adjustment.extract    success
+```
+
+This is the natural shape for a per-tenant browser session, an authentication
+step, or any setup that is shared by several reports within one practice but
+must not be shared *across* practices.
+
+Narrowing applies in one direction only. A task with **more** dimensions than
+its dependency picks the matching instance; a task with fewer — or with
+`entities: false` — still fans in and waits for all of them. If a dependency
+could match more than one instance, Piply falls back to fanning in rather than
+guessing.
+
 #### Entity priority
 
 A trailing `*` run on an entity value raises the priority of every task
@@ -262,6 +506,9 @@ The stars are stripped from the value, so the task still receives
 `report=payment` and the runtime id is still `payment.extract`. The entity
 priority is *added* to whatever the task template declares, so
 `extract**` with `adjustment**` gives that task priority 4.
+
+Stars on two different entity sets add together too: `beta**` with `payment*`
+gives `beta.payment.extract` priority 3.
 
 Dependency order still wins: a high-priority entity task waits for its
 dependencies like any other. Equal priorities may run in any order.

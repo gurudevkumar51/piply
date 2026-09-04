@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import yaml
 
 from piply.pipeline.expander import (
+    EntityMap,
     ExpansionError,
     expand_task_templates,
     merge_entity_maps,
@@ -368,6 +369,43 @@ def _parse_variables(raw_value: Any, label: str, env_values: dict[str, str]) -> 
             raise ConfigError(str(exc)) from exc
         variables[key] = _expand_string(_render_variable_value(resolved), context)
     return variables
+
+
+def _unused_global_entity_warnings(
+    pipeline_id: str,
+    *,
+    raw_tasks: Any,
+    root_entities: EntityMap,
+    own_entities: EntityMap,
+) -> list[str]:
+    """Warn when a project-level entity expands a pipeline that never uses it.
+
+    A top-level `entities:` block applies to *every* pipeline. That is fine for
+    the pipeline it was written for and silently wrong for the rest: a nightly
+    cleanup job beside one entity-driven pipeline quietly runs three times, and
+    a summary email is sent three times, because the generated tasks are
+    identical apart from their ids. Nothing fails, so nobody notices.
+    """
+    inherited = [name for name in root_entities if name not in own_entities]
+    if not inherited or not isinstance(raw_tasks, dict) or not raw_tasks:
+        return []
+
+    # A task opting out entirely, or selecting dimensions by name, is a
+    # deliberate choice and never needs warning about.
+    referenced = repr(raw_tasks)
+    warnings: list[str] = []
+    for name in inherited:
+        if f"{{{name}}}" in referenced or f"{{{name}_value}}" in referenced:
+            continue
+        if any(isinstance(task, dict) and isinstance(task.get("entities"), list | bool) for task in raw_tasks.values()):
+            continue
+        count = len(root_entities[name])
+        warnings.append(
+            f"Pipeline '{pipeline_id}' is expanded {count}x by the project-level entity "
+            f"'{name}', but no task uses {{{name}}}. That runs identical tasks {count} times. "
+            f"Move the entity onto the pipelines that need it, or set 'entities: false' here."
+        )
+    return warnings
 
 
 def _parse_entities(raw_value: Any, label: str, env_values: dict[str, str]):
@@ -1375,9 +1413,17 @@ def load_project(
             )
         )
         pipeline_values = root_values | pipeline_variables
-        pipeline_entities = merge_entity_maps(
-            root_entities,
-            _parse_entities(raw_pipeline.get("entities"), f"Pipeline '{pipeline_id}' entities", pipeline_values),
+        own_entities = _parse_entities(
+            raw_pipeline.get("entities"), f"Pipeline '{pipeline_id}' entities", pipeline_values
+        )
+        pipeline_entities = merge_entity_maps(root_entities, own_entities)
+        project_warnings.extend(
+            _unused_global_entity_warnings(
+                pipeline_id,
+                raw_tasks=raw_pipeline.get("tasks"),
+                root_entities=root_entities,
+                own_entities=own_entities,
+            )
         )
 
         schedule_timezone = _expand_string(str(raw_pipeline.get("timezone") or timezone_name), pipeline_values)
@@ -1466,6 +1512,8 @@ def load_project(
             if isinstance(raw_task, dict)
             and "entities" in raw_task
             and raw_task.get("entities") not in (None, "", False)
+            # A list selects existing dimensions; only a mapping declares values.
+            and not isinstance(raw_task.get("entities"), list)
         }
         try:
             runtime_task_specs = expand_task_templates(

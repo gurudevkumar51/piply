@@ -164,6 +164,14 @@ Laid out so the DAG is the first substantial thing on screen.
 4. **Manual command overrides** — edit a CLI command for one manual run.
 5. **Tasks** and **Recent runs**.
 
+### The task graph
+
+The graph uses the **full width** of the page. Clicking any task node opens the
+task panel beside it, showing the task id, type, status, duration, log count,
+dependencies, and the resolved command, plus actions — run just that task, copy
+the command, or filter the logs to it. Closing the panel returns the graph to
+full width, and the choice is remembered per browser.
+
 ### Long task names
 
 Entity expansion produces names like `payer_claim_status_dashboard / Load Bronze`,
@@ -377,6 +385,16 @@ would be stranded between the two databases. Wait for it, or pause the schedules
 The panel is hidden when `PIPLY_DATABASE` is set as a real environment variable,
 because the process environment overrides `.env` and the change could not take
 effect. See [Metadata Store](DATABASE.md#52-changing-the-database-later).
+
+### Alerts
+
+Admin-only. Shows every declared Teams destination, whether its webhook
+resolved, which pipelines use it (resolved through groups), and a log of recent
+delivery attempts with the reason for each failure. **Send test** posts a card
+immediately so a webhook can be verified without waiting for a run.
+
+Destinations are declared in YAML rather than here, because a webhook URL is a
+credential. See [Notifications](NOTIFICATIONS.md).
 
 ### Email and accounts
 
