@@ -203,8 +203,51 @@ location, the process id, and the metadata store.
 | `GET` | `/api/settings/smtp` | `admin` | Central SMTP; password never returned |
 | `PUT` | `/api/settings/smtp` | `admin` | Update SMTP; blank password keeps the stored one |
 | `POST` | `/api/settings/smtp/test` | `admin` | Send one test message |
+| `GET` | `/api/settings/notifications` | `admin` | Declared alert destinations and recent deliveries |
+| `POST` | `/api/settings/notifications/test` | `admin` | Post one test card to a named destination |
 | `GET` | `/api/settings/database` | `admin` | Where Piply keeps its own data; credentials masked |
 | `PUT` | `/api/settings/database` | `admin` | Point Piply at a different metadata store |
+
+### Checking alert delivery
+
+`GET /api/settings/notifications` answers "was it sent, and if not why not":
+
+```json
+{
+  "configured": true,
+  "destinations": [
+    {"name": "production_alerts", "type": "channel", "configured": true, "timeout_seconds": 10.0}
+  ],
+  "groups": {"critical": ["production_alerts", "data_engineering"]},
+  "used_by": {"production_alerts": ["claim_pipeline (on_failure)"]},
+  "deliveries": [
+    {"run_id": "64541dbae377", "pipeline_id": "claim_pipeline", "channel": "teams",
+     "destination": "production_alerts", "outcome": "sent", "detail": null,
+     "created_at": "2026-09-05T09:12:44+00:00"}
+  ],
+  "warnings": []
+}
+```
+
+Webhook URLs are never returned — the URL is the credential. `used_by` resolves
+through groups, so a destination reached only via a group is still listed.
+
+`outcome` is one of:
+
+| Value | Meaning |
+| --- | --- |
+| `sent` | Accepted by the webhook |
+| `failed` | Rejected, unreachable, or timed out; `detail` says which |
+| `skipped` | The destination's webhook never resolved |
+| `not_configured` | The pipeline has alerts, but none for *this* run's outcome |
+
+That last one exists because silence is the hardest case to debug: without it,
+"nothing configured for a success" looks identical to "the alert failed".
+
+`POST /api/settings/notifications/test` takes `{"destination": "production_alerts"}`
+and posts a test card immediately, so a webhook can be checked without waiting
+for a run. It returns `200` with a detail string, `400` for an unknown
+destination, or `502` with the delivery error.
 
 ### Changing the metadata store
 

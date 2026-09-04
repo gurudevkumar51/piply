@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from piply.api.app import create_app
@@ -1298,3 +1299,197 @@ def test_child_pipeline_keeps_its_own_execution_settings(tmp_path: Path) -> None
     assert snapshot["settings"]["max_parallel_tasks"] == 1
     assert snapshot["settings"]["timeout_seconds"] == 600
     assert snapshot["settings"]["retry"]["attempts"] == 0
+
+
+def test_a_task_may_expand_over_fewer_entity_dimensions(tmp_path: Path) -> None:
+    """A per-practice login feeding per-practice-per-report extracts.
+
+    Without matching on entity values, every extract would depend on every
+    login, so one practice failing would stall all the others — the opposite of
+    what entity expansion is for.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Partial Expansion",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      login:",
+                "        type: cli",
+                "        command: echo login {practice}",
+                "      extract:",
+                "        type: cli",
+                "        entities:",
+                "          report: [payment, adjustment]",
+                "        command: echo extract {practice} {report}",
+                "        depends_on: [login]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = load_project(config_path).pipelines["flow"]
+
+    assert sorted(pipeline.tasks) == [
+        "alpha.adjustment.extract",
+        "alpha.login",
+        "alpha.payment.extract",
+        "beta.adjustment.extract",
+        "beta.login",
+        "beta.payment.extract",
+    ]
+    # Each extract waits only for its own practice's login.
+    assert list(pipeline.tasks["alpha.payment.extract"].depends_on) == ["alpha.login"]
+    assert list(pipeline.tasks["beta.adjustment.extract"].depends_on) == ["beta.login"]
+
+
+def test_a_task_with_more_dimensions_still_fans_in(tmp_path: Path) -> None:
+    """Narrowing only applies one way; a rollup still waits for everything."""
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Fan In",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta]",
+                "  report: [payment, adjustment]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      extract: {type: cli, command: echo e}",
+                "      rollup:",
+                "        type: cli",
+                "        entities: false",
+                "        command: echo r",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = load_project(config_path).pipelines["flow"]
+
+    assert len(pipeline.tasks["rollup"].depends_on) == 4
+    # And same-dimension tasks still pair up exactly.
+    assert list(pipeline.tasks["alpha.payment.extract"].depends_on) == []
+
+
+def test_entities_list_selects_dimensions_instead_of_adding_them(tmp_path: Path) -> None:
+    """Declare shared dimensions once; annotate only the task that differs.
+
+    Repeating `entities: {report: [...]}` on every downstream task is noise and
+    drifts. Listing dimension *names* narrows instead, so adding a fourth task
+    to the chain needs no entity declaration at all.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Select",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta]",
+                "  report: [payment, adjustment]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      login:",
+                "        type: cli",
+                "        entities: [practice]",
+                "        command: echo login {practice}",
+                "      extract:",
+                "        type: cli",
+                "        command: echo extract {practice} {report}",
+                "        depends_on: [login]",
+                "      load:",
+                "        type: cli",
+                "        command: echo load {practice} {report}",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = load_project(config_path).pipelines["flow"]
+
+    # One login per practice, not one per practice/report combination.
+    assert sorted(t for t in pipeline.tasks if t.endswith(".login")) == ["alpha.login", "beta.login"]
+    assert len(pipeline.tasks) == 10
+    # The chain still pairs up per combination, and back to the right login.
+    assert list(pipeline.tasks["alpha.payment.extract"].depends_on) == ["alpha.login"]
+    assert list(pipeline.tasks["alpha.payment.load"].depends_on) == ["alpha.payment.extract"]
+
+
+def test_selecting_an_unknown_entity_is_an_error(tmp_path: Path) -> None:
+    """A typo must not silently produce an unexpanded task."""
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Typo",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      login:",
+                "        type: cli",
+                "        entities: [praktice]",
+                "        command: echo hi",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="selects unknown entity 'praktice'"):
+        load_project(config_path)
+
+
+def test_a_global_entity_that_no_task_uses_is_warned_about(tmp_path: Path) -> None:
+    """A top-level `entities:` block expands pipelines that never wanted it.
+
+    The generated tasks are identical apart from their ids, so a cleanup job
+    runs three times and a summary email is sent three times without anything
+    failing. The warning is the only thing that makes it visible.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Global",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta, gamma]",
+                "pipelines:",
+                "  claim_extract:",
+                "    tasks:",
+                "      t: {type: cli, command: 'echo extract {practice}'}",
+                "  nightly_cleanup:",
+                "    tasks:",
+                "      t: {type: cli, command: echo pruning}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+
+    warnings = [w for w in project.warnings if "nightly_cleanup" in w]
+    assert len(warnings) == 1
+    assert "expanded 3x" in warnings[0]
+    # The pipeline that legitimately uses it is not warned about.
+    assert not [w for w in project.warnings if "claim_extract" in w]
+    # And the behaviour itself is unchanged, so nothing silently breaks.
+    assert len(project.pipelines["nightly_cleanup"].tasks) == 3

@@ -7,6 +7,7 @@ import json
 import shlex
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -352,3 +353,38 @@ def poll_api_sensor(
             payload=payload,
         ),
     )
+
+
+def sensor_run_variables(payload: dict[str, Any]) -> dict[str, str]:
+    """Return the `{placeholder}` variables a sensor-triggered run should receive.
+
+    A sensor knowing *what* changed is only useful if the tasks it wakes can see
+    it. Without these, a pipeline woken by a new file has to re-scan the
+    directory and guess which file it was woken for — and races the next arrival
+    while doing so.
+
+    Every value is a string, because that is what task interpolation consumes.
+    The full event is also available as `context["sensor"]` for Python tasks.
+    """
+    variables: dict[str, str] = {}
+    for key in ("sensor_id", "sensor_type", "sensor_summary"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            variables[key] = str(value)
+
+    new_files = payload.get("new_files")
+    if isinstance(new_files, list) and new_files:
+        paths = [str(item) for item in new_files]
+        # Singular first: one file is overwhelmingly the common case, and
+        # `--file {sensor_file}` is what people reach for.
+        variables["sensor_file"] = paths[0]
+        variables["sensor_file_name"] = Path(paths[0]).name
+        variables["sensor_files"] = " ".join(paths)
+        variables["sensor_file_count"] = str(len(paths))
+
+    for key in ("table", "cursor_from", "cursor_to", "row_count", "url"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            variables[f"sensor_{key}"] = str(value)
+
+    return variables

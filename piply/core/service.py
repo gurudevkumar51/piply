@@ -51,7 +51,7 @@ from .notifications import NotificationError, build_alert, send_alert
 from .preview import PipelinePreview, build_pipeline_preview, unresolved_placeholders
 from .processes import is_process_alive
 from .retry import build_retry_plan
-from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor
+from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor, sensor_run_variables
 from .store import RunStore
 
 _RUNTIME_VARIABLE_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -690,6 +690,12 @@ class PipelineService:
                         if isinstance(payload.get("env"), dict)
                         else {}
                     )
+                    if item.trigger == "sensor":
+                        # Without this a sensor can start a pipeline but cannot
+                        # tell it *what* changed, so every task has to re-scan
+                        # the directory and guess which file it was woken for.
+                        inherited_variables.update(sensor_run_variables(payload))
+                        initial_context.setdefault("sensor", dict(payload))
                     if parent_run_id is not None:
                         initial_context.setdefault(
                             "parent",
@@ -1562,19 +1568,50 @@ class PipelineService:
         self._send_teams_alert(pipeline, run)
         self._send_email_notification(pipeline, run)
 
+    def _record_delivery(
+        self,
+        run: RunRecord,
+        pipeline: PipelineDefinition,
+        destination: str,
+        outcome: str,
+        detail: str | None = None,
+    ) -> None:
+        """Persist one delivery outcome, ignoring storage failures."""
+        try:
+            self.store.record_notification_delivery(
+                run_id=run.run_id,
+                pipeline_id=pipeline.pipeline_id,
+                channel="teams",
+                destination=destination,
+                outcome=outcome,
+                detail=detail,
+            )
+        except Exception:  # noqa: BLE001 - recording must never fail a run
+            pass
+
     def _send_teams_alert(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Post the standard alert card to this pipeline's Teams destinations."""
         names = pipeline.alert_on_success if run.status == "success" else pipeline.alert_on_failure
         if not names:
+            # Recorded rather than ignored: "nothing was configured for this
+            # outcome" is the single most confusing case to debug, because it
+            # looks identical to a notification that silently failed.
+            if pipeline.alert_on_success or pipeline.alert_on_failure:
+                which = "on_success" if run.status == "success" else "on_failure"
+                self._record_delivery(
+                    run,
+                    pipeline,
+                    "-",
+                    "not_configured",
+                    f"This pipeline has no '{which}' destinations, so nothing was sent for a {run.status} run.",
+                )
             return
 
         settings = getattr(self.project, "notifications", None)
         if settings is None or not settings.configured:
-            self.store.append_log(
-                run.run_id,
-                "Teams notification skipped: no 'notifications:' destinations are declared.",
-                stream="stderr",
-            )
+            message = "Teams notification skipped: no 'notifications:' destinations are declared."
+            self.store.append_log(run.run_id, message, stream="stderr")
+            self._record_delivery(run, pipeline, ", ".join(names), "failed", message)
             return
 
         try:
@@ -1583,12 +1620,16 @@ class PipelineService:
             # A typo in a destination name is reported against the run rather
             # than blocking the whole project from loading.
             self.store.append_log(run.run_id, f"Teams notification failed: {exc}", stream="stderr")
+            self._record_delivery(run, pipeline, ", ".join(names), "failed", str(exc))
             return
 
         def _log(message: str, is_error: bool) -> None:
             self.store.append_log(run.run_id, message, stream="stderr" if is_error else "stdout")
 
-        send_alert(
+        for skipped in (item for item in destinations if not item.configured):
+            self._record_delivery(run, pipeline, skipped.name, "skipped", "Its webhook did not resolve to a URL.")
+
+        results = send_alert(
             destinations,
             build_alert(
                 title=pipeline.title,
@@ -1603,6 +1644,8 @@ class PipelineService:
             ),
             on_log=_log,
         )
+        for name, delivered, detail in results:
+            self._record_delivery(run, pipeline, name, "sent" if delivered else "failed", detail or None)
 
     def _run_url(self, run_id: str) -> str | None:
         """Return a link back to the run, when a public base URL is configured."""
@@ -2054,6 +2097,94 @@ class PipelineService:
                 entry["enabled"] = sensor.enabled
                 results.append(entry)
         return sorted(results, key=lambda item: (item["status"] != "failing", str(item["sensor_key"])))
+
+    def notification_overview(self, *, limit: int = 50) -> dict[str, object]:
+        """Describe every declared destination and what was recently delivered.
+
+        Webhook URLs are never included — the URL is the credential. Only
+        whether it resolved is reported.
+        """
+        settings = getattr(self.project, "notifications", None)
+        destinations: list[dict[str, object]] = []
+        if settings is not None:
+            for name, destination in sorted(settings.destinations.items()):
+                destinations.append(
+                    {
+                        "name": name,
+                        "type": destination.destination_type,
+                        "configured": destination.configured,
+                        "timeout_seconds": destination.timeout_seconds,
+                    }
+                )
+
+        used_by: dict[str, list[str]] = {}
+        for pipeline in self.project.pipelines.values():
+            for which, names in (
+                ("on_failure", pipeline.alert_on_failure),
+                ("on_success", pipeline.alert_on_success),
+            ):
+                if not names:
+                    continue
+                # Resolved through groups, or a destination reached only via a
+                # group would read as "not used by any pipeline" — the most
+                # misleading thing this panel could say.
+                try:
+                    reached = [item.name for item in settings.resolve(names)] if settings else []
+                except NotificationError:
+                    reached = list(names)
+                for name in reached:
+                    label = f"{pipeline.pipeline_id} ({which})"
+                    if label not in used_by.setdefault(name, []):
+                        used_by[name].append(label)
+
+        return {
+            "configured": bool(destinations),
+            "destinations": destinations,
+            "groups": {name: list(members) for name, members in (settings.groups.items() if settings else [])},
+            "used_by": used_by,
+            "deliveries": self.store.list_notification_deliveries(limit=limit),
+            "warnings": [w for w in self.project.warnings if "notifications." in w],
+        }
+
+    def send_test_notification(self, destination_name: str) -> str:
+        """Post a test card to one destination and report what happened."""
+        settings = getattr(self.project, "notifications", None)
+        if settings is None or not settings.configured:
+            raise ValueError("No 'notifications:' destinations are declared in the config.")
+        targets = settings.resolve([destination_name])
+        if not targets:
+            raise ValueError(f"'{destination_name}' resolved to no destinations.")
+
+        results = send_alert(
+            targets,
+            build_alert(
+                title="Piply test",
+                pipeline_id="-",
+                status="success",
+                run_id="test",
+                trigger="manual",
+                tasks="0/0 succeeded",
+                duration="0.0s",
+                error=None,
+                run_url=self._run_url("test"),
+            ),
+        )
+        for name, delivered, detail in results:
+            try:
+                self.store.record_notification_delivery(
+                    run_id=None,
+                    pipeline_id="-",
+                    channel="teams",
+                    destination=name,
+                    outcome="sent" if delivered else "failed",
+                    detail=detail or "Test message",
+                )
+            except Exception:  # noqa: BLE001 - recording must not mask the result
+                pass
+        failures = [f"{name}: {detail}" for name, delivered, detail in results if not delivered]
+        if failures:
+            raise RuntimeError("; ".join(failures))
+        return f"Test card delivered to {', '.join(name for name, _, _ in results)}."
 
     def get_smtp_settings(self) -> dict[str, object]:
         """Return the central SMTP configuration, without the password."""

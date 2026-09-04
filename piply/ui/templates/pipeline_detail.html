@@ -322,6 +322,7 @@ function renderPipelineDag() {
             clickableStatuses: ["queued", "running", "success", "failed", "interrupted", "skipped", "cancelled"],
             onNodeClick: (node) => {
                 focusPipelineTask(node.task_id, false, false);
+                openPipelineFocusForNode();
             },
             defaultLayout: "flow",
         },
@@ -433,6 +434,14 @@ function applyPipelineFocusState(open, { persist = true, rerender = true } = {})
     if (rerender) renderPipelineDag();
 }
 
+function openPipelineFocusForNode() {
+    // Reveal the inspector on click, but never toggle it shut from here.
+    const grid = document.getElementById("pipeline-dag-grid");
+    if (grid && grid.classList.contains("inspector-collapsed")) {
+        applyPipelineFocusState(true);
+    }
+}
+
 function togglePipelineFocusPanel() {
     const grid = document.getElementById("pipeline-dag-grid");
     applyPipelineFocusState(grid.classList.contains("inspector-collapsed"));
@@ -526,7 +535,9 @@ function runFromPreview() {
 document.addEventListener("DOMContentLoaded", () => {
     // Metadata starts collapsed so the graph leads; the focus panel starts open.
     applyMetadataState(window.localStorage.getItem(METADATA_KEY) === "true", { persist: false });
-    applyPipelineFocusState(window.localStorage.getItem(FOCUS_KEY) !== "false", { persist: false, rerender: false });
+    // Full width by default: the graph is the point of the page, and the
+    // inspector opens itself the moment a node is clicked.
+    applyPipelineFocusState(window.localStorage.getItem(FOCUS_KEY) === "true", { persist: false, rerender: false });
     syncPipelineDagTasks(latestTaskRunPayloads);
     focusPipelineTask(selectedPipelineTaskId, false);
     if (pipelinePageActive) {

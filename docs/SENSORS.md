@@ -143,6 +143,99 @@ place does not re-fire — only a path that was not there before counts as new.
 > path first — a directory that does not exist is reported as a sensor failure
 > on the Diagnostics page.
 
+### What the triggered run receives
+
+A sensor does not just start a pipeline — it tells it what changed. Every
+sensor-triggered run gets variables usable in any `command:`, and the full event
+in `context["sensor"]` for Python tasks.
+
+```yaml
+    tasks:
+      announce:
+        type: cli
+        command: echo new file found: {sensor_file_name}
+      load:
+        type: cli
+        command: python load.py --file "{sensor_file}"
+```
+
+| Variable | From | Example |
+| --- | --- | --- |
+| `{sensor_id}` | all | `drop` |
+| `{sensor_type}` | all | `file_sensor` |
+| `{sensor_file}` | `file_sensor` | full path of the first new file |
+| `{sensor_file_name}` | `file_sensor` | `claims_2026.csv` |
+| `{sensor_files}` | `file_sensor` | every new path, space separated |
+| `{sensor_file_count}` | `file_sensor` | `1` |
+| `{sensor_table}` | `sql_sensor` | `events` |
+| `{sensor_cursor_from}` / `{sensor_cursor_to}` | `sql_sensor`, `api_sensor` | `41` / `57` |
+| `{sensor_row_count}` | `sql_sensor` | `16` |
+| `{sensor_url}` | `api_sensor` | the polled URL |
+
+`{sensor_file}` is deliberately singular and first, because one file at a time is
+the common case. When a poll finds several, `{sensor_files}` has them all and
+`{sensor_file_count}` says how many.
+
+A Python task gets the whole event:
+
+```python
+def process(context=None):
+    sensor = (context or {}).get("sensor") or {}
+    for path in sensor.get("new_files", []):
+        print(f"processing {path}")
+```
+
+The run log also records it without any configuration, so a run always shows
+what woke it:
+
+```
+Triggered by sensor 'drop'.
+Detected new files: /mnt/237share/inbound/claims_2026.csv
+```
+
+> **Quote the path.** `--file "{sensor_file}"` rather than `--file {sensor_file}`
+> — a share path can contain spaces, and an unquoted one becomes two arguments.
+
+### Using a variable for the path
+
+`path` is interpolated like any other value, so one sensor definition can watch
+a different directory per environment:
+
+```yaml
+variables:
+  share:
+    if: env == "prod"
+    then: /mnt/237share/inbound       # absolute: used exactly as written
+    else: dev_inbox                   # relative: resolved against workspace:
+
+pipelines:
+  ingest:
+    sensors:
+      drop:
+        type: file_sensor
+        path: "{share}"
+        pattern: "*.csv"
+    tasks:
+      load:
+        type: cli
+        command: python load.py --from {share}
+```
+
+`env` is a built-in that falls back to `PIPLY_ENV`, so nothing needs declaring —
+start the server with `PIPLY_ENV=prod` and the same config watches the share
+instead of the local folder. The same variable is available to the tasks, so the
+sensor and the code that reads the files cannot drift apart.
+
+The inline ternary works too, but the whole expression must be one quoted
+string — see [conditional values](YAML_SPECIFICATION.md#variables):
+
+```yaml
+  share: '"/mnt/237share/inbound" if env == "prod" else "dev_inbox"'
+```
+
+The mapping form above is preferred for paths, because a path usually needs
+quoting anyway and the two sets of quotes are easy to get wrong.
+
 ### Watching a network share (CIFS/SMB, NFS)
 
 Piply has no share-mounting feature and does not need one. Mount the share at

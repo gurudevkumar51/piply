@@ -145,3 +145,112 @@ async function saveDatabase() {
     }
 }
 </script>
+
+<script>
+// Reuses the run-status badge styles so an alert outcome reads the same way a
+// run status does everywhere else in the UI.
+const ALERT_OUTCOME_LABELS = {
+    sent: ["success", "delivered"],
+    failed: ["failed", "failed"],
+    skipped: ["skipped", "skipped"],
+    not_configured: ["queued", "nothing configured"],
+};
+
+function alertRelative(value) {
+    if (!value) return "";
+    const when = new Date(value);
+    if (Number.isNaN(when.getTime())) return value;
+    const seconds = Math.round((Date.now() - when.getTime()) / 1000);
+    if (seconds < 60) return "just now";
+    if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+    if (seconds < 86400) return Math.round(seconds / 3600) + "h ago";
+    return when.toLocaleString();
+}
+
+async function loadAlerts() {
+    const body = document.getElementById("alerts-body");
+    const pill = document.getElementById("alerts-count");
+    if (!body) return;
+    let data;
+    try {
+        data = await piplyRequest("/api/settings/notifications");
+    } catch (error) {
+        body.innerHTML = '<div class="empty-state">Could not load alert settings.</div>';
+        return;
+    }
+
+    if (!data.configured) {
+        pill.textContent = "not configured";
+        body.innerHTML =
+            '<div class="empty-state">No <span class="mono">notifications:</span> destinations are declared. ' +
+            "Add a <span class=\"mono\">notifications.teams</span> block to your config, then reload.</div>";
+        return;
+    }
+
+    const rows = data.destinations.map((item) => {
+        const used = (data.used_by[item.name] || []);
+        const state = item.configured
+            ? '<span class="status-badge success">ready</span>'
+            : '<span class="status-badge failed">webhook unresolved</span>';
+        return `<tr>
+            <td class="mono">${item.name}</td>
+            <td>${item.type}</td>
+            <td>${state}</td>
+            <td>${used.length ? used.join("<br>") : '<span class="muted">not used by any pipeline</span>'}</td>
+            <td><button class="button ghost tiny-button" onclick="sendTestAlert('${item.name}')">Send test</button></td>
+        </tr>`;
+    });
+
+    const deliveries = (data.deliveries || []).map((item) => {
+        const [tone, label] = ALERT_OUTCOME_LABELS[item.outcome] || ["warn", item.outcome];
+        const run = item.run_id ? `<a href="/runs/${item.run_id}">${item.run_id}</a>` : '<span class="muted">test</span>';
+        return `<tr>
+            <td>${alertRelative(item.created_at)}</td>
+            <td class="mono">${item.pipeline_id}</td>
+            <td>${run}</td>
+            <td class="mono">${item.destination}</td>
+            <td><span class="status-badge ${tone}">${label}</span></td>
+            <td class="muted">${item.detail ? item.detail : ""}</td>
+        </tr>`;
+    });
+
+    const failing = data.destinations.filter((item) => !item.configured).length;
+    pill.textContent = failing ? `${failing} unresolved` : `${data.destinations.length} destination(s)`;
+
+    body.innerHTML = `
+        ${(data.warnings || []).map((w) => `<p class="footer-note">${w}</p>`).join("")}
+        <table class="data-table">
+            <thead><tr><th>Destination</th><th>Type</th><th>State</th><th>Used by</th><th></th></tr></thead>
+            <tbody>${rows.join("")}</tbody>
+        </table>
+        <h3 class="small-kicker" style="margin-top:18px">Recent deliveries</h3>
+        ${
+            deliveries.length
+                ? `<table class="data-table">
+                     <thead><tr><th>When</th><th>Pipeline</th><th>Run</th><th>Destination</th><th>Outcome</th><th>Detail</th></tr></thead>
+                     <tbody>${deliveries.join("")}</tbody>
+                   </table>`
+                : '<div class="empty-state">Nothing sent yet. Use <strong>Send test</strong> to check a webhook without waiting for a run.</div>'
+        }`;
+}
+
+async function sendTestAlert(name) {
+    const output = document.getElementById("alerts-result");
+    output.hidden = false;
+    output.textContent = `Posting a test card to '${name}'...`;
+    try {
+        const response = await fetch("/api/settings/notifications/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ destination: name }),
+        });
+        const data = await response.json();
+        output.textContent = response.ok ? data.detail : data.detail || "Test failed.";
+    } catch (error) {
+        output.textContent = "Test failed: " + error;
+    }
+    loadAlerts();
+}
+
+document.addEventListener("DOMContentLoaded", loadAlerts);
+</script>

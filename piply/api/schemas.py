@@ -84,6 +84,12 @@ class SmtpSettingsRequest(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
 
 
+class NotificationTestRequest(BaseModel):
+    """Ask for one test card to be posted to a named destination."""
+
+    destination: str
+
+
 class DatabaseSettingsRequest(BaseModel):
     """Where Piply should keep its own runtime state."""
 
