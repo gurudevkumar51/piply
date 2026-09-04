@@ -160,7 +160,7 @@ def _merge_included_document(
             continue
         # Absent from `origins` means it came from the root file.
         first = origins.get(dotted, root)
-        raise ConfigError(f"'{dotted}' is defined in more than one config file: " f"'{first.name}' and '{source.name}'")
+        raise ConfigError(f"'{dotted}' is defined in more than one config file: '{first.name}' and '{source.name}'")
 
 
 def load_raw_config(path: Path) -> tuple[dict[str, Any], list[Path]]:
