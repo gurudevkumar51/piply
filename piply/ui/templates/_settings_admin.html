@@ -1,3 +1,73 @@
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title">Database</h2>
+            <p class="panel-copy">
+                Where Piply keeps its own runs, logs, schedules, and accounts. This is not
+                the databases your pipelines read from.
+            </p>
+        </div>
+        <span class="meta-pill">{{ database.backend }}</span>
+    </div>
+
+    <div class="detail-card">
+        <div class="detail-label">Current</div>
+        <div class="detail-value mono path-value">{{ database.location }}</div>
+        <p class="setup-hint">
+            {{ database.row_counts.runs }} run(s), {{ database.row_counts.users }} account(s).
+        </p>
+    </div>
+
+    {% if database.env_managed %}
+    <p class="footer-note">
+        <strong>PIPLY_DATABASE is set in this server's environment.</strong> That overrides
+        the <span class="mono">.env</span> file, so it cannot be changed from here. Edit it
+        where it is set — your compose file, systemd unit, or Kubernetes manifest — and
+        restart.
+    </p>
+    {% else %}
+    <fieldset class="setup-choice">
+        <legend class="small-kicker">Move to</legend>
+        <label class="setup-option">
+            <input type="radio" name="db-backend" value="sqlite" checked onchange="showDatabaseBackend('sqlite')">
+            <span><strong>SQLite file</strong>
+                <span class="setup-hint">One file, nothing to install.</span></span>
+        </label>
+        <label class="setup-option">
+            <input type="radio" name="db-backend" value="postgres" onchange="showDatabaseBackend('postgres')">
+            <span><strong>PostgreSQL</strong>
+                <span class="setup-hint">Survives a container redeploy.</span></span>
+        </label>
+    </fieldset>
+
+    <div id="db-sqlite-fields" class="settings-form setup-fields">
+        <label class="login-field"><span class="small-kicker">Database file</span>
+            <input id="db-sqlite-path" type="text" spellcheck="false" autocomplete="off"
+                   placeholder=".piply/piply.db"></label>
+    </div>
+    <div id="db-postgres-fields" class="settings-form setup-fields" hidden>
+        <label class="login-field"><span class="small-kicker">Connection URL</span>
+            <input id="db-dsn" type="text" spellcheck="false" autocomplete="off"
+                   placeholder="postgresql://piply:secret@db.internal:5432/piply"></label>
+    </div>
+
+    <label class="toolbar-check">
+        <input id="db-migrate" type="checkbox" checked>
+        Copy the current data across
+    </label>
+    <p class="setup-hint">
+        Piply connects before saving, so a wrong value is refused here. Without the copy the
+        new database starts from whatever it already holds — usually nothing. The old
+        database is never deleted either way, and copying needs an empty target.
+    </p>
+
+    <div class="card-actions">
+        <button class="button primary" type="button" onclick="saveDatabase()">Test and switch</button>
+    </div>
+    {% endif %}
+    <pre class="code-block" id="database-result" hidden></pre>
+</section>
+
 {# Admin-only panels: central SMTP and account management. #}
 <section class="panel">
     <div class="panel-header">

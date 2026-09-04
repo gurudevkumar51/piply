@@ -16,6 +16,8 @@ It stays small on purpose:
 
 - Multi-task pipelines with `depends_on`
 - Python script, Python callable, CLI, API, webhook, email, and SSH tasks
+- Split the config across files with `include:` — deployments in the master,
+  pipelines and alerts in their own
 - Reusable YAML `variables` with `{name}` interpolation
 - `.env`, environment variables, explicit secrets, and reusable SQL connections
 - Metadata-driven `entities` expansion for reusable task templates
@@ -47,9 +49,15 @@ It stays small on purpose:
 - Prometheus metrics at `GET /metrics` and a runtime Diagnostics page
 - Airflow-style pipeline listing with template grouping, sorting, and filtering
 - Last-five-runs status dots on every pipeline row, each linking to its run
-- Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`
+- Guided first-run setup: choose SQLite or PostgreSQL, and create the first
+  admin, before anything is written
+- Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`, movable
+  later from Settings with the existing history copied across
 - Accounts, roles, and per-pipeline view/edit/run permissions
+- Runs record who started them; pauses and manual runs are attributed by name
 - Central SMTP configured once, reused by email tasks and run notifications
+- Microsoft Teams alerts to channels and group chats, with reusable destination
+  groups and webhooks kept in the environment rather than YAML
 - Runs page with filters, sorting, and full multi-level trigger lineage
 
 ## Quick Start
@@ -291,11 +299,13 @@ piply stop --config piply-demo/piply.yaml
 - [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
 - [YAML Specification](docs/YAML_SPECIFICATION.md): every config key, with defaults
 - [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
+- [Sensors](docs/SENSORS.md): file, SQL, and API triggers, and how polling actually behaves
+- [Notifications](docs/NOTIFICATIONS.md): Microsoft Teams and email alerts, and what happens when delivery fails
 - [UI Guide](docs/UI_GUIDE.md): every page and what it answers
 - [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
 - [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
-- [Usage Guide](wiki/USAGE_GUIDE.md): longer-form walkthrough
+- [HTTP API Reference](docs/API.md): every route, with the permission it requires
 - [Changelog](CHANGELOG.md): what changed per release, and what to check before upgrading
 
 **Understanding Piply**
@@ -305,8 +315,6 @@ piply stop --config piply-demo/piply.yaml
 - [Technical Architecture](docs/architecture/technical_architecture.md): maintainer guide to the whole system
 - [Roadmap](docs/ROADMAP.md): what is planned for the next releases
 - [Future Features](docs/FUTURE_FEATURES.md): proposed ideas, ranked by value vs cost
-- [Wiki Overview](wiki/README.md): architecture and feature summary
-- [UI And API Guide](wiki/UI_API_GUIDE.md): screens, actions, and API examples
 
 ## Metadata Store
 

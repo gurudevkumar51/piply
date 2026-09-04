@@ -16,6 +16,16 @@ async function piplyRequest(url, options = {}) {
     ...options,
   });
 
+  if (response.status === 401) {
+    // The session expired, or authentication was switched on while this page
+    // was open. Showing "Authentication required" in place would leave someone
+    // clicking a form that can never succeed, so send them to sign in and
+    // return here afterwards.
+    const back = encodeURIComponent(window.location.pathname + window.location.search);
+    window.location.href = `/login?next=${back}`;
+    throw new Error("Your session has expired. Redirecting to sign in.");
+  }
+
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || "Request failed");

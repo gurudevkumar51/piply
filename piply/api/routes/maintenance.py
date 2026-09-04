@@ -15,8 +15,15 @@ from piply.api.auth import (
     require_permission,
     visible_pipeline_ids,
 )
+from piply.api.routes.setup import (
+    apply_database_setting,
+    database_is_env_managed,
+    persist_database_setting,
+    validate_database_choice,
+)
 from piply.api.schemas import (
     BackfillScheduleRequest,
+    DatabaseSettingsRequest,
     PreviewRequest,
     PruneRequest,
     RunResponse,
@@ -24,7 +31,10 @@ from piply.api.schemas import (
     SmtpTestRequest,
 )
 from piply.core.artifacts import is_readable_artifact
+from piply.core.dialects import is_postgres_dsn
 from piply.core.secrets import mask_env_values
+from piply.core.store import RunStore
+from piply.settings import SettingsError
 
 router = APIRouter(tags=["operations"])
 
@@ -215,6 +225,18 @@ def stream_logs(
 
 
 _SMTP_ADMIN_ONLY = "Only administrators can change SMTP settings."
+_DATABASE_ADMIN_ONLY = "Only administrators can change the database."
+
+
+def _current_database_value(request: Request) -> str | None:
+    """Return the configured PIPLY_DATABASE value, credentials included.
+
+    Used only to detect a no-op change; it is never returned to a caller.
+    """
+    settings = request.app.state.settings
+    if settings.database_dsn is not None:
+        return settings.database_dsn
+    return None if settings.database_path is None else str(settings.database_path)
 
 
 @router.get("/api/settings/smtp", response_model=dict[str, object])
@@ -245,3 +267,94 @@ def test_smtp(request: Request, payload: SmtpTestRequest) -> dict[str, str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - surfaced to the admin as a message
         raise HTTPException(status_code=502, detail=f"SMTP test failed: {exc}") from exc
+
+
+@router.get("/api/settings/database", response_model=dict[str, object])
+def get_database_settings(request: Request) -> dict[str, object]:
+    """Describe the metadata store. Credentials are never returned."""
+    require_admin(request, _DATABASE_ADMIN_ONLY)
+    service = get_service(request)
+    settings = request.app.state.settings
+    return {
+        "backend": service.store.dialect.name,
+        # `location` is already credential-free for a DSN.
+        "location": service.database_location,
+        "configured": settings.database_configured,
+        # A read-only install cannot be changed from here; the UI hides the form.
+        "env_managed": database_is_env_managed(),
+        "row_counts": service.store.row_counts(),
+    }
+
+
+@router.put("/api/settings/database", response_model=dict[str, object])
+def put_database_settings(request: Request, payload: DatabaseSettingsRequest) -> dict[str, object]:
+    """Point Piply at a different metadata store.
+
+    Admin-only, and validated by opening the target before anything is written,
+    so a wrong DSN fails here rather than at the next restart.
+
+    Switching does **not** move data. The old database is left untouched and the
+    new one starts from whatever it already holds, which is usually nothing —
+    set `migrate` to copy the current contents across instead.
+    """
+    require_admin(request, _DATABASE_ADMIN_ONLY)
+    if database_is_env_managed():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "PIPLY_DATABASE is set in this process's environment, which overrides the "
+                ".env file, so changing it here would have no effect. Change it where it is "
+                "set — your compose file, systemd unit, or Kubernetes manifest — and restart."
+            ),
+        )
+    service = get_service(request)
+
+    # A run in flight holds the *old* store: it would finish writing there while
+    # the new database keeps the half-copied row, leaving a run stuck at
+    # `running` forever and the real result in a database nothing reads.
+    # Refusing is the only answer that cannot lose a run.
+    in_flight = service.store.count_running_runs()
+    if in_flight:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{in_flight} run(s) are still in progress. Wait for them to finish, or pause "
+                "the schedules, then switch — moving the database now would strand them."
+            ),
+        )
+
+    config_path = Path(service.config_path)
+
+    try:
+        value, description = validate_database_choice(
+            payload.backend.strip().lower(),
+            payload.sqlite_path or "",
+            payload.dsn or "",
+            base_dir=config_path.parent,
+        )
+    except (ValueError, SettingsError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if value == _current_database_value(request):
+        raise HTTPException(status_code=400, detail="That is already the configured database.")
+
+    copied: dict[str, int] | None = None
+    if payload.migrate:
+        try:
+            target = RunStore(value if is_postgres_dsn(value) else Path(value))
+            copied = service.store.copy_into(target)
+        except ValueError as exc:
+            # `copy_into` refuses a non-empty target rather than merging two
+            # histories, which has no safe answer.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - surfaced to the admin verbatim
+            raise HTTPException(status_code=502, detail=f"Copying data failed: {exc}") from exc
+
+    persist_database_setting(config_path, value)
+    apply_database_setting(request)
+    return {
+        "status": "updated",
+        "backend": get_service(request).store.dialect.name,
+        "location": description,
+        "migrated": copied,
+    }

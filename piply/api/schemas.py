@@ -84,6 +84,18 @@ class SmtpSettingsRequest(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
 
 
+class DatabaseSettingsRequest(BaseModel):
+    """Where Piply should keep its own runtime state."""
+
+    backend: str = "sqlite"
+    sqlite_path: str | None = None
+    dsn: str | None = None
+    #: Copy the current runs, logs, and accounts into the new database. Only
+    #: possible when the target is empty; without it the new store starts blank
+    #: and the old one is left untouched.
+    migrate: bool = False
+
+
 class SmtpTestRequest(BaseModel):
     """Where to send a test message."""
 
@@ -118,6 +130,8 @@ class RunResponse(BaseModel):
     parent_run_id: str | None = None
     parent_pipeline_id: str | None = None
     tenant_id: str | None = None
+    #: Account that asked for this run; None for scheduler and sensor runs.
+    actor: str | None = None
 
     @classmethod
     def from_record(cls, record: RunRecord) -> RunResponse:
@@ -148,6 +162,7 @@ class RunResponse(BaseModel):
             parent_run_id=record.parent_run_id,
             parent_pipeline_id=record.parent_pipeline_id,
             tenant_id=record.tenant_id,
+            actor=record.actor,
         )
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qsl
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -57,6 +57,22 @@ def _user_payload(user) -> dict[str, object]:
         "last_login_at": user.last_login_at,
         "permissions": {pipeline_id: sorted(actions) for pipeline_id, actions in user.permissions.items()},
     }
+
+
+def _set_session_cookie(request: Request, response, username: str) -> None:
+    """Attach a signed session cookie for `username` to a response.
+
+    Shared by sign-in and first-admin creation so the two cannot drift apart on
+    flags like `secure` or `samesite`.
+    """
+    response.set_cookie(
+        SESSION_COOKIE,
+        issue_session(get_service(request).store, username),
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
 
 
 def _safe_next(target: str | None) -> str:
@@ -138,14 +154,7 @@ async def login_submit(request: Request):
         return RedirectResponse(url="/login?error=Invalid+username+or+password", status_code=303)
 
     response = RedirectResponse(url=_safe_next(next), status_code=303)
-    response.set_cookie(
-        SESSION_COOKIE,
-        issue_session(service.store, session_name),
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-        path="/",
-    )
+    _set_session_cookie(request, response, session_name)
     return response
 
 
@@ -202,11 +211,24 @@ def list_users(request: Request) -> list[dict[str, object]]:
 
 
 @router.post("/api/users", response_model=dict[str, object])
-def create_user(request: Request, payload: CreateUserRequest) -> dict[str, object]:
-    """Create one account."""
+def create_user(request: Request, payload: CreateUserRequest, response: Response) -> dict[str, object]:
+    """Create one account.
+
+    Creating the *first* account switches authentication on, which would
+    otherwise lock out the very session that just created it: the page has no
+    session cookie, so every following request returns 401. The usual symptom is
+    an admin reporting that accounts they created cannot sign in — because the
+    creation silently failed with 401 and the account never existed.
+
+    So when this call is what enabled authentication, the caller is signed in as
+    the account they just made. That grants nothing new: authentication was off
+    at the moment of the request, so this caller could already do everything.
+    """
+    service = get_service(request)
     _require_admin(request)
+    was_open = not service.auth_required
     try:
-        user = get_service(request).create_user(
+        user = service.create_user(
             payload.username,
             payload.password,
             role=payload.role,
@@ -214,6 +236,9 @@ def create_user(request: Request, payload: CreateUserRequest) -> dict[str, objec
         )
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if was_open and service.auth_required and user.is_admin:
+        _set_session_cookie(request, response, user.username)
     return _user_payload(user)
 
 

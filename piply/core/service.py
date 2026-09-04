@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
 import re
 import secrets
@@ -46,6 +47,7 @@ from .models import (
     RunRecord,
     TaskDefinition,
 )
+from .notifications import NotificationError, build_alert, send_alert
 from .preview import PipelinePreview, build_pipeline_preview, unresolved_placeholders
 from .processes import is_process_alive
 from .retry import build_retry_plan
@@ -102,6 +104,9 @@ def _format_relative_time(delta_seconds: float) -> str:
 
 #: A runtime input has to be a valid placeholder name or it can never match one.
 _RUNTIME_INPUT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: Scheduler activity goes to the server log, where uvicorn already writes.
+_LOGGER = logging.getLogger("piply.scheduler")
 
 
 class PipelineService:
@@ -177,7 +182,7 @@ class PipelineService:
     def reload_project(self, *, force: bool = False) -> ProjectDefinition:
         """Reload the config when it changes on disk."""
         with self._lock:
-            current_mtime = self.config_path.stat().st_mtime
+            current_mtime = self._config_fingerprint()
             if not force and self._project is not None and self._config_mtime == current_mtime:
                 return self._project
 
@@ -185,8 +190,29 @@ class PipelineService:
                 self.config_path,
                 default_max_parallel_tasks=self.settings.default_max_parallel_tasks,
             )
-            self._config_mtime = current_mtime
+            # Recomputed now that the project knows every file it was built from,
+            # so the next call compares like with like instead of reloading once more.
+            self._config_mtime = self._config_fingerprint()
             return self._project
+
+    def _config_fingerprint(self) -> float:
+        """Return a value that changes when any config file changes.
+
+        With `include:` the project spans several files, so watching only the
+        root one would mean edits to an included file never took effect.
+        """
+        total = self.config_path.stat().st_mtime
+        project = self._project
+        if project is not None:
+            for source in project.config_sources:
+                if source == self.config_path:
+                    continue
+                try:
+                    total += source.stat().st_mtime
+                except OSError:
+                    # A removed include shows up as a change, then as a load error.
+                    total += 1
+        return total
 
     def validate(self) -> ProjectDefinition:
         """Validate and return the current project config."""
@@ -559,6 +585,16 @@ class PipelineService:
                     enqueued += 1
         return enqueued
 
+    def _note_trigger_skipped(self, item, reason: str) -> None:
+        """Log and record why a queued trigger was passed over this tick.
+
+        The reason is stored on the queue row so it is visible without reading
+        the server log, and logged only when it changes: a paused pipeline is
+        re-evaluated every tick and would otherwise print the same line forever.
+        """
+        if self.store.record_queue_skip(item.queue_id, reason):
+            _LOGGER.info("Skipping trigger for '%s': %s", item.pipeline_id, reason)
+
     def drain_trigger_queue(
         self,
         *,
@@ -585,14 +621,25 @@ class PipelineService:
                 self.store.mark_queue_failed(item.queue_id, str(exc))
                 continue
 
-            if not pipeline.enabled or self.store.is_pipeline_paused(item.pipeline_id):
-                blocked_pipelines.add(item.pipeline_id)
-                continue
-            if self.store.count_running_runs(item.pipeline_id) > 0:
+            # A trigger that cannot run yet stays queued and is retried on the
+            # next tick. Recording why turns "nothing happened" into something
+            # you can actually diagnose.
+            skip_reason: str | None = None
+            if not pipeline.enabled:
+                skip_reason = "pipeline is disabled in the config"
+            elif self.store.is_pipeline_paused(item.pipeline_id):
+                skip_reason = "pipeline is paused"
+            elif self.store.count_running_runs(item.pipeline_id) > 0:
+                skip_reason = "a run is already in progress"
+
+            if skip_reason is not None:
+                self._note_trigger_skipped(item, skip_reason)
                 blocked_pipelines.add(item.pipeline_id)
                 continue
 
             if not self.store.claim_queue_item(item.queue_id):
+                # Another worker took it between listing and claiming.
+                self._note_trigger_skipped(item, "the trigger was claimed by another dispatcher")
                 blocked_pipelines.add(item.pipeline_id)
                 continue
 
@@ -758,6 +805,34 @@ class PipelineService:
             "has_run_config": self.store.get_run_config(run_id) is not None,
         }
 
+    def _downstream_pending_state(self, run: RunRecord, target: str) -> tuple[str, str]:
+        """Explain why a downstream pipeline has not produced a run yet.
+
+        Reporting everything as "pending" hides the cases that will never
+        resolve on their own — a paused or disabled target waits forever, and
+        that is exactly when someone opens this page to find out why.
+        """
+        if run.status in {"queued", "running"}:
+            return "waiting", "Waiting for this run to finish."
+        if run.status != "success":
+            return "skipped", f"Not triggered because this run ended as {run.status}."
+
+        try:
+            target_pipeline = self.get_pipeline(target)
+        except KeyError:
+            return "unknown", f"'{target}' is no longer defined in the config."
+
+        if not target_pipeline.enabled:
+            return "disabled", "Will not run: the pipeline is disabled in the config."
+        if self.store.is_pipeline_paused(target):
+            return "paused", "Will not run until the pipeline is resumed."
+
+        queued = self.store.pending_queue_item(target)
+        if queued is not None:
+            # `error` on a queued row holds the reason it was last passed over.
+            return "queued", queued.error or "Queued, waiting for the scheduler."
+        return "pending", "Trigger has not been queued yet."
+
     def downstream_run_links(self, run: RunRecord) -> list[dict[str, object]]:
         """Return every downstream pipeline this run triggers, with its run status.
 
@@ -778,12 +853,16 @@ class PipelineService:
                 target_title = self.get_pipeline(target).title
             except KeyError:
                 pass
+            state, reason = ("", "")
+            if child is None:
+                state, reason = self._downstream_pending_state(run, target)
             links.append(
                 {
                     "pipeline_id": target,
                     "pipeline_title": target_title,
                     "run_id": None if child is None else child.run_id,
-                    "status": child.status if child is not None else ("pending" if run.status == "success" else "-"),
+                    "status": child.status if child is not None else state,
+                    "reason": None if child is not None else reason,
                     "started_at": None if child is None or child.started_at is None else child.started_at.isoformat(),
                     "duration_seconds": None if child is None else child.duration_seconds,
                     "successful_tasks": 0 if child is None else child.successful_tasks,
@@ -800,6 +879,7 @@ class PipelineService:
                     "pipeline_title": child.pipeline_title,
                     "run_id": child.run_id,
                     "status": child.status,
+                    "reason": None,
                     "started_at": None if child.started_at is None else child.started_at.isoformat(),
                     "duration_seconds": child.duration_seconds,
                     "successful_tasks": child.successful_tasks,
@@ -1133,8 +1213,13 @@ class PipelineService:
         initial_context: dict[str, object] | None = None,
         inherited_variables: dict[str, str] | None = None,
         inherited_env: dict[str, str] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
-        """Create and dispatch one new run for a pipeline."""
+        """Create and dispatch one new run for a pipeline.
+
+        ``actor`` records which account asked for the run, so history shows who
+        did what rather than only what happened.
+        """
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         pipeline = self._clone_pipeline_with_command_overrides(
@@ -1173,7 +1258,10 @@ class PipelineService:
                     parent_run_id=parent_run_id,
                     parent_pipeline_id=parent_pipeline_id,
                 ),
+                actor=actor,
             )
+            if actor:
+                _LOGGER.info("Pipeline '%s' run %s by %s", pipeline.pipeline_id, trigger, actor)
             dispatch_context = dict(initial_context or {})
             if pipeline.variables:
                 dispatch_context.setdefault("variables", dict(pipeline.variables))
@@ -1211,6 +1299,7 @@ class PipelineService:
         initial_context: dict[str, object] | None = None,
         source_run_id: str | None = None,
         inherited_variables: dict[str, str] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
         """Create and dispatch one run scoped to a selected task and its dependencies.
 
@@ -1261,7 +1350,10 @@ class PipelineService:
                 initial_context=dispatch_context,
                 task_id=task_id,
             ),
+            actor=actor,
         )
+        if actor:
+            _LOGGER.info("Pipeline '%s' task '%s' run by %s", pipeline_id, task_id, actor)
         if tenant_id is not None:
             dispatch_context.setdefault("tenant_id", tenant_id)
         self._dispatch_engine(
@@ -1461,6 +1553,63 @@ class PipelineService:
         return queued
 
     def notify_run_outcome(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Tell everyone configured about a finished run.
+
+        Email and Teams are independent: one failing never stops the other, and
+        neither changes the run's status. A pipeline lists *who* to tell; how to
+        reach them lives in central settings or the `notifications:` block.
+        """
+        self._send_teams_alert(pipeline, run)
+        self._send_email_notification(pipeline, run)
+
+    def _send_teams_alert(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Post the standard alert card to this pipeline's Teams destinations."""
+        names = pipeline.alert_on_success if run.status == "success" else pipeline.alert_on_failure
+        if not names:
+            return
+
+        settings = getattr(self.project, "notifications", None)
+        if settings is None or not settings.configured:
+            self.store.append_log(
+                run.run_id,
+                "Teams notification skipped: no 'notifications:' destinations are declared.",
+                stream="stderr",
+            )
+            return
+
+        try:
+            destinations = settings.resolve(names)
+        except NotificationError as exc:
+            # A typo in a destination name is reported against the run rather
+            # than blocking the whole project from loading.
+            self.store.append_log(run.run_id, f"Teams notification failed: {exc}", stream="stderr")
+            return
+
+        def _log(message: str, is_error: bool) -> None:
+            self.store.append_log(run.run_id, message, stream="stderr" if is_error else "stdout")
+
+        send_alert(
+            destinations,
+            build_alert(
+                title=pipeline.title,
+                pipeline_id=pipeline.pipeline_id,
+                status=run.status,
+                run_id=run.run_id,
+                trigger=run.trigger,
+                tasks=f"{run.successful_tasks}/{run.task_count} succeeded",
+                duration="unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s",
+                error=run.error,
+                run_url=self._run_url(run.run_id),
+            ),
+            on_log=_log,
+        )
+
+    def _run_url(self, run_id: str) -> str | None:
+        """Return a link back to the run, when a public base URL is configured."""
+        base = (os.environ.get("PIPLY_BASE_URL") or "").strip().rstrip("/")
+        return f"{base}/runs/{run_id}" if base else None
+
+    def _send_email_notification(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Email the configured recipients about a finished run.
 
         Delivery uses the central SMTP settings, so a pipeline only lists who to
@@ -1596,10 +1745,16 @@ class PipelineService:
             return
         self.drain_trigger_queue(limit=20)
 
-    def set_pipeline_paused(self, pipeline_id: str, paused: bool) -> PipelineSummary:
-        """Pause or resume a pipeline schedule."""
+    def set_pipeline_paused(self, pipeline_id: str, paused: bool, *, actor: str | None = None) -> PipelineSummary:
+        """Pause or resume a pipeline schedule, recording who asked."""
         self.get_pipeline(pipeline_id)
         self.store.set_pipeline_paused(pipeline_id, paused)
+        _LOGGER.info(
+            "Pipeline '%s' %s by %s",
+            pipeline_id,
+            "paused" if paused else "resumed",
+            actor or "an unauthenticated caller",
+        )
         if not paused:
             self.drain_trigger_queue(limit=20)
         return self.get_pipeline_summary(pipeline_id)

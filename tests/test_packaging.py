@@ -13,6 +13,7 @@ sees nothing. It was present locally, so the whole suite passed while
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -211,3 +212,48 @@ def test_login_form_parsing_handles_awkward_credentials(tmp_path: Path) -> None:
             follow_redirects=False,
         )
         assert invalid_utf8.status_code == 400
+
+
+def test_api_reference_covers_every_route() -> None:
+    """`docs/API.md` must list every route the app actually serves.
+
+    A reference that silently falls behind is what `wiki/` became: it listed 32
+    of 59 routes and described an authentication model that no longer existed.
+    Checking it here means adding a route without documenting it fails the build
+    rather than quietly producing a stale document.
+    """
+    doc = (ROOT / "docs" / "API.md").read_text(encoding="utf-8")
+
+    routes: set[str] = set()
+    for path in (ROOT / "piply" / "api" / "routes").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        prefix_match = re.search(r'APIRouter\((?:[^)]*?)prefix="([^"]*)"', text, re.S)
+        prefix = prefix_match.group(1) if prefix_match else ""
+        for node in ast.parse(text).body:
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for decorator in node.decorator_list:
+                if (
+                    isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Attribute)
+                    and isinstance(decorator.func.value, ast.Name)
+                    and decorator.func.value.id == "router"
+                ):
+                    raw = (
+                        decorator.args[0].value
+                        if decorator.args and isinstance(decorator.args[0], ast.Constant)
+                        else ""
+                    )
+                    routes.add((prefix + raw) or "/")
+
+    assert len(routes) > 40, "route discovery looks broken, not a documentation gap"
+
+    def documented(route: str) -> bool:
+        if route == "/":
+            return "| `/` |" in doc
+        # The reference shortens these path parameters for readability.
+        shortened = route.replace("{pipeline_id}", "{id}").replace("{target_pipeline_id}", "{target_id}")
+        return route in doc or shortened in doc
+
+    missing = sorted(route for route in routes if not documented(route))
+    assert not missing, f"routes missing from docs/API.md: {missing}"

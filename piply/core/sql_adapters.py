@@ -100,7 +100,16 @@ def connect_sql(connection: str | None = None, *, database: Path | None = None):
         if scheme in {"mssql", "mssql+pyodbc", "sqlserver", "odbc"}:
             pyodbc = importlib.import_module("pyodbc")
             return pyodbc.connect(connection)
-        raise RuntimeError(f"Unsupported sql_sensor connection scheme '{scheme or '<none>'}'")
+        if not scheme:
+            # Overwhelmingly this is a bare file path used where a DSN belongs —
+            # `connections: {app: local/app.db}` then `connection: "@app"`. The
+            # old message named the empty scheme and left you guessing.
+            raise RuntimeError(
+                f"sql_sensor connection '{mask_connection_secret(connection) or connection}' is not a "
+                "connection string. Use 'database:' for a SQLite file path, or give a DSN such as "
+                "sqlite:///path/to.db or postgresql://user:pass@host/db."
+            )
+        raise RuntimeError(f"Unsupported sql_sensor connection scheme '{scheme}'")
 
     if database is None or not database.exists():
         return None

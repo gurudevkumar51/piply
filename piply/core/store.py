@@ -110,7 +110,8 @@ class RunStore:
                     parent_pipeline_id TEXT,
                     tenant_id TEXT,
                     owner_pid INTEGER,
-                    run_config TEXT
+                    run_config TEXT,
+                    actor TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS task_runs (
@@ -288,6 +289,10 @@ class RunStore:
                 connection.execute("ALTER TABLE runs ADD COLUMN owner_pid INTEGER")
             if "run_config" not in self._run_columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN run_config TEXT")
+            if "actor" not in self._run_columns:
+                # Who asked for this run. NULL for runs that predate the column
+                # and for anything the scheduler started on its own.
+                connection.execute("ALTER TABLE runs ADD COLUMN actor TEXT")
 
             if "priority" not in self._task_run_columns:
                 connection.execute("ALTER TABLE task_runs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
@@ -317,8 +322,13 @@ class RunStore:
         parent_pipeline_id: str | None = None,
         tenant_id: str | None = None,
         run_config: dict[str, object] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
-        """Insert one new run and its queued task records."""
+        """Insert one new run and its queued task records.
+
+        ``actor`` is the account that asked for the run, or None when the
+        scheduler or a sensor started it on its own.
+        """
         with self._lock, self._connect() as connection:
             run_id = uuid.uuid4().hex[:12]
             created_at = datetime.now(timezone.utc)
@@ -346,6 +356,7 @@ class RunStore:
                 "tenant_id": tenant_id,
                 "owner_pid": os.getpid(),
                 "run_config": None if run_config is None else json.dumps(run_config, default=str, sort_keys=True),
+                "actor": actor,
             }
 
             if "script_path" in self._run_columns:
@@ -1891,6 +1902,41 @@ class RunStore:
             connection.commit()
         return cursor.rowcount > 0
 
+    def pending_queue_item(self, pipeline_id: str) -> TriggerQueueRecord | None:
+        """Return the oldest still-queued trigger for a pipeline, if any.
+
+        Used by the run page to say why a downstream pipeline has not started:
+        a queued item carries the reason it was passed over.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM trigger_queue
+                WHERE pipeline_id = ? AND status = 'queued'
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (pipeline_id,),
+            ).fetchone()
+        return None if row is None else self._row_to_queue_record(row)
+
+    def record_queue_skip(self, queue_id: int, reason: str) -> bool:
+        """Record why a queued trigger was passed over, leaving it queued.
+
+        Returns whether the reason changed. A blocked pipeline is re-evaluated
+        on every scheduler tick, so callers use this to log the reason once per
+        change instead of once every ten seconds.
+        """
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT error FROM trigger_queue WHERE id = ?", (queue_id,)).fetchone()
+            if row is None:
+                return False
+            if (row["error"] or "") == reason:
+                return False
+            connection.execute("UPDATE trigger_queue SET error = ? WHERE id = ?", (reason, queue_id))
+            connection.commit()
+        return True
+
     def mark_queue_failed(self, queue_id: int, error: str) -> None:
         """Mark one trigger event as failed after an unrecoverable dispatch error."""
         with self._lock, self._connect() as connection:
@@ -2357,6 +2403,7 @@ class RunStore:
             parent_run_id=row["parent_run_id"] if "parent_run_id" in row.keys() else None,
             parent_pipeline_id=row["parent_pipeline_id"] if "parent_pipeline_id" in row.keys() else None,
             tenant_id=row["tenant_id"] if "tenant_id" in row.keys() else None,
+            actor=row["actor"] if "actor" in row.keys() else None,
         )
 
     def _row_to_task_run(self, row: sqlite3.Row) -> TaskRunRecord:

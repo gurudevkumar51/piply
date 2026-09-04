@@ -240,6 +240,7 @@ One row per pipeline execution.
 | `tenant_id` | TEXT | Optional tenant label passed at trigger time. |
 | `owner_pid` | INTEGER | PID that owns the run. Lets startup recovery tell a crashed run from one owned by a live process. |
 | `run_config` | TEXT | JSON snapshot of the resolved variables, environment, and settings. This is what makes a downstream run retryable without re-running its upstream. Contains credentials, so the API masks them on the way out. |
+| `actor` | TEXT | Account that asked for the run. Null for schedule and sensor runs, and for runs created before this column existed. |
 
 ### `task_runs`
 
@@ -388,7 +389,7 @@ Pending work, so a trigger survives a restart.
 | `dedupe_key` | TEXT | Collapses duplicates via insert-or-ignore. |
 | `payload_json` | TEXT | Variables and context to pass through. |
 | `dispatched_at`, `dispatched_run_id` | TEXT | What the entry became. |
-| `error` | TEXT | Why dispatch failed. |
+| `error` | TEXT | Why dispatch failed, or — while still `queued` — why the last scheduler tick passed it over, such as `pipeline is paused`. |
 
 ### `sensor_state`
 
@@ -400,7 +401,91 @@ Pending work, so a trigger survives a restart.
 
 ---
 
-## 5. Docker: not losing your data
+## 5. First-run setup
+
+A brand-new install with no `PIPLY_DATABASE` opens a setup page instead of the
+dashboard. It asks one question — SQLite file or PostgreSQL — because the
+fallback location is a poor default on a server: in a container it is the
+writable layer, which is erased on every redeploy.
+
+The choice is **validated by opening the database** before anything is saved, so
+a typo in a hostname is caught there rather than at the next restart. It is then
+written to the `.env` beside your config as `PIPLY_DATABASE=` and applied to the
+running process, so you continue straight into Piply without restarting.
+
+**Nothing runs until you choose.** The scheduler is held back while setup is
+pending, so a `piply init` project with schedules does not start writing run
+history into a database you may be about to replace. It starts the moment setup
+completes.
+
+Three things worth knowing:
+
+- **Existing installs are never redirected.** Setup only appears while the
+  fallback database is still empty, so an install that has been running on the
+  default file for months keeps working untouched.
+- **Setup cannot repoint a configured install.** Once a database is chosen the
+  page redirects away, so nobody who can reach the UI can swap the database of a
+  running system. Changing it later is an admin-only action under
+  [Settings](#52-changing-the-database-later).
+- **The decision is made once, at startup.** It has to be: `piply init`
+  generates scheduled pipelines, so asking later would race the scheduler and
+  conclude the install was already in use.
+
+Skip the page entirely by setting `PIPLY_DATABASE` before the first start —
+which is what a scripted or container deployment should do.
+
+### 5.1 Creating the first admin
+
+After the database is chosen, setup offers one optional second step: create the
+first administrator.
+
+It is optional because Piply is useful on a laptop with no accounts at all, and
+mandatory-looking sign-up screens are the wrong price for that. It matters
+because **Piply is open to anyone who can reach it until the first account
+exists** — creating one turns authentication on for everybody. Do it before
+putting Piply on a shared network.
+
+The account is created with the `admin` role, and the session that created it is
+signed in immediately, so there is no separate sign-in step. Skipping leaves
+authentication off; you can create the first account later under Settings or
+with `piply users create <name> --role admin`.
+
+The page closes permanently once any account exists — it is a bootstrap, not a
+standing way to mint administrators.
+
+### 5.2 Changing the database later
+
+Admins can move Piply to a different metadata store from **Settings → Database**
+without editing files or restarting:
+
+1. Choose SQLite or PostgreSQL and give the path or connection URL.
+2. Leave **Copy the current data across** ticked to bring runs, logs, task
+   output, and accounts with you, ids intact.
+3. **Test and switch.** Piply opens the target first, so a wrong value is
+   refused on the page.
+
+The setting is written to `.env` and applied to the running process; the
+scheduler is rebuilt against the new store. The old database is left untouched
+either way, so it remains a rollback. Copying refuses a target that already
+holds data rather than merging two histories.
+
+Non-admins never see the panel, and the API behind it (`GET`/`PUT
+/api/settings/database`) is admin-only.
+
+**Switching is refused while anything is running.** An in-flight run holds the
+old store, so it would finish writing to the database being left behind while
+the new one kept the half-copied row — a run stuck at `running` for ever. Wait
+for it to finish, or pause the schedules first.
+
+**One more case is refused:** if `PIPLY_DATABASE` is set as a real environment
+variable — a compose file, systemd unit, or Kubernetes manifest — the process
+environment overrides `.env`, so writing the file would change nothing. Piply
+says so instead of appearing to succeed, and the form is hidden. Change it where
+it is set and restart.
+
+---
+
+## 6. Docker: not losing your data
 
 The most common cause of "Piply lost all my history" is a container with no
 volume. The database sits at `/app/.piply/piply.db` in the writable layer, which
@@ -477,7 +562,7 @@ Then redeploy and confirm your run history is still listed.
 
 ---
 
-## 6. Backup and restore
+## 7. Backup and restore
 
 ### SQLite
 
@@ -505,7 +590,7 @@ message naming `pg_dump`, rather than silently producing an unusable file.
 
 ---
 
-## 7. Operational notes
+## 8. Operational notes
 
 - **Run one Piply instance per database, on either backend.** The scheduler
   assumes it owns the queue. Two instances against one database will both
@@ -523,7 +608,7 @@ message naming `pg_dump`, rather than silently producing an unusable file.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |

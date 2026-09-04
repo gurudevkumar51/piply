@@ -97,3 +97,51 @@ async function deleteAccount(username) {
     }
 }
 </script>
+
+<script>
+function showDatabaseBackend(backend) {
+    const sqlite = document.getElementById('db-sqlite-fields');
+    const postgres = document.getElementById('db-postgres-fields');
+    if (!sqlite || !postgres) return;
+    sqlite.hidden = backend !== 'sqlite';
+    postgres.hidden = backend !== 'postgres';
+}
+
+async function saveDatabase() {
+    const output = document.getElementById('database-result');
+    const backend = document.querySelector('input[name="db-backend"]:checked').value;
+    const payload = {
+        backend: backend,
+        sqlite_path: (document.getElementById('db-sqlite-path').value || '').trim(),
+        dsn: (document.getElementById('db-dsn').value || '').trim(),
+        migrate: document.getElementById('db-migrate').checked,
+    };
+    output.hidden = false;
+    // Opening PostgreSQL and copying rows both take a moment; say so rather
+    // than leaving a button that looks like it did nothing.
+    output.textContent = 'Connecting to the database...';
+    try {
+        const response = await fetch('/api/settings/database', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            output.textContent = data.detail || 'Could not switch the database.';
+            return;
+        }
+        const copied = data.migrated
+            ? ' Copied ' + Object.entries(data.migrated)
+                .filter(([, count]) => count > 0)
+                .map(([table, count]) => count + ' ' + table)
+                .join(', ') + '.'
+            : '';
+        output.textContent = 'Now using ' + data.location + '.' + copied
+            + ' Saved to .env, so it survives a restart.';
+        setTimeout(() => window.location.reload(), 2500);
+    } catch (error) {
+        output.textContent = 'Could not switch the database: ' + error;
+    }
+}
+</script>

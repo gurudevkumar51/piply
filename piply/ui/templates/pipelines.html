@@ -47,6 +47,10 @@
                 <input type="checkbox" id="pipeline-group-toggle" checked onchange="applyPipelineFilters()">
                 Group by template
             </label>
+            <div class="segmented" role="group" aria-label="Expand or collapse groups" id="pipeline-group-actions">
+                <button type="button" class="toolbar-button" onclick="setAllPipelineGroups(true)">Expand all</button>
+                <button type="button" class="toolbar-button" onclick="setAllPipelineGroups(false)">Collapse all</button>
+            </div>
         </div>
 
         <div id="pipeline-listing"></div>
@@ -235,6 +239,11 @@ function applyPipelineFilters() {
 
     emptyState.hidden = visible.length > 0;
 
+    // Set before the ungrouped branch returns: with no groups on screen there is
+    // nothing for these buttons to act on.
+    const actions = document.getElementById("pipeline-group-actions");
+    if (actions) actions.hidden = !grouped;
+
     if (!grouped) {
         container.innerHTML = `<div class="pipeline-table">${visible.map(renderPipelineRow).join("")}</div>`;
         return;
@@ -245,18 +254,90 @@ function applyPipelineFilters() {
         if (!members.length) return "";
         const label = pipelineGroupLabels[index];
         const showHeading = pipelineGroups.length > 1 || groupId !== "standalone";
+        // A group with no heading has nothing to click, so it can never collapse.
+        // While searching, force every group open: hiding a match behind a
+        // collapsed header reads as "no results".
+        const collapsed = showHeading && !needle && collapsedPipelineGroups.has(groupId);
+        const summary = groupSummary(members);
         return `
-            <section class="pipeline-group">
+            <section class="pipeline-group collapsible${collapsed ? " collapsed" : ""}" data-group-id="${escapeHtml(groupId)}">
                 ${showHeading ? `<header class="pipeline-group-header">
-                    <span class="small-kicker">${escapeHtml(label)}</span>
+                    <button type="button" class="collapse-toggle" aria-expanded="${!collapsed}"
+                            onclick="togglePipelineGroup('${escapeHtml(groupId)}')">
+                        <span class="collapse-caret" aria-hidden="true">&#9662;</span>
+                        <span class="small-kicker">${escapeHtml(label)}</span>
+                    </button>
                     <span class="meta-pill tiny">${members.length}</span>
+                    <span class="pipeline-group-summary">${summary}</span>
                 </header>` : ""}
-                <div class="pipeline-table">${members.map(renderPipelineRow).join("")}</div>
+                <div class="collapsible-body">
+                    <div class="pipeline-table">${members.map(renderPipelineRow).join("")}</div>
+                </div>
             </section>
         `;
     }).join("");
 
     container.innerHTML = sections;
+}
+
+/*
+ * Collapsible template groups.
+ *
+ * With one template deployed per tenant a group can hold 9 rows, so the page
+ * becomes a wall of near-identical entries. Collapsing keeps the shape of the
+ * project visible while hiding the detail, and the choice persists per browser.
+ */
+const PIPELINE_GROUPS_KEY = "piply.collapsedPipelineGroups";
+
+function loadCollapsedGroups() {
+    try {
+        const stored = JSON.parse(window.localStorage.getItem(PIPELINE_GROUPS_KEY) || "[]");
+        return new Set(Array.isArray(stored) ? stored : []);
+    } catch (error) {
+        return new Set();
+    }
+}
+
+const collapsedPipelineGroups = loadCollapsedGroups();
+
+function persistCollapsedGroups() {
+    window.localStorage.setItem(PIPELINE_GROUPS_KEY, JSON.stringify([...collapsedPipelineGroups]));
+}
+
+/** Return the counts worth seeing when a group is collapsed. */
+function groupSummary(members) {
+    const failed = members.filter((item) => ["failed", "timed_out"].includes(item.last_run_status)).length;
+    const running = members.filter((item) => item.active_runs > 0).length;
+    const paused = members.filter((item) => item.paused).length;
+    const parts = [];
+    if (running) parts.push(`<span class="group-stat running">${running} running</span>`);
+    if (failed) parts.push(`<span class="group-stat failed">${failed} failed</span>`);
+    if (paused) parts.push(`<span class="group-stat paused">${paused} paused</span>`);
+    return parts.join("");
+}
+
+function togglePipelineGroup(groupId) {
+    const section = document.querySelector(`[data-group-id="${CSS.escape(groupId)}"]`);
+    if (!section) return;
+    const collapsed = !section.classList.contains("collapsed");
+    section.classList.toggle("collapsed", collapsed);
+    section.querySelector(".collapse-toggle")?.setAttribute("aria-expanded", String(!collapsed));
+    // Toggle the live node rather than re-rendering, so the page does not jump.
+    if (collapsed) collapsedPipelineGroups.add(groupId);
+    else collapsedPipelineGroups.delete(groupId);
+    persistCollapsedGroups();
+}
+
+function setAllPipelineGroups(expand) {
+    collapsedPipelineGroups.clear();
+    if (!expand) {
+        document.querySelectorAll("[data-group-id]").forEach((section) => {
+            // Only groups that actually render a toggle can be collapsed.
+            if (section.querySelector(".collapse-toggle")) collapsedPipelineGroups.add(section.dataset.groupId);
+        });
+    }
+    persistCollapsedGroups();
+    applyPipelineFilters();
 }
 
 function setPipelineSort(mode) {

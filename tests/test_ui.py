@@ -77,9 +77,12 @@ def test_every_ui_page_renders(tmp_path: Path) -> None:
             assert "text/html" in response.headers["content-type"], page
 
 
-def test_pipelines_page_groups_deployments_of_one_template(tmp_path: Path) -> None:
+def test_pipelines_page_groups_deployments_of_one_template(tmp_path: Path, monkeypatch) -> None:
     """Deployments of a shared template are grouped rather than listed alphabetically."""
     config_path = _project(tmp_path)
+    # A configured database, as any install has after first-run setup; without
+    # one an empty install is redirected to the setup page instead.
+    monkeypatch.setenv("PIPLY_DATABASE", str(tmp_path / "piply.db"))
     PipelineService(config_path=config_path)
 
     with TestClient(create_app(str(config_path))) as client:
@@ -283,3 +286,68 @@ def test_pipelines_page_renders_clickable_run_dots(tmp_path: Path) -> None:
     assert [item["id"] for item in by_id["ok_flow"]["recent_runs"]] == list(reversed(passing))
     assert by_id["failing_flow"]["recent_runs"][0]["status"] == "failed"
     assert by_id["never_run"]["recent_runs"] == []
+
+
+def test_pipeline_groups_are_collapsible(tmp_path: Path, monkeypatch) -> None:
+    """Template groups can be collapsed, and the choice survives a re-render.
+
+    With one template deployed per tenant a group holds a row per tenant, so the
+    page becomes a wall of near-identical entries. The page ships the pieces that
+    make collapsing work: a per-group toggle, bulk controls, persisted state, and
+    a summary that stays readable once the rows are hidden.
+    """
+    config_path = _project(tmp_path)
+    monkeypatch.setenv("PIPLY_DATABASE", str(tmp_path / "piply.db"))
+    PipelineService(config_path=config_path)
+
+    with TestClient(create_app(str(config_path))) as client:
+        body = client.get("/pipelines").text
+
+    # Each group renders a real button, so it is keyboard reachable.
+    assert "togglePipelineGroup(" in body
+    assert 'class="collapse-toggle"' in body
+    assert 'data-group-id="' in body
+    assert "collapsible-body" in body
+
+    # Bulk controls, and the storage key that makes the choice persist.
+    assert "setAllPipelineGroups(true)" in body
+    assert "setAllPipelineGroups(false)" in body
+    assert "piply.collapsedPipelineGroups" in body
+
+    # A collapsed group still reports what is inside it.
+    assert "groupSummary(" in body
+    assert "group-stat" in body
+
+    # Searching must force groups open, or a match hides behind a collapsed header.
+    assert "!needle && collapsedPipelineGroups.has(groupId)" in body
+
+
+def test_dag_labels_are_measured_and_shortened(tmp_path: Path) -> None:
+    """Long entity task names must not spill outside their node box.
+
+    SVG text neither wraps nor clips, so `payer_claim_status_dashboard / Extract`
+    used to paint straight across the node border and over the edges. The fix has
+    three parts and all three matter, so all three are pinned here.
+    """
+    config_path = _project(tmp_path)
+    PipelineService(config_path=config_path)
+
+    with TestClient(create_app(str(config_path))) as client:
+        script = client.get("/static/dag.js").text
+
+    # 1. Labels are measured and shortened to the node's width.
+    assert "function shortenLabel" in script
+    assert "getComputedTextLength" in script
+
+    # 2. Measuring before the web font loads produces labels that fit the
+    #    fallback metrics and overflow once IBM Plex Mono arrives.
+    assert "document.fonts.ready.then(fitAll)" in script
+
+    # 3. Identifiers differ at both ends, so the middle is dropped and the full
+    #    value stays reachable on hover.
+    assert '"middle"' in script
+    assert 'createElementNS("http://www.w3.org/2000/svg", "title")' in script
+
+    # An entity task's id restates its title, so it is dropped rather than
+    # shown twice in shortened form.
+    assert "titleRestatesId" in script

@@ -242,6 +242,9 @@ select {
     border-radius: 999px;
     padding: 7px 11px;
     cursor: pointer;
+    /* Anchors styled as buttons do not centre their own text the way a
+       <button> does, which left them misaligned beside a real button. */
+    text-align: center;
     transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 
@@ -1379,6 +1382,54 @@ body.drawer-open {
     padding: 6px 2px;
 }
 
+/* A collapsed template group keeps its header readable and its counts visible,
+   so the shape of the project survives hiding the rows. */
+.pipeline-group .collapse-toggle {
+    /* Roomier than the panel toggles elsewhere: this one is the primary way to
+       work the page on a phone, where a 19px row is hard to hit. */
+    padding: 6px 8px;
+    margin-left: -8px;
+    border-radius: var(--radius-sm);
+}
+
+.pipeline-group .collapse-toggle:hover {
+    background: var(--bg-accent);
+}
+
+.pipeline-group .collapse-toggle .small-kicker {
+    cursor: pointer;
+}
+
+.pipeline-group-summary {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    margin-left: auto;
+}
+
+.group-stat {
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    line-height: 1.5;
+}
+
+.group-stat.running {
+    background: rgba(57, 117, 255, 0.1);
+    color: var(--accent);
+}
+
+.group-stat.failed {
+    background: rgba(217, 90, 90, 0.1);
+    color: var(--red);
+}
+
+.group-stat.paused {
+    background: rgba(123, 140, 166, 0.12);
+    color: var(--muted);
+}
+
 .pipeline-table {
     display: flex;
     flex-direction: column;
@@ -2210,4 +2261,92 @@ body.modal-open {
     .modal-actions .button {
         width: 100%;
     }
+}
+
+/* Downstream states that are not run statuses: a triggered pipeline that has
+   produced no run yet, and why. Reporting all of these as "pending" hid the
+   ones that will never resolve on their own. */
+.status-badge.paused,
+.status-badge.disabled,
+.status-badge.waiting,
+.status-badge.unknown {
+    background: rgba(123, 140, 166, 0.12);
+    color: var(--muted);
+}
+
+.status-badge.disabled,
+.status-badge.unknown {
+    color: #8a6d3b;
+    background: rgba(232, 155, 44, 0.12);
+}
+
+.status-dot-lg.pending,
+.status-dot-lg.queued,
+.status-dot-lg.waiting {
+    background: var(--amber);
+}
+
+.status-dot-lg.paused,
+.status-dot-lg.disabled,
+.status-dot-lg.unknown {
+    background: #7b8ca6;
+}
+
+/* First-run database chooser. Wider than the sign-in card because each option
+   carries an explanation of when to pick it. */
+.setup-card {
+    width: min(560px, 100%);
+    text-align: left;
+}
+
+.setup-choice {
+    margin: 4px 0 0;
+    padding: 0;
+    border: 0;
+}
+
+.setup-choice legend {
+    padding: 0;
+    margin-bottom: 8px;
+}
+
+.setup-option {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+}
+
+.setup-option:hover {
+    border-color: var(--border-strong);
+    background: var(--bg-accent);
+}
+
+.setup-option:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--bg-accent);
+}
+
+.setup-option strong {
+    display: block;
+}
+
+.setup-hint {
+    display: block;
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.setup-fields {
+    margin-top: 4px;
+}
+
+.setup-fields[hidden] {
+    display: none;
 }

@@ -241,6 +241,147 @@ Retries happen inside the task slot, so the DAG never sees the failure.
 
 ---
 
+### 1.7 Splitting `piply.yaml` across files
+
+**Problem.** One config file per project stops scaling once a real tenant
+rollout arrives. Measured on RCM-Data-pipeline:
+
+| Section | Lines | Entries |
+| --- | --- | --- |
+| `pipeline_deployments` | 434 | 29 |
+| `pipelines` | 361 | 8 |
+| `pipeline_templates` | 163 | 4 |
+| everything else | 16 | — |
+| **total** | **974** | |
+
+Adding one tenant means editing a 974-line file, and every change to any
+pipeline produces a diff in the same file — so two people touching unrelated
+tenants conflict in git for no reason.
+
+**Proposal.** An `include:` list in the root file. Everything else stays exactly
+as it is.
+
+### Which cut to recommend
+
+The obvious instinct is to group a template with the deployments that use it.
+Edit history says that is wrong. Across the last 35 commits to a production
+`piply.yaml`:
+
+| What the commit touched | Count |
+| --- | --- |
+| `pipelines` only | 12 |
+| `pipeline_deployments` only | 4 |
+| `pipeline_templates` only | 3 |
+| deployments **and** templates together | 6 |
+| any single section only | 19 of 35 |
+
+Templates and their deployments change together in under a fifth of commits.
+The real pattern is that **`pipelines` is the churn** — the shared medallion
+chain — while **deployments are the most stable section**, because adding a
+tenant is a fifteen-line stanza and nothing else moves.
+
+So the master file should hold the *stable inventory*, and the volatile
+definitions should live in their own files:
+
+```yaml
+# piply.yaml — project settings and the full deployment inventory
+version: "1"
+title: RCM Data Flow
+workspace: .
+
+variables:
+  dbt_ops: --project-dir RCM_DataFlow --profiles-dir ".dbt"
+
+include:
+  - config/templates/*.yaml
+  - config/pipelines/*.yaml
+
+# Every tenant rollout, in one place. Rarely edited, and the one view that
+# answers "what actually runs, and when".
+pipeline_deployments:
+  BENNETT_ETL_Flow:
+    template: ECW_Extract_test
+    schedule: {cron: "0 3 * * 0"}
+    variables: {practice: BENNETT}
+    triggers_on_success: [Bronze_to_Silver]
+  # ... 28 more
+```
+
+```
+config/
+  templates/
+    ecw_extract.yaml          4 templates, ~40 lines each
+    monthly_flow.yaml
+    claim_extract.yaml
+    ar_claims.yaml
+  pipelines/
+    medallion.yaml            Bronze_to_Silver -> Feed_dim_int_fact -> Report_Semantic_Flow
+    claim_medallion.yaml      the CLAIM_EXTRACT variant of the same chain
+    ar.yaml                   AR_Claims_Allocation, AR_auto_scripts
+```
+
+That puts the 12-commits-a-month section in files of its own, keeps the master
+file as a scannable inventory of ~450 lines of flat stanzas, and means two
+people working on different chains stop conflicting.
+
+**If the master file later becomes the conflict point** — at 50 tenants rather
+than 29 — deployments can be split per tenant with no format change, since
+`include:` is just a list of paths. Onboarding then becomes *adding a file*
+rather than editing one, which is the lowest-conflict option available. It is
+not worth the fragmentation yet: at 29 deployments the single inventory is more
+useful than the conflict saving.
+
+### Rules worth deciding up front
+
+These are what separate a real feature from "concatenate some files".
+
+| Question | Proposed answer |
+| --- | --- |
+| Which keys may an included file define? | `pipelines`, `pipeline_templates`, `pipeline_deployments`, `variables`, `connections`, `secrets` |
+| Which are root-only? | `version`, `title`, `workspace`, `include` — rejected with a clear message elsewhere |
+| How do sections combine? | Merged by key |
+| What about a duplicate key? | **An error naming both files.** Never last-wins |
+| How are include paths resolved? | Relative to the file that declares them |
+| Can included files include? | Yes, with cycle detection |
+| Ordering? | As listed; globs expand sorted, so loading is deterministic |
+
+The duplicate rule matters most. Silent override is the exact failure mode that
+has already cost time twice in this project — a missing `env_file` that loaded
+nothing, and an `smtp_host` default that quietly replaced central settings. Two
+files defining `BENNETT_ETL_Flow` should stop the load and say so.
+
+> ⚠️ **Include paths resolve against the including file, not `workspace:`.**
+> That is deliberately different from `env_file`, which is workspace-relative.
+> Includes describe config structure and belong next to the config; `env_file`
+> points at runtime data and belongs next to the work. The difference has to be
+> documented loudly, because the `env_file` rule has already surprised people.
+
+### What else has to change
+
+- **Merge everything before resolving anything.** In the recommended layout the
+  master file's deployments reference templates defined in *included* files, so
+  include resolution has to complete before `_normalize_pipeline_definitions`
+  runs. Resolving per file would break the moment a deployment and its template
+  live apart — which is the whole point of the layout.
+- **`piply validate` and `piply plan` should print the source file** for each
+  pipeline. Without it, "duplicate pipeline id" is unactionable across 5 files.
+- **Every `ConfigError` needs file provenance.** `Pipeline 'x' task 'y' points to
+  a missing script` is fine in one file and useless across six.
+- **Config reload watches one mtime today.** It has to watch every included file,
+  or editing a deployment file will not be noticed.
+- **`piply init` should keep writing a single file.** Splitting is for projects
+  that have grown into it; a starter project with five pipelines is easier to
+  read in one place.
+
+**Why it matters.** This is the difference between Piply being pleasant at 5
+pipelines and pleasant at 50. It is also purely additive — a single-file config
+keeps working untouched, because a config with no `include:` behaves exactly as
+it does now.
+
+**Effort:** M · **Deps:** none
+
+---
+
 ## Tier 2 — clear value, more work
 
 ### 2.1 Per-tenant downstream chains
