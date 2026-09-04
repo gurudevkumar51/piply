@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+
+{% block title %}Diagnostics - Piply{% endblock %}
+
+{% block content %}
+<div class="page-grid">
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Runtime</div>
+            <h1 class="panel-title" style="font-size:1.55rem; margin:0;">Diagnostics</h1>
+            <p class="page-header-copy" style="margin:6px 0 0;">
+                Scheduler health, active workers, sensor status, and recovery state. Refreshes every five seconds.
+            </p>
+        </div>
+        <div class="run-stats-row">
+            <span class="status-badge {{ diagnostics.scheduler.state }}" id="diag-scheduler-state">{{ diagnostics.scheduler.label }}</span>
+            <a class="button ghost tiny-button" href="/metrics" target="_blank" rel="noopener">Prometheus metrics</a>
+        </div>
+    </section>
+
+    <section class="stat-grid" id="diag-stat-grid"></section>
+
+    <section class="two-column-grid">
+        <article class="panel tight-panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Scheduler</h2>
+                    <p class="panel-copy">Heartbeat, owning process, and the last error the loop recorded.</p>
+                </div>
+            </div>
+            <dl class="definition-list" id="diag-scheduler"></dl>
+        </article>
+
+        <article class="panel tight-panel">
+            <div class="panel-header">
+                <div>
+                    <h2 class="panel-title">Reconciliation</h2>
+                    <p class="panel-copy">Startup recovery and stale-run handling.</p>
+                </div>
+            </div>
+            <dl class="definition-list" id="diag-reconciliation"></dl>
+        </article>
+    </section>
+
+    <section class="panel tight-panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Running tasks</h2>
+                <p class="panel-copy">Every task currently executing, with the run that owns it.</p>
+            </div>
+        </div>
+        <div id="diag-running-tasks"></div>
+    </section>
+
+    <section class="panel tight-panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Sensors</h2>
+                <p class="panel-copy">Polling health. Failing sensors keep their latest error so a broken watch is obvious.</p>
+            </div>
+        </div>
+        <div id="diag-sensors"></div>
+    </section>
+
+    <section class="panel tight-panel">
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Storage</h2>
+                <p class="panel-copy">Database location, size, and the active retention window.</p>
+            </div>
+            <button class="button ghost tiny-button" onclick="runPrune(true)">Preview prune</button>
+        </div>
+        <dl class="definition-list" id="diag-database"></dl>
+        <pre class="code-block" id="diag-prune-result" hidden></pre>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let diagnostics = {{ diagnostics|tojson }};
+
+function definitionRows(target, rows) {
+    document.getElementById(target).innerHTML = rows
+        .map(([label, value]) => `
+            <div class="definition-row">
+                <dt>${escapeHtml(label)}</dt>
+                <dd>${value === null || value === undefined || value === "" ? '<span class="muted">-</span>' : escapeHtml(String(value))}</dd>
+            </div>
+        `)
+        .join("");
+}
+
+function renderStats(payload) {
+    const workers = payload.workers;
+    const queue = payload.queue;
+    const cards = [
+        ["Running runs", workers.running_runs],
+        ["Running tasks", workers.running_tasks],
+        ["Queued triggers", queue.queued || 0],
+        ["Due triggers", queue.due || 0],
+        ["Failing sensors", payload.sensor_summary.failing],
+    ];
+    document.getElementById("diag-stat-grid").innerHTML = cards
+        .map(([label, value]) => `
+            <article class="stat-card">
+                <div class="stat-label">${escapeHtml(label)}</div>
+                <div class="stat-value">${escapeHtml(String(value))}</div>
+            </article>
+        `)
+        .join("");
+}
+
+function renderRunningTasks(tasks) {
+    const container = document.getElementById("diag-running-tasks");
+    if (!tasks.length) {
+        container.innerHTML = '<div class="empty-state">Nothing is executing right now.</div>';
+        return;
+    }
+    container.innerHTML = `<div class="pipeline-table">${tasks.map((task) => `
+        <div class="pipeline-row">
+            <div class="pipeline-row-status"><span class="status-dot-lg running"></span></div>
+            <div class="pipeline-row-main">
+                <a class="pipeline-row-title" href="/runs/${escapeHtml(task.run_id)}">${escapeHtml(task.title || task.task_id)}</a>
+                <div class="pipeline-row-sub mono">${escapeHtml(task.pipeline_id)} / ${escapeHtml(task.task_id)}</div>
+            </div>
+            <div class="pipeline-row-cell">
+                <div class="cell-label">Elapsed</div>
+                <div class="cell-value">${formatDurationSeconds(task.running_seconds)}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">Priority</div>
+                <div class="cell-value">${escapeHtml(String(task.priority))}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">Timeout</div>
+                <div class="cell-value">${task.timeout_seconds ? escapeHtml(String(task.timeout_seconds)) + "s" : "-"}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">PID</div>
+                <div class="cell-value mono">${escapeHtml(String(task.owner_pid ?? "-"))}</div>
+            </div>
+        </div>
+    `).join("")}</div>`;
+}
+
+function renderSensors(sensors) {
+    const container = document.getElementById("diag-sensors");
+    if (!sensors.length) {
+        container.innerHTML = '<div class="empty-state">No sensors are configured.</div>';
+        return;
+    }
+    container.innerHTML = `<div class="pipeline-table">${sensors.map((sensor) => `
+        <div class="pipeline-row">
+            <div class="pipeline-row-status"><span class="status-dot-lg ${sensor.status === "failing" ? "failed" : (sensor.status === "healthy" ? "success" : "queued")}"></span></div>
+            <div class="pipeline-row-main">
+                <a class="pipeline-row-title" href="/pipelines/${escapeHtml(sensor.pipeline_id)}">${escapeHtml(sensor.title || sensor.sensor_id)}</a>
+                <div class="pipeline-row-sub mono">${escapeHtml(sensor.summary || sensor.sensor_type)}</div>
+                ${sensor.last_error ? `<p class="footer-note">${escapeHtml(sensor.last_error)}</p>` : ""}
+            </div>
+            <div class="pipeline-row-cell">
+                <div class="cell-label">Last poll</div>
+                <div class="cell-value">${sensor.last_polled_at ? escapeHtml(new Date(sensor.last_polled_at).toLocaleString()) : "never"}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">Polls</div>
+                <div class="cell-value">${escapeHtml(String(sensor.poll_count))}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">Events</div>
+                <div class="cell-value">${escapeHtml(String(sensor.event_count))}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">Failures</div>
+                <div class="cell-value">${escapeHtml(String(sensor.consecutive_failures))}</div>
+            </div>
+        </div>
+    `).join("")}</div>`;
+}
+
+function formatBytes(size) {
+    let value = Number(size) || 0;
+    for (const unit of ["B", "KB", "MB", "GB"]) {
+        if (value < 1024 || unit === "GB") {
+            return unit === "B" ? `${value.toFixed(0)} ${unit}` : `${value.toFixed(1)} ${unit}`;
+        }
+        value /= 1024;
+    }
+    return `${value.toFixed(1)} GB`;
+}
+
+function renderDiagnostics(payload) {
+    diagnostics = payload;
+    const scheduler = payload.scheduler;
+    const badge = document.getElementById("diag-scheduler-state");
+    badge.className = `status-badge ${scheduler.state}`;
+    badge.textContent = scheduler.label;
+
+    renderStats(payload);
+    definitionRows("diag-scheduler", [
+        ["State", scheduler.state],
+        ["Heartbeat", scheduler.heartbeat ? new Date(scheduler.heartbeat).toLocaleString() : "never"],
+        ["Heartbeat age", scheduler.heartbeat_age_seconds === null ? "-" : `${Math.round(scheduler.heartbeat_age_seconds)}s`],
+        ["Started at", scheduler.started_at ? new Date(scheduler.started_at).toLocaleString() : "-"],
+        ["Owner pid", scheduler.owner_pid],
+        ["Owner alive", scheduler.owner_alive === null ? "unknown" : String(scheduler.owner_alive)],
+        ["Accepting work", String(scheduler.accepting_work)],
+        ["Last error", scheduler.last_error],
+    ]);
+    definitionRows("diag-reconciliation", [
+        ["Last recovery", payload.reconciliation.last_recovery_at ? new Date(payload.reconciliation.last_recovery_at).toLocaleString() : "never"],
+        ["Runs recovered at startup", payload.reconciliation.last_recovered_runs],
+        ["Stale run timeout", `${payload.reconciliation.stale_run_timeout_seconds}s`],
+        ["Reconcile interval", `${payload.reconciliation.reconcile_interval_seconds}s`],
+        ["Sensor last error", payload.sensor_summary.last_error],
+        ["Process pid", payload.process.pid],
+    ]);
+    definitionRows("diag-database", [
+        ["Path", payload.database.path],
+        ["Size", formatBytes(payload.database.size_bytes)],
+        ["Keep runs for", `${payload.database.retention_run_days} day(s)`],
+        ["Keep logs for", `${payload.database.retention_log_days} day(s)`],
+        ["Max runs per pipeline", payload.database.retention_max_runs_per_pipeline],
+    ]);
+    renderRunningTasks(payload.running_tasks);
+    renderSensors(payload.sensors);
+}
+
+async function runPrune(dryRun) {
+    const output = document.getElementById("diag-prune-result");
+    try {
+        const result = await piplyRequest("/api/maintenance/prune", {
+            method: "POST",
+            body: JSON.stringify({ dry_run: dryRun, vacuum: !dryRun }),
+        });
+        output.hidden = false;
+        output.textContent = JSON.stringify(result, null, 2);
+    } catch (error) {
+        output.hidden = false;
+        output.textContent = error.message;
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    renderDiagnostics(diagnostics);
+    setInterval(async () => {
+        try {
+            renderDiagnostics(await piplyRequest("/api/diagnostics"));
+        } catch (error) {
+            /* keep the last successful snapshot on screen */
+        }
+    }, 5000);
+});
+</script>
+{% endblock %}

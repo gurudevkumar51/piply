@@ -114,5 +114,15 @@
             </div>
         </div>
     </section>
+
+    {% if is_admin %}
+    {% include "_settings_admin.html" %}
+    {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+{% if is_admin %}
+{% include "_settings_admin_scripts.html" %}
+{% endif %}
 {% endblock %}

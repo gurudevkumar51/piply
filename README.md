@@ -5,24 +5,60 @@ Piply is a lightweight Python pipeline framework for teams that want YAML-define
 It stays small on purpose:
 
 - local dependency-aware DAG execution
-- SQLite for runs, logs, task outputs, queue state, sensors, and pause overrides
+- SQLite by default for runs, logs, task outputs, queue state, and sensors,
+  with optional PostgreSQL when you'd rather keep state in a managed database
 - FastAPI plus server-rendered UI
 - no Redis, Celery, Airflow, Prefect, or external queue required
 
 ## Features
 
+**Authoring**
+
 - Multi-task pipelines with `depends_on`
 - Python script, Python callable, CLI, API, webhook, email, and SSH tasks
+- Split the config across files with `include:` — deployments in the master,
+  pipelines and alerts in their own
 - Reusable YAML `variables` with `{name}` interpolation
 - `.env`, environment variables, explicit secrets, and reusable SQL connections
-- Task output passing through `context["task_id"]`
-- Pipeline-to-pipeline output and tenant context passing
 - Metadata-driven `entities` expansion for reusable task templates
-- Optional `pipeline_templates` and `pipeline_deployments` for advanced reuse
+- Optional `pipeline_templates` and `pipeline_deployments` for tenant reuse
+- Lightweight conditional execution: `run_if: "{report} == 'payment'"`
+- Conditional variable values: `active_browser: true if env == "dev" else false`
+- Declared artifacts: `artifacts: ["out/*.csv"]`
+
+**Execution**
+
+- Task priority, via `priority: high`, `priority: "***"`, or an `extract***:` id
+- Entity priority, via a `payment*` / `adjustment**` suffix on entity values
+- Task and pipeline timeouts with a configurable kill grace period
 - Per-task upstream failure behavior: `skip`, `fail`, or `continue`
-- Heartbeat-backed runtime recovery for interrupted runs and stale scheduler state
+- Task output passing through `context["task_id"]`
+- Downstream pipelines inherit upstream variables, env, and outputs
+- Every run stores its full runtime configuration, so a downstream run can be
+  retried or replayed without re-running the upstream chain
+
+**Operations**
+
 - Schedules, sensors, retries, cancellation, reruns, and searchable logs
-- Dashboard, Pipelines, Execution Matrix, Logs, Settings, and run detail pages
+- Dry-run preview: `piply plan`, plus an in-UI execution preview
+- Manual runs prompt for `{placeholder}` values an upstream would normally supply
+- Live log streaming: `piply logs --follow` with pipeline/run/task filters
+- Retention and cleanup: `piply prune` with automatic SQLite `VACUUM`
+- Backfill a single run or a whole schedule window
+- Graceful shutdown and startup recovery — no orphaned RUNNING records
+- Prometheus metrics at `GET /metrics` and a runtime Diagnostics page
+- Airflow-style pipeline listing with template grouping, sorting, and filtering
+- Last-five-runs status dots on every pipeline row, each linking to its run
+- Guided first-run setup: choose SQLite or PostgreSQL, and create the first
+  admin, before anything is written
+- Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`, movable
+  later from Settings with the existing history copied across
+- Accounts, roles, and per-pipeline view/edit/run permissions
+- Runs record who started them; pauses and manual runs are attributed by name
+- Central SMTP configured once, reused by email tasks and run notifications
+- Microsoft Teams alerts to channels and group chats, with reusable destination
+  groups and webhooks kept in the environment rather than YAML
+- Runs page with filters, sorting, and full multi-level trigger lineage
 
 ## Quick Start
 
@@ -183,7 +219,9 @@ Each deployment becomes a normal runnable pipeline id, so the scheduler, UI, CLI
 
 ### Deployment Variables In Downstream Pipelines
 
-Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run; a manual run of the downstream pipeline uses the downstream pipeline's own variables or top-level defaults.
+Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run.
+
+A **manual** run has no parent to inherit from, so it uses the downstream pipeline's own variables or top-level defaults. When that leaves a `{placeholder}` with no value, Piply asks for it rather than running the command literally — see [Missing runtime values](docs/UI_GUIDE.md#missing-runtime-values).
 
 ```yaml
 pipelines:
@@ -213,118 +251,111 @@ When `BENNETT_ETL_Flow` succeeds, Piply runs `Bronze_to_Silver` with `DBT_CLIENT
 ## Common CLI
 
 ```bash
+# Project
 piply --version
 piply init my-piply-project
 piply validate --config piply-demo/piply.yaml
 piply list --config piply-demo/piply.yaml
+piply plan extract_flow --config piply-demo/piply.yaml     # dry run, nothing executes
+
+# Running
 piply run extract_flow --config piply-demo/piply.yaml --wait
-piply run extract_flow --tenant acme --param batch=2026-05-26 --config piply-demo/piply.yaml
-piply tasks list extract_flow --config piply-demo/piply.yaml
-piply tasks run extract_flow validate --tenant acme --param region=west --config piply-demo/piply.yaml
-piply tasks retry <run_id> <task_id> --mode resume --config piply-demo/piply.yaml
-piply runs --config piply-demo/piply.yaml
-piply logs <run_id> --config piply-demo/piply.yaml
-piply pause extract_flow --config piply-demo/piply.yaml
-piply resume extract_flow --config piply-demo/piply.yaml
-piply start --config piply-demo/piply.yaml
+piply run extract_flow --tenant acme --param batch=2026-05-26
+piply run Bronze_to_Silver --var practice=BENNETT       # fill a {placeholder}
+piply run Bronze_to_Silver --prompt                     # or be asked for them
+piply tasks list extract_flow
+piply tasks run extract_flow validate --tenant acme --param region=west
+piply tasks retry <run_id> <task_id> --mode resume
+
+# Inspecting
+piply runs --limit 20
+piply logs <run_id>
+piply logs --follow --pipeline extract_flow                # live, colored
+piply artifacts <run_id>
+piply diagnostics
+
+# Maintaining
+piply backfill <run_id>                                    # replay a run's config
+piply backfill nightly --from 2026-07-01 --to 2026-07-08   # fill a schedule window
+piply prune --dry-run
+piply prune --run-days 14 --max-runs 100
+piply backup /backups                                      # safe while running
+piply restore /backups/piply-20260804T074211Z.db           # stop the server first
+piply migrate-db --to postgresql://piply@db:5432/piply     # SQLite -> PostgreSQL
+
+# Serving
+piply users create admin --role admin                       # switches auth on
+piply users grant alice nightly=view,run
+piply pause extract_flow
+piply resume extract_flow
 piply start --config piply-demo/piply.yaml --port 8080
 piply stop --config piply-demo/piply.yaml
 ```
 
 ## Docs
 
-- [Usage Guide](wiki/USAGE_GUIDE.md): detailed YAML examples, `.env`, multi-tenant runs, sensors, and every CLI command
-- [Wiki Overview](wiki/README.md): architecture and feature summary
-- [UI And API Guide](wiki/UI_API_GUIDE.md): screens, actions, and API examples
-- [Implementation Summary](wiki/IMPLEMENTATION_SUMMARY.md): runtime modules and verification expectations
-- [Technical Architecture](docs/architecture/technical_architecture.md): maintainer-focused deep dive into execution, scheduler, state, storage, UI, and extension points
+**Using Piply**
+
+- [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
+- [YAML Specification](docs/YAML_SPECIFICATION.md): every config key, with defaults
+- [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
+- [Sensors](docs/SENSORS.md): file, SQL, and API triggers, and how polling actually behaves
+- [Notifications](docs/NOTIFICATIONS.md): Microsoft Teams and email alerts, and what happens when delivery fails
+- [UI Guide](docs/UI_GUIDE.md): every page and what it answers
+- [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
+- [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
+- [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
+- [HTTP API Reference](docs/API.md): every route, with the permission it requires
+- [Changelog](CHANGELOG.md): what changed per release, and what to check before upgrading
+
+**Understanding Piply**
+
+- [Security](docs/SECURITY.md): trust model, what is protected, deployment checklist
+- [Runtime Lifecycles](docs/LIFECYCLES.md): scheduler, pipeline, task, retry, recovery, retention
+- [Technical Architecture](docs/architecture/technical_architecture.md): maintainer guide to the whole system
+- [Roadmap](docs/ROADMAP.md): what is planned for the next releases
+- [Future Features](docs/FUTURE_FEATURES.md): proposed ideas, ranked by value vs cost
+
+## Metadata Store
+
+Piply keeps its own runtime state in SQLite by default, with nothing to
+configure. Point it at PostgreSQL when you would rather that state lived in a
+managed database, for example so a container redeploy cannot lose it:
+
+```bash
+pip install "mr-piply[postgres]"
+export PIPLY_DATABASE="postgresql://piply:secret@db.internal:5432/piply"
+piply start
+```
+
+The schema is created and migrated automatically, and no pipeline configuration
+changes. `piply backup` / `piply restore` remain SQLite-only; use `pg_dump` and
+`pg_restore` for PostgreSQL. Run one Piply instance per database either way.
+
+Already running on SQLite and want to keep the history? Stop the server and copy
+it across:
+
+```bash
+piply migrate-db --to "postgresql://piply:secret@db.internal:5432/piply"
+```
+
+Run ids are preserved, so retry chains, downstream lineage, and accounts all
+survive. Full details, the Docker volume setup for the SQLite default, and a
+column-by-column schema reference are in [Metadata Store](docs/DATABASE.md).
+
+## Monitoring
+
+```bash
+curl -s http://127.0.0.1:8000/metrics
+curl -s http://127.0.0.1:8000/api/diagnostics
+```
+
+`/metrics` exposes run and task counts by status, running tasks, queue depth and
+age, scheduler health, run durations, and per-sensor health in the Prometheus
+text format. It accepts the API bearer token, so a scraper does not need UI
+credentials.
 
 ## Roadmap
 
-Planned features:
-
-- `piply logs --follow`
-- plugin hooks for custom operators and sensors
-- managed external secret backends
-- richer queue, worker, and artifact metrics
-- UI-safe pipeline editing
-- task groups, conditional branches, and richer mapped-run visualization
-- Optional distributed runner while keeping local mode as the default
-- # Task Priority Support
-
-Introduce optional task priority support.
-
-Goal:
-
-When multiple runnable tasks are available for execution,
-the scheduler should prefer higher-priority tasks.
-
-User-friendly syntax:
-
-tasks:
-
-  extract***:
-    type: python
-
-  transform**:
-    type: python
-
-  validate*:
-    type: python
-
-Interpretation:
-
-*** = priority 3
-**  = priority 2
-*   = priority 1
-
-Internally normalize task IDs:
-
-extract***
-→ extract
-
-transform**
-→ transform
-
-Store priority separately.
-
-Equivalent explicit syntax:
-
-tasks:
-
-  extract:
-    priority: 3
-
-  transform:
-    priority: 2
-
-  validate:
-    priority: 1
-
-Both syntaxes should be supported.
-
-Execution Rules:
-
-- Higher priority tasks execute first.
-- Only among currently runnable tasks.
-- Dependencies still take precedence.
-- Priority does not bypass dependencies.
-- Equal-priority tasks may execute FIFO or randomly.
-
-Requirements:
-
-- Backward compatible.
-- UI should display priority visually.
-- DAG graph should indicate priority.
-- Runtime metadata should persist priority.
-- Dynamic task expansion should inherit priority.
-- Scheduler should sort ready tasks using priority.
-
-Recommended scheduling order:
-
-1. Priority DESC
-2. Ready Time ASC
-3. Created Time ASC
-4. Random tie-breaker
-
-The Pipelines page supports Grid and List views. The selected view is remembered in the browser.
+Proposed features, ranked by value against cost, with the reasoning for
+what is deliberately *not* planned: [Future Features](docs/FUTURE_FEATURES.md).

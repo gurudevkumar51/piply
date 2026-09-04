@@ -9,7 +9,7 @@
             <div class="eyebrow">Dag run</div>
             <h1 class="panel-title" style="font-size:1.55rem; margin:0;">{{ run.pipeline_title }}</h1>
             <p class="page-header-copy" style="margin:8px 0 0;">
-                Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>.
+                Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>{% if run.actor %} by <span class="mono">{{ run.actor }}</span>{% endif %}.
                 Select a task in the graph to inspect it, filter logs, or retry from the failing point.
             </p>
         </div>
@@ -18,15 +18,22 @@
             <span class="meta-pill">pipeline <a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_id }}</a></span>
             <span class="meta-pill">duration <span id="run-duration">{% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</span></span>
             <span class="meta-pill">tasks <span id="run-task-count">{{ run.successful_tasks }}/{{ run.task_count }}</span></span>
+            {% if run.actor %}<span class="meta-pill">by {{ run.actor }}</span>{% endif %}
             <span class="meta-pill">exit <span id="run-exit-code">{{ run.exit_code if run.exit_code is not none else "pending" }}</span></span>
             {% if run.retry_of %}
             <span class="meta-pill">retry of {{ run.retry_of }}</span>
             <span class="meta-pill">{{ run.retry_mode }}</span>
             {% endif %}
+            {% if upstream %}
+            <span class="meta-pill">from <a href="/runs/{{ upstream.run_id }}">{{ upstream.pipeline_title }}</a></span>
+            {% endif %}
             {% if run.status in ['queued', 'running'] %}
             <button class="button warn" onclick="cancelRun('{{ run.run_id }}')">Cancel run</button>
             {% else %}
             <button class="button primary" onclick="retryRun('{{ run.run_id }}', 'startover')">Re-Run</button>
+            {% if has_run_config %}
+            <button class="button secondary" onclick="backfillRun('{{ run.run_id }}')" title="Re-execute with the exact configuration this run captured">Replay config</button>
+            {% endif %}
             <button class="button ghost" onclick="deleteRun('{{ run.run_id }}')">Delete run</button>
             {% endif %}
         </div>
@@ -42,10 +49,10 @@
                 <span class="status-badge success">success</span>
                 <span class="status-badge running">running</span>
                 <span class="status-badge failed">failed</span>
+                <span class="status-badge timed_out">timed out</span>
                 <span class="status-badge interrupted">interrupted</span>
-                <span class="status-badge cancelled">cancelled</span>
-                <span class="status-badge queued">queued</span>
                 <span class="status-badge skipped">skipped</span>
+                <button class="toolbar-button active" id="downstream-toggle" type="button" onclick="toggleDownstreamNodes()">Downstream on</button>
                 <button class="toolbar-button" id="task-focus-toggle" type="button" onclick="toggleTaskFocusPanel()">Hide task focus</button>
             </div>
         </div>
@@ -60,6 +67,27 @@
                 <div class="empty-state">Select a task node to inspect it.</div>
             </aside>
         </div>
+    </section>
+
+    <section class="panel tight-panel" id="downstream-panel" {% if not downstream %}hidden{% endif %}>
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Downstream pipelines</h2>
+                <p class="panel-copy">Pipelines this run triggers, with their own execution status. Open one to inspect its tasks.</p>
+            </div>
+        </div>
+        <div id="downstream-list"></div>
+    </section>
+
+    <section class="panel tight-panel" id="artifact-panel" {% if not artifacts %}hidden{% endif %}>
+        <div class="panel-header">
+            <div>
+                <h2 class="panel-title">Artifacts</h2>
+                <p class="panel-copy">Files this run declared and produced. Download reads them straight from disk.</p>
+            </div>
+            <button class="button ghost tiny-button" onclick="refreshArtifacts()">Refresh</button>
+        </div>
+        <div id="artifact-list"></div>
     </section>
 
     <section class="run-secondary-grid">
@@ -193,11 +221,17 @@ const initialRun = {{ run_payload|tojson }};
 const initialTaskRuns = {{ task_run_payloads|tojson }};
 const initialLogs = {{ log_payloads|tojson }};
 const initialUpcomingRuns = {{ upcoming_run_payloads|tojson }};
+const initialDownstream = {{ downstream|tojson }};
+const initialArtifacts = {{ artifacts|tojson }};
 let active = {{ 'true' if run.status in ['queued', 'running'] else 'false' }};
 let currentRun = initialRun;
 let currentTaskRuns = initialTaskRuns.slice();
 let currentLogs = initialLogs.slice();
 let currentUpcomingRuns = initialUpcomingRuns.slice();
+let currentDownstream = initialDownstream.slice();
+let currentArtifacts = initialArtifacts.slice();
+const downstreamStorageKey = "piply.runShowDownstream";
+let showDownstream = window.localStorage.getItem(downstreamStorageKey) !== "false";
 let selectedRunTaskId = initialTaskRuns[0]?.task_id || null;
 let taskLogFilterId = null;
 let durationTicker = null;
@@ -344,28 +378,178 @@ function closeOutputPreview() {
     document.body.classList.remove("drawer-open");
 }
 
+function downstreamNodeId(pipelineId) {
+    return `downstream::${pipelineId}`;
+}
+
+function buildGraphNodes(taskRuns) {
+    const nodes = taskRuns.map((task) => ({
+        task_id: task.task_id,
+        title: task.title,
+        task_type: task.task_type,
+        depends_on: task.depends_on,
+        command_preview: task.command_preview,
+        status: task.status,
+        duration_seconds: task.duration_seconds,
+        priority: task.priority,
+        timeout_seconds: task.timeout_seconds,
+        run_if: task.run_if,
+    }));
+
+    if (!showDownstream || !currentDownstream.length) {
+        return nodes;
+    }
+
+    // Downstream pipelines hang off the terminal tasks of this run so the whole
+    // chain is visible without leaving the page.
+    const dependedOn = new Set(taskRuns.flatMap((task) => task.depends_on || []));
+    const terminalTaskIds = taskRuns.map((task) => task.task_id).filter((id) => !dependedOn.has(id));
+
+    currentDownstream.forEach((link) => {
+        nodes.push({
+            task_id: downstreamNodeId(link.pipeline_id),
+            title: link.pipeline_title || link.pipeline_id,
+            task_type: "pipeline",
+            depends_on: terminalTaskIds,
+            command_preview: link.run_id
+                ? `Downstream run ${link.run_id}`
+                : "Downstream pipeline has not been dispatched yet",
+            status: link.status,
+            duration_seconds: link.duration_seconds,
+        });
+    });
+    return nodes;
+}
+
 function renderRunGraph(taskRuns) {
+    const nodes = buildGraphNodes(taskRuns);
     window.renderDagInto(
         "run-dag-stage",
-        taskRuns.map((task) => ({
-            task_id: task.task_id,
-            title: task.title,
-            task_type: task.task_type,
-            depends_on: task.depends_on,
-            command_preview: task.command_preview,
-            status: task.status,
-            duration_seconds: task.duration_seconds,
-        })),
-        Object.fromEntries(taskRuns.map((task) => [task.task_id, task.status])),
+        nodes,
+        Object.fromEntries(nodes.map((node) => [node.task_id, node.status])),
         {
             selectedNodeId: selectedRunTaskId,
-            clickableStatuses: ["queued", "running", "success", "failed", "interrupted", "skipped", "cancelled"],
+            clickableStatuses: ["queued", "running", "success", "failed", "timed_out", "interrupted", "skipped", "cancelled", "pending", "-"],
             onNodeClick: (node) => {
+                if (node.task_type === "pipeline") {
+                    openDownstream(node.task_id.replace("downstream::", ""));
+                    return;
+                }
                 focusRunTask(node.task_id, false, false);
             },
             defaultLayout: "flow",
         },
     );
+}
+
+function openDownstream(pipelineId) {
+    const link = currentDownstream.find((item) => item.pipeline_id === pipelineId);
+    if (link && link.run_id) {
+        window.location.href = `/runs/${link.run_id}`;
+        return;
+    }
+    window.location.href = `/pipelines/${pipelineId}`;
+}
+
+function toggleDownstreamNodes() {
+    showDownstream = !showDownstream;
+    window.localStorage.setItem(downstreamStorageKey, showDownstream ? "true" : "false");
+    const button = document.getElementById("downstream-toggle");
+    if (button) {
+        button.textContent = showDownstream ? "Downstream on" : "Downstream off";
+        button.classList.toggle("active", showDownstream);
+    }
+    renderRunGraph(currentTaskRuns);
+}
+
+function renderDownstream(links) {
+    currentDownstream = links.slice();
+    const panel = document.getElementById("downstream-panel");
+    const container = document.getElementById("downstream-list");
+    if (!panel || !container) return;
+    panel.hidden = links.length === 0;
+    if (!links.length) return;
+
+    container.innerHTML = `<div class="pipeline-table">${links.map((link) => {
+        const target = link.run_id ? `/runs/${escapeHtml(link.run_id)}` : `/pipelines/${escapeHtml(link.pipeline_id)}`;
+        return `
+        <div class="pipeline-row">
+            <div class="pipeline-row-status"><span class="status-dot-lg ${escapeHtml(link.status)}"></span></div>
+            <div class="pipeline-row-main">
+                <a class="pipeline-row-title" href="${target}">${escapeHtml(link.pipeline_title || link.pipeline_id)}</a>
+                <div class="pipeline-row-sub mono">${escapeHtml(link.pipeline_id)}${link.run_id ? " | run " + escapeHtml(link.run_id) : ""}</div>
+                ${link.error ? `<p class="footer-note">${escapeHtml(link.error)}</p>` : ""}
+                ${link.reason ? `<p class="footer-note">${escapeHtml(link.reason)}</p>` : ""}
+            </div>
+            <div class="pipeline-row-cell">
+                <div class="cell-label">Status</div>
+                <div class="cell-value"><span class="status-badge ${escapeHtml(link.status)}">${escapeHtml(link.status)}</span></div>
+            </div>
+            <div class="pipeline-row-cell">
+                <div class="cell-label">Started</div>
+                <div class="cell-value">${link.started_at ? escapeHtml(new Date(link.started_at).toLocaleString()) : "-"}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">Tasks</div>
+                <div class="cell-value">${link.successful_tasks}/${link.task_count}</div>
+            </div>
+            <div class="pipeline-row-actions">
+                <a class="button ghost tiny-button" href="${target}">Open</a>
+            </div>
+        </div>`;
+    }).join("")}</div>`;
+}
+
+function renderArtifacts(artifacts) {
+    currentArtifacts = artifacts.slice();
+    const panel = document.getElementById("artifact-panel");
+    const container = document.getElementById("artifact-list");
+    if (!panel || !container) return;
+    panel.hidden = artifacts.length === 0;
+    if (!artifacts.length) return;
+
+    container.innerHTML = artifacts.map((artifact) => {
+        const downloadUrl = `/api/runs/${encodeURIComponent(runId)}/artifacts/download?path=${encodeURIComponent(artifact.path)}`;
+        const missing = artifact.exists === false;
+        return `
+        <div class="artifact-row">
+            <div>
+                <div class="artifact-name">${escapeHtml(artifact.name)}</div>
+                <div class="artifact-path mono">${escapeHtml(artifact.path)}</div>
+            </div>
+            <div class="mono">${escapeHtml(artifact.task_id)}</div>
+            <div>${formatBytesLabel(artifact.size_bytes)}</div>
+            <div>${missing ? '<span class="muted">missing</span>' : `<a class="button ghost tiny-button" href="${downloadUrl}">Download</a>`}</div>
+        </div>`;
+    }).join("");
+}
+
+function formatBytesLabel(size) {
+    let value = Number(size) || 0;
+    for (const unit of ["B", "KB", "MB", "GB"]) {
+        if (value < 1024 || unit === "GB") {
+            return unit === "B" ? `${value.toFixed(0)} ${unit}` : `${value.toFixed(1)} ${unit}`;
+        }
+        value /= 1024;
+    }
+    return `${value.toFixed(1)} GB`;
+}
+
+async function refreshArtifacts() {
+    try {
+        renderArtifacts(await piplyRequest(`/api/runs/${runId}/artifacts`));
+    } catch (error) {
+        /* keep the current list on screen */
+    }
+}
+
+async function backfillRun(id) {
+    try {
+        const replay = await piplyRequest(`/api/runs/${id}/backfill`, { method: "POST", body: "{}" });
+        window.location.href = `/runs/${replay.id}`;
+    } catch (error) {
+        alert(error.message);
+    }
 }
 
 function applyTaskFocusState({ persist = true, rerenderDag = true } = {}) {
@@ -486,7 +670,10 @@ async function refreshRun() {
         currentRun = payload.run;
         currentLogs = payload.logs || [];
         currentUpcomingRuns = payload.upcoming_runs || [];
+        currentDownstream = payload.downstream || [];
         updateRunHeader(payload.run);
+        renderDownstream(currentDownstream);
+        renderArtifacts(payload.artifacts || []);
         renderTaskRuns(payload.task_runs || []);
         renderLogs(currentLogs);
         renderUpcomingRuns(currentUpcomingRuns);
@@ -504,6 +691,13 @@ async function refreshRun() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    const downstreamButton = document.getElementById("downstream-toggle");
+    if (downstreamButton) {
+        downstreamButton.textContent = showDownstream ? "Downstream on" : "Downstream off";
+        downstreamButton.classList.toggle("active", showDownstream);
+    }
+    renderDownstream(initialDownstream);
+    renderArtifacts(initialArtifacts);
     renderTaskRuns(initialTaskRuns);
     renderLogs(initialLogs);
     renderUpcomingRuns(initialUpcomingRuns);

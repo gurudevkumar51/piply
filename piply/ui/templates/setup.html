@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Set up Piply</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="login-shell">
+        <form class="login-card setup-card" method="post" action="/setup">
+            <div class="brand-mark" aria-hidden="true">pl</div>
+            <span class="small-kicker">Step 1 of 2</span>
+            <h1 class="panel-title">Choose where Piply keeps its data</h1>
+            <p class="page-header-copy">
+                Runs, logs, schedules, and accounts are stored here. This is Piply's own
+                state, not the databases your pipelines read from.
+            </p>
+
+            {% if error %}
+            <div class="login-error" role="alert">{{ error }}</div>
+            {% endif %}
+
+            <fieldset class="setup-choice">
+                <legend class="small-kicker">Storage</legend>
+
+                <label class="setup-option">
+                    <input type="radio" name="backend" value="sqlite"
+                           {% if (submitted.backend if submitted else 'sqlite') != 'postgres' %}checked{% endif %}
+                           onchange="showBackend('sqlite')">
+                    <span>
+                        <strong>SQLite file</strong>
+                        <span class="setup-hint">One file, nothing to install. Good for a single machine.</span>
+                    </span>
+                </label>
+
+                <label class="setup-option">
+                    <input type="radio" name="backend" value="postgres"
+                           {% if submitted and submitted.backend == 'postgres' %}checked{% endif %}
+                           onchange="showBackend('postgres')">
+                    <span>
+                        <strong>PostgreSQL</strong>
+                        <span class="setup-hint">
+                            Keeps state outside the container, so a redeploy cannot lose it.
+                            Needs <span class="mono">pip install "mr-piply[postgres]"</span>.
+                        </span>
+                    </span>
+                </label>
+            </fieldset>
+
+            <div id="sqlite-fields" class="setup-fields">
+                <label class="login-field">
+                    <span class="small-kicker">Database file</span>
+                    <input type="text" name="sqlite_path"
+                           value="{{ submitted.sqlite_path if submitted and submitted.sqlite_path else default_sqlite_path }}"
+                           spellcheck="false" autocomplete="off">
+                </label>
+                <p class="setup-hint">
+                    Relative paths resolve against the config folder. In Docker, point this at a
+                    mounted volume — a path inside the container is erased on redeploy.
+                </p>
+            </div>
+
+            <div id="postgres-fields" class="setup-fields" hidden>
+                <label class="login-field">
+                    <span class="small-kicker">Connection URL</span>
+                    <input type="text" name="dsn"
+                           value="{{ submitted.dsn if submitted and submitted.dsn else '' }}"
+                           placeholder="postgresql://piply:secret@db.internal:5432/piply"
+                           spellcheck="false" autocomplete="off">
+                </label>
+                <p class="setup-hint">
+                    The schema is created automatically. Run one Piply instance per database.
+                </p>
+            </div>
+
+            <button class="button primary" type="submit">Test connection and continue</button>
+            <p class="setup-hint">
+                Piply connects before saving, so a wrong value is caught now rather than at the
+                next restart. The choice is written to <span class="mono">.env</span> as
+                <span class="mono">PIPLY_DATABASE</span>, and an admin can change it later under
+                Settings.
+            </p>
+        </form>
+    </div>
+
+    <script>
+        function showBackend(kind) {
+            document.getElementById("sqlite-fields").hidden = kind !== "sqlite";
+            document.getElementById("postgres-fields").hidden = kind !== "postgres";
+        }
+        // Restore the panel matching the selected radio after a failed submit.
+        showBackend(document.querySelector('input[name="backend"]:checked').value);
+    </script>
+</body>
+</html>

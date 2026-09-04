@@ -4,95 +4,57 @@
 
 {% block content %}
 <div class="page-grid">
-    <section class="hero">
-        <div class="eyebrow">Pipelines</div>
-        <h1 class="hero-headline">Task-based flows with a <span>clear operational view</span>.</h1>
-        <p class="hero-copy">
-            Each pipeline can contain multiple tasks, run on a schedule, and trigger downstream pipelines on success.
-            The UI stays intentionally simple: what runs, when it runs, and what each task actually does.
-        </p>
-        <div class="hero-meta">
-            <span class="meta-pill">config {{ project.config_path }}</span>
-            <span class="meta-pill">scheduler {% if scheduler.running %}live{% else %}offline{% endif %}</span>
-            <span class="meta-pill">database {{ scheduler.database_path }}</span>
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Pipelines</div>
+            <h1 class="panel-title" style="font-size:1.55rem; margin:0;">{{ pipelines|length }} pipeline{{ '' if pipelines|length == 1 else 's' }}</h1>
+            <p class="page-header-copy" style="margin:6px 0 0;">
+                Deployments of the same template are grouped together. Sort by upcoming run to see what fires next.
+            </p>
+        </div>
+        <div class="run-stats-row">
+            <span class="meta-pill">config <span class="mono">{{ project.config_path }}</span></span>
+            <span class="meta-pill">scheduler {% if scheduler.running %}live{% else %}{{ scheduler.state }}{% endif %}</span>
         </div>
     </section>
 
     {% if pipelines %}
-    <div class="pipeline-view-toolbar" aria-label="Pipeline display options">
-        <span class="muted">Display</span>
-        <div class="view-toggle" role="group" aria-label="Pipeline view">
-            <button type="button" class="button ghost view-toggle-button" data-pipeline-view-button="grid" aria-pressed="true" onclick="setPipelineView('grid')">Grid</button>
-            <button type="button" class="button ghost view-toggle-button" data-pipeline-view-button="list" aria-pressed="false" onclick="setPipelineView('list')">List</button>
+    <section class="panel tight-panel">
+        <div class="listing-toolbar">
+            <input
+                type="search"
+                id="pipeline-search"
+                class="toolbar-input"
+                placeholder="Filter by name, id, tag, or deployment"
+                aria-label="Filter pipelines"
+                oninput="applyPipelineFilters()"
+            >
+            <div class="segmented" role="group" aria-label="Sort pipelines">
+                <span class="small-kicker">Sort</span>
+                <button type="button" class="toolbar-button" data-sort="name" onclick="setPipelineSort('name')">Name</button>
+                <button type="button" class="toolbar-button" data-sort="next" onclick="setPipelineSort('next')">Upcoming run</button>
+                <button type="button" class="toolbar-button" data-sort="last" onclick="setPipelineSort('last')">Last run</button>
+            </div>
+            <div class="segmented" role="group" aria-label="Filter pipelines">
+                <span class="small-kicker">Show</span>
+                <button type="button" class="toolbar-button active" data-filter="all" onclick="setPipelineFilter('all')">All</button>
+                <button type="button" class="toolbar-button" data-filter="running" onclick="setPipelineFilter('running')">Running</button>
+                <button type="button" class="toolbar-button" data-filter="failed" onclick="setPipelineFilter('failed')">Failed</button>
+                <button type="button" class="toolbar-button" data-filter="scheduled" onclick="setPipelineFilter('scheduled')">Scheduled</button>
+                <button type="button" class="toolbar-button" data-filter="paused" onclick="setPipelineFilter('paused')">Paused</button>
+            </div>
+            <label class="toolbar-check">
+                <input type="checkbox" id="pipeline-group-toggle" checked onchange="applyPipelineFilters()">
+                Group by template
+            </label>
+            <div class="segmented" role="group" aria-label="Expand or collapse groups" id="pipeline-group-actions">
+                <button type="button" class="toolbar-button" onclick="setAllPipelineGroups(true)">Expand all</button>
+                <button type="button" class="toolbar-button" onclick="setAllPipelineGroups(false)">Collapse all</button>
+            </div>
         </div>
-    </div>
-    <section class="pipeline-grid" data-pipeline-view>
-        {% for pipeline in pipelines %}
-        <article class="pipeline-card">
-            <div class="card-topline">
-                <span class="badge">{{ pipeline.schedule_text }}</span>
-                {% if pipeline.last_run %}
-                <span class="status-badge {{ pipeline.last_run.status }}">{{ pipeline.last_run.status }}</span>
-                {% else %}
-                <span class="badge">not run yet</span>
-                {% endif %}
-            </div>
 
-            <div class="title-row" style="margin-top:14px;">
-                <div>
-                    <h2 class="card-title">{{ pipeline.title }}</h2>
-                    <div class="muted mono" style="margin-top:4px;">{{ pipeline.pipeline_id }}</div>
-                </div>
-                <span class="meta-pill">{% if pipeline.paused %}paused{% elif pipeline.enabled %}enabled{% else %}disabled{% endif %}</span>
-            </div>
-
-            <p class="card-copy">{{ pipeline.description or "No operator-facing description added yet." }}</p>
-
-            <div class="stack" style="margin-bottom:18px;">
-                <div class="detail-card">
-                    <div class="detail-label">Flow summary</div>
-                    <div class="detail-value mono path-value">{{ pipeline.command_preview }}</div>
-                </div>
-                <div class="detail-card">
-                    <div class="detail-label">Primary entry</div>
-                    <div class="detail-value mono path-value">{{ pipeline.primary_entry }}</div>
-                </div>
-                <div class="detail-card">
-                    <div class="detail-label">Next run</div>
-                    <div class="detail-value">{{ pipeline.next_run_label }}</div>
-                </div>
-                <div class="detail-card">
-                    <div class="detail-label">Retry policy</div>
-                    <div class="detail-value">{{ pipeline.retry_summary }}</div>
-                </div>
-            </div>
-
-            <div class="tag-row" style="margin-bottom:18px;">
-                <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
-                {% if pipeline.template_id %}
-                <span class="meta-pill">template {{ pipeline.template_id }}</span>
-                {% endif %}
-                {% if pipeline.deployment_id %}
-                <span class="meta-pill">deployment {{ pipeline.deployment_id }}</span>
-                {% endif %}
-                <span class="meta-pill">running {{ pipeline.active_runs }}</span>
-                <span class="meta-pill">max concurrent {{ pipeline.max_concurrent_runs }}</span>
-                <span class="meta-pill">{{ pipeline.execution_summary }}</span>
-                {% for target in pipeline.trigger_targets %}
-                <span class="tag">triggers {{ target }}</span>
-                {% endfor %}
-            </div>
-
-            <div class="card-actions">
-                <button class="button primary" data-run-button="{{ pipeline.pipeline_id }}" onclick="triggerPipeline('{{ pipeline.pipeline_id }}')">Run now</button>
-                <button class="button {% if pipeline.paused %}secondary{% else %}warn{% endif %}" onclick="togglePipelinePause('{{ pipeline.pipeline_id }}', {{ 'false' if pipeline.paused else 'true' }})">
-                    {% if pipeline.paused %}Resume schedule{% else %}Pause schedule{% endif %}
-                </button>
-                <button class="button ghost" onclick="deletePipeline('{{ pipeline.pipeline_id }}')">Delete</button>
-                <a class="button ghost" href="/pipelines/{{ pipeline.pipeline_id }}">Open details</a>
-            </div>
-        </article>
-        {% endfor %}
+        <div id="pipeline-listing"></div>
+        <div class="empty-state" id="pipeline-empty" hidden>No pipelines match the current filter.</div>
     </section>
     {% else %}
     <div class="empty-state">No pipelines were discovered in <span class="mono">{{ project.config_path }}</span>.</div>
@@ -102,20 +64,303 @@
 
 {% block scripts %}
 <script>
-function setPipelineView(view) {
-    const container = document.querySelector("[data-pipeline-view]");
-    if (!container || !["grid", "list"].includes(view)) return;
-    container.classList.toggle("pipeline-list", view === "list");
-    document.querySelectorAll("[data-pipeline-view-button]").forEach((button) => {
-        const active = button.dataset.pipelineViewButton === view;
-        button.classList.toggle("active", active);
-        button.setAttribute("aria-pressed", String(active));
+const pipelinePayloads = {{ pipeline_payloads|tojson }};
+const pipelineGroups = {{ groups|map(attribute='group_id')|list|tojson }};
+const pipelineGroupLabels = {{ groups|map(attribute='label')|list|tojson }};
+
+let pipelineSort = window.localStorage.getItem("piply:pipeline-sort") || "next";
+let pipelineFilter = window.localStorage.getItem("piply:pipeline-filter") || "all";
+
+const FAILURE_STATUSES = ["failed", "interrupted", "timed_out"];
+
+function relativeTime(isoText) {
+    if (!isoText) return "never";
+    const then = new Date(isoText);
+    if (Number.isNaN(then.getTime())) return "never";
+    const deltaSeconds = Math.round((Date.now() - then.getTime()) / 1000);
+    const past = deltaSeconds >= 0;
+    const magnitude = Math.abs(deltaSeconds);
+    let label;
+    if (magnitude < 60) label = `${magnitude}s`;
+    else if (magnitude < 3600) label = `${Math.round(magnitude / 60)}m`;
+    else if (magnitude < 86400) label = `${Math.round(magnitude / 3600)}h`;
+    else label = `${Math.round(magnitude / 86400)}d`;
+    return past ? `${label} ago` : `in ${label}`;
+}
+
+function absoluteTime(isoText) {
+    if (!isoText) return "-";
+    const value = new Date(isoText);
+    return Number.isNaN(value.getTime()) ? "-" : value.toLocaleString();
+}
+
+function matchesFilter(pipeline) {
+    if (pipelineFilter === "running") return pipeline.active_runs > 0;
+    if (pipelineFilter === "failed") return FAILURE_STATUSES.includes(pipeline.last_run_status);
+    if (pipelineFilter === "scheduled") return Boolean(pipeline.next_run_at);
+    if (pipelineFilter === "paused") return pipeline.paused || !pipeline.enabled;
+    return true;
+}
+
+function matchesSearch(pipeline, needle) {
+    if (!needle) return true;
+    const haystack = [
+        pipeline.pipeline_id,
+        pipeline.title,
+        pipeline.description,
+        pipeline.template_id,
+        pipeline.deployment_id,
+        ...(pipeline.tags || []),
+    ].filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(needle);
+}
+
+function comparePipelines(a, b) {
+    if (pipelineSort === "next") {
+        // Pipelines without a schedule sort last rather than first.
+        const left = a.next_run_at ? new Date(a.next_run_at).getTime() : Number.POSITIVE_INFINITY;
+        const right = b.next_run_at ? new Date(b.next_run_at).getTime() : Number.POSITIVE_INFINITY;
+        if (left !== right) return left - right;
+    }
+    if (pipelineSort === "last") {
+        const left = a.last_run_at ? new Date(a.last_run_at).getTime() : 0;
+        const right = b.last_run_at ? new Date(b.last_run_at).getTime() : 0;
+        if (left !== right) return right - left;
+    }
+    return a.title.localeCompare(b.title);
+}
+
+const RUN_HISTORY_SLOTS = 5;
+
+function renderRunHistory(pipeline) {
+    // Newest first from the API; reversed so the dots read oldest -> newest,
+    // left to right, with the most recent run nearest the other columns.
+    const runs = (pipeline.recent_runs || []).slice(0, RUN_HISTORY_SLOTS).reverse();
+    const padding = RUN_HISTORY_SLOTS - runs.length;
+
+    const empties = Array.from({ length: padding }, () =>
+        '<span class="run-dot empty" aria-hidden="true"></span>'
+    ).join("");
+
+    const dots = runs.map((run) => {
+        const when = absoluteTime(run.started_at);
+        const ago = relativeTime(run.started_at);
+        const duration = run.duration_seconds === null || run.duration_seconds === undefined
+            ? ""
+            : ` &middot; ${escapeHtml(formatDurationSeconds(run.duration_seconds))}`;
+        const label = `${run.status} &middot; ${escapeHtml(ago)}${duration}`;
+        return `
+            <a class="run-dot ${escapeHtml(run.status)}"
+               href="/runs/${escapeHtml(run.run_id)}"
+               title="${escapeHtml(run.status)} — ${escapeHtml(when)}"
+               aria-label="Run ${escapeHtml(run.run_id)}: ${escapeHtml(run.status)}, ${escapeHtml(ago)}">
+                <span class="run-dot-tip">${label}<br><span class="mono">${escapeHtml(run.run_id)}</span></span>
+            </a>`;
+    }).join("");
+
+    if (!runs.length) {
+        return `<div class="run-history">${empties}<span class="run-history-empty">no runs yet</span></div>`;
+    }
+    return `<div class="run-history">${empties}${dots}</div>`;
+}
+
+function renderPipelineRow(pipeline) {
+    const status = pipeline.active_runs > 0 ? "running" : (pipeline.last_run_status || "queued");
+    const stateLabel = pipeline.paused ? "paused" : (pipeline.enabled ? "enabled" : "disabled");
+    const lastRunCell = pipeline.last_run_id
+        ? `<a href="/runs/${escapeHtml(pipeline.last_run_id)}" title="${escapeHtml(absoluteTime(pipeline.last_run_at))}">${escapeHtml(relativeTime(pipeline.last_run_at))}</a>`
+        : '<span class="muted">never</span>';
+    const downstream = (pipeline.trigger_targets || []).length
+        ? `<span class="meta-pill tiny">→ ${escapeHtml(pipeline.trigger_targets.join(", "))}</span>`
+        : "";
+    const upstream = (pipeline.triggered_by || []).length
+        ? `<span class="meta-pill tiny">← ${escapeHtml(pipeline.triggered_by.join(", "))}</span>`
+        : "";
+    const deployment = pipeline.deployment_id
+        ? `<span class="meta-pill tiny">${escapeHtml(pipeline.deployment_id)}</span>`
+        : "";
+
+    return `
+        <div class="pipeline-row" data-pipeline-row="${escapeHtml(pipeline.pipeline_id)}">
+            <div class="pipeline-row-status">
+                <span class="status-dot-lg ${escapeHtml(status)}" title="Current state: ${escapeHtml(status)}"></span>
+            </div>
+            <div class="pipeline-row-main">
+                <a class="pipeline-row-title" href="/pipelines/${escapeHtml(pipeline.pipeline_id)}">${escapeHtml(pipeline.title)}</a>
+                <div class="pipeline-row-sub mono">${escapeHtml(pipeline.pipeline_id)}</div>
+                <div class="pipeline-row-tags">
+                    ${deployment}${upstream}${downstream}
+                    ${(pipeline.tags || []).map((tag) => `<span class="meta-pill tiny">${escapeHtml(tag)}</span>`).join("")}
+                </div>
+            </div>
+            <div class="pipeline-row-cell">
+                <div class="cell-label">Schedule</div>
+                <div class="cell-value">${escapeHtml(pipeline.schedule_text)}</div>
+            </div>
+            <div class="pipeline-row-cell wide">
+                <div class="cell-label">Last ${RUN_HISTORY_SLOTS} runs</div>
+                ${renderRunHistory(pipeline)}
+            </div>
+            <div class="pipeline-row-cell">
+                <div class="cell-label">Last run</div>
+                <div class="cell-value">${lastRunCell}</div>
+            </div>
+            <div class="pipeline-row-cell">
+                <div class="cell-label">Next run</div>
+                <div class="cell-value" title="${escapeHtml(absoluteTime(pipeline.next_run_at))}">${escapeHtml(pipeline.next_run_label)}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">Tasks</div>
+                <div class="cell-value">${pipeline.task_count}</div>
+            </div>
+            <div class="pipeline-row-cell narrow">
+                <div class="cell-label">State</div>
+                <div class="cell-value">${escapeHtml(stateLabel)}</div>
+            </div>
+            <div class="pipeline-row-actions">
+                <button class="button primary tiny-button" data-run-button="${escapeHtml(pipeline.pipeline_id)}" onclick="triggerPipeline('${pipeline.pipeline_id}')">Run</button>
+                <a class="button ghost tiny-button" href="/pipelines/${escapeHtml(pipeline.pipeline_id)}?preview=1">Preview</a>
+                <button class="button ghost tiny-button" onclick="togglePipelinePause('${pipeline.pipeline_id}', ${pipeline.paused ? "false" : "true"})">${pipeline.paused ? "Resume" : "Pause"}</button>
+            </div>
+        </div>
+    `;
+}
+
+function applyPipelineFilters() {
+    const container = document.getElementById("pipeline-listing");
+    const emptyState = document.getElementById("pipeline-empty");
+    if (!container) return;
+
+    const needle = (document.getElementById("pipeline-search")?.value || "").trim().toLowerCase();
+    const grouped = document.getElementById("pipeline-group-toggle")?.checked;
+
+    const visible = pipelinePayloads.filter((item) => matchesFilter(item) && matchesSearch(item, needle));
+    visible.sort(comparePipelines);
+
+    emptyState.hidden = visible.length > 0;
+
+    // Set before the ungrouped branch returns: with no groups on screen there is
+    // nothing for these buttons to act on.
+    const actions = document.getElementById("pipeline-group-actions");
+    if (actions) actions.hidden = !grouped;
+
+    if (!grouped) {
+        container.innerHTML = `<div class="pipeline-table">${visible.map(renderPipelineRow).join("")}</div>`;
+        return;
+    }
+
+    const sections = pipelineGroups.map((groupId, index) => {
+        const members = visible.filter((item) => item.group_id === groupId);
+        if (!members.length) return "";
+        const label = pipelineGroupLabels[index];
+        const showHeading = pipelineGroups.length > 1 || groupId !== "standalone";
+        // A group with no heading has nothing to click, so it can never collapse.
+        // While searching, force every group open: hiding a match behind a
+        // collapsed header reads as "no results".
+        const collapsed = showHeading && !needle && collapsedPipelineGroups.has(groupId);
+        const summary = groupSummary(members);
+        return `
+            <section class="pipeline-group collapsible${collapsed ? " collapsed" : ""}" data-group-id="${escapeHtml(groupId)}">
+                ${showHeading ? `<header class="pipeline-group-header">
+                    <button type="button" class="collapse-toggle" aria-expanded="${!collapsed}"
+                            onclick="togglePipelineGroup('${escapeHtml(groupId)}')">
+                        <span class="collapse-caret" aria-hidden="true">&#9662;</span>
+                        <span class="small-kicker">${escapeHtml(label)}</span>
+                    </button>
+                    <span class="meta-pill tiny">${members.length}</span>
+                    <span class="pipeline-group-summary">${summary}</span>
+                </header>` : ""}
+                <div class="collapsible-body">
+                    <div class="pipeline-table">${members.map(renderPipelineRow).join("")}</div>
+                </div>
+            </section>
+        `;
+    }).join("");
+
+    container.innerHTML = sections;
+}
+
+/*
+ * Collapsible template groups.
+ *
+ * With one template deployed per tenant a group can hold 9 rows, so the page
+ * becomes a wall of near-identical entries. Collapsing keeps the shape of the
+ * project visible while hiding the detail, and the choice persists per browser.
+ */
+const PIPELINE_GROUPS_KEY = "piply.collapsedPipelineGroups";
+
+function loadCollapsedGroups() {
+    try {
+        const stored = JSON.parse(window.localStorage.getItem(PIPELINE_GROUPS_KEY) || "[]");
+        return new Set(Array.isArray(stored) ? stored : []);
+    } catch (error) {
+        return new Set();
+    }
+}
+
+const collapsedPipelineGroups = loadCollapsedGroups();
+
+function persistCollapsedGroups() {
+    window.localStorage.setItem(PIPELINE_GROUPS_KEY, JSON.stringify([...collapsedPipelineGroups]));
+}
+
+/** Return the counts worth seeing when a group is collapsed. */
+function groupSummary(members) {
+    const failed = members.filter((item) => ["failed", "timed_out"].includes(item.last_run_status)).length;
+    const running = members.filter((item) => item.active_runs > 0).length;
+    const paused = members.filter((item) => item.paused).length;
+    const parts = [];
+    if (running) parts.push(`<span class="group-stat running">${running} running</span>`);
+    if (failed) parts.push(`<span class="group-stat failed">${failed} failed</span>`);
+    if (paused) parts.push(`<span class="group-stat paused">${paused} paused</span>`);
+    return parts.join("");
+}
+
+function togglePipelineGroup(groupId) {
+    const section = document.querySelector(`[data-group-id="${CSS.escape(groupId)}"]`);
+    if (!section) return;
+    const collapsed = !section.classList.contains("collapsed");
+    section.classList.toggle("collapsed", collapsed);
+    section.querySelector(".collapse-toggle")?.setAttribute("aria-expanded", String(!collapsed));
+    // Toggle the live node rather than re-rendering, so the page does not jump.
+    if (collapsed) collapsedPipelineGroups.add(groupId);
+    else collapsedPipelineGroups.delete(groupId);
+    persistCollapsedGroups();
+}
+
+function setAllPipelineGroups(expand) {
+    collapsedPipelineGroups.clear();
+    if (!expand) {
+        document.querySelectorAll("[data-group-id]").forEach((section) => {
+            // Only groups that actually render a toggle can be collapsed.
+            if (section.querySelector(".collapse-toggle")) collapsedPipelineGroups.add(section.dataset.groupId);
+        });
+    }
+    persistCollapsedGroups();
+    applyPipelineFilters();
+}
+
+function setPipelineSort(mode) {
+    pipelineSort = mode;
+    window.localStorage.setItem("piply:pipeline-sort", mode);
+    document.querySelectorAll("[data-sort]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.sort === mode);
     });
-    localStorage.setItem("piply:pipeline-view", view);
+    applyPipelineFilters();
+}
+
+function setPipelineFilter(mode) {
+    pipelineFilter = mode;
+    window.localStorage.setItem("piply:pipeline-filter", mode);
+    document.querySelectorAll("[data-filter]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.filter === mode);
+    });
+    applyPipelineFilters();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-    setPipelineView(localStorage.getItem("piply:pipeline-view") || "grid");
+    setPipelineSort(pipelineSort);
+    setPipelineFilter(pipelineFilter);
 });
 </script>
 {% endblock %}

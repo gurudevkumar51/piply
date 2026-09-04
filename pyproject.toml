@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mr-piply"
-version = "0.1.8"
+version = "0.3.0"
 description = "Lightweight Python workflow orchestration platform"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
@@ -42,6 +42,10 @@ dependencies = [
 
 
 [project.optional-dependencies]
+
+# Optional PostgreSQL metadata store. SQLite remains the default and needs
+# nothing installed.
+postgres = ["psycopg[binary]>=3.1,<4"]
 
 dev = ["ruff>=0.6,<1", "pre-commit>=3,<4"]
 

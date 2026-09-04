@@ -242,6 +242,9 @@ select {
     border-radius: 999px;
     padding: 7px 11px;
     cursor: pointer;
+    /* Anchors styled as buttons do not centre their own text the way a
+       <button> does, which left them misaligned beside a real button. */
+    text-align: center;
     transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 
@@ -271,12 +274,6 @@ select {
     background: rgba(217, 90, 90, 0.08);
     color: var(--red);
     border-color: rgba(217, 90, 90, 0.16);
-}
-
-.button.violet {
-    background: rgba(106, 94, 156, 0.08);
-    color: var(--violet);
-    border-color: rgba(106, 94, 156, 0.18);
 }
 
 .button:disabled {
@@ -338,21 +335,7 @@ select {
     display: grid;
     grid-template-columns: 1.18fr 0.94fr;
     gap: 14px;
-}
-
-.run-focus-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1.16fr) minmax(360px, 0.84fr);
-    gap: 14px;
-    align-items: start;
-}
-
-.run-focus-grid > * {
-    min-height: 0;
-    align-self: start;
-}
-
-.dag-operator-grid {
+}.dag-operator-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
     gap: 14px;
@@ -403,37 +386,7 @@ select {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
     gap: 12px;
-}
-
-.pipeline-view-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-bottom: 12px;
-}
-
-.view-toggle {
-    display: inline-flex;
-    gap: 4px;
-    padding: 3px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--surface);
-}
-
-.view-toggle-button {
-    padding: 5px 10px;
-    font-size: 0.82rem;
-}
-
-.view-toggle-button.active {
-    border-color: var(--accent);
-    background: var(--accent);
-    color: var(--surface);
-}
-
-.pipeline-grid.pipeline-list {
+}.pipeline-grid.pipeline-list {
     grid-template-columns: 1fr;
 }
 
@@ -561,14 +514,7 @@ select {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
-}
-
-.hero-detail-grid {
-    margin-top: 14px;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
-.detail-card {
+}.detail-card {
     padding: 10px;
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.7);
@@ -672,14 +618,7 @@ select {
 
 .retryable:hover {
     transform: translateY(-1px);
-}
-
-.retry-selected {
-    border-color: rgba(57, 117, 255, 0.3);
-    box-shadow: 0 0 0 2px rgba(57, 117, 255, 0.08);
-}
-
-.task-card-focused {
+}.task-card-focused {
     border-color: rgba(57, 117, 255, 0.34);
     box-shadow: 0 0 0 2px rgba(57, 117, 255, 0.08);
 }
@@ -729,13 +668,7 @@ select {
     align-items: center;
     gap: 10px;
     margin-bottom: 8px;
-}
-
-.inspector-shell {
-    min-width: 0;
-}
-
-.dag-operator-grid.inspector-collapsed {
+}.dag-operator-grid.inspector-collapsed {
     grid-template-columns: minmax(0, 1fr);
 }
 
@@ -836,17 +769,7 @@ body.drawer-open {
 
 .dag-toolbar-label {
     margin-right: 4px;
-}
-
-.dag-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 10px;
-}
-
-.dag-stage {
+}.dag-stage {
     min-height: 220px;
     border-radius: var(--radius-md);
     border: 1px dashed var(--border-strong);
@@ -1066,27 +989,7 @@ body.drawer-open {
     text-align: center;
     color: var(--muted);
     background: rgba(255, 255, 255, 0.7);
-}
-
-.retry-panel {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    align-items: center;
-    margin-top: 16px;
-    padding: 18px;
-    border-radius: var(--radius-md);
-    border: 1px solid rgba(217, 90, 90, 0.16);
-    background: rgba(255, 246, 246, 0.9);
-}
-
-.retry-copy {
-    display: grid;
-    gap: 8px;
-    color: #4a5a73;
-}
-
-.command-override-grid {
+}.command-override-grid {
     display: grid;
     gap: 14px;
 }
@@ -1357,14 +1260,7 @@ body.drawer-open {
     margin-top: 10px;
     color: var(--muted);
     font-size: 0.92rem;
-}
-
-.sticky-panel {
-    position: sticky;
-    top: 108px;
-}
-
-.run-graph-panel .dag-shell {
+}.run-graph-panel .dag-shell {
     min-height: 0;
 }
 
@@ -1376,13 +1272,7 @@ body.drawer-open {
 
     .layout-two {
         grid-template-columns: 1fr;
-    }
-
-    .run-focus-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .dag-operator-grid,
+    }    .dag-operator-grid,
     .run-secondary-grid,
     .run-dag-grid {
         grid-template-columns: 1fr;
@@ -1416,11 +1306,6 @@ body.drawer-open {
         gap: 6px;
     }
 
-    .retry-panel {
-        flex-direction: column;
-        align-items: flex-start;
-    }
-
     .page-header,
     .compact-header {
         flex-direction: column;
@@ -1441,4 +1326,1027 @@ body.drawer-open {
     .dag-viewport {
         min-height: 320px;
     }
+}
+
+/* ---------------------------------------------------------------------------
+   Airflow-style pipeline listing, diagnostics, preview, and artifact browser
+   --------------------------------------------------------------------------- */
+
+.tight-panel {
+    padding: 12px;
+}
+
+.listing-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+}
+
+.toolbar-input {
+    flex: 1 1 260px;
+    min-width: 200px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.9);
+    font: inherit;
+    color: inherit;
+}
+
+.toolbar-input:focus {
+    outline: none;
+    border-color: rgba(57, 117, 255, 0.4);
+}
+
+.toolbar-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.pipeline-group + .pipeline-group {
+    margin-top: 14px;
+}
+
+.pipeline-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 2px;
+}
+
+/* A collapsed template group keeps its header readable and its counts visible,
+   so the shape of the project survives hiding the rows. */
+.pipeline-group .collapse-toggle {
+    /* Roomier than the panel toggles elsewhere: this one is the primary way to
+       work the page on a phone, where a 19px row is hard to hit. */
+    padding: 6px 8px;
+    margin-left: -8px;
+    border-radius: var(--radius-sm);
+}
+
+.pipeline-group .collapse-toggle:hover {
+    background: var(--bg-accent);
+}
+
+.pipeline-group .collapse-toggle .small-kicker {
+    cursor: pointer;
+}
+
+.pipeline-group-summary {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    margin-left: auto;
+}
+
+.group-stat {
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    line-height: 1.5;
+}
+
+.group-stat.running {
+    background: rgba(57, 117, 255, 0.1);
+    color: var(--accent);
+}
+
+.group-stat.failed {
+    background: rgba(217, 90, 90, 0.1);
+    color: var(--red);
+}
+
+.group-stat.paused {
+    background: rgba(123, 140, 166, 0.12);
+    color: var(--muted);
+}
+
+.pipeline-table {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: #ffffff;
+}
+
+.pipeline-row {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 2fr) 128px repeat(3, minmax(0, 1fr)) 60px 72px auto;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-top: 1px solid var(--border);
+}
+
+.pipeline-row:first-child {
+    border-top: none;
+}
+
+.pipeline-row:hover {
+    background: rgba(57, 117, 255, 0.03);
+}
+
+.pipeline-row-status {
+    display: flex;
+    justify-content: center;
+}
+
+.status-dot-lg {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #e89b2c;
+    box-shadow: 0 0 0 3px rgba(232, 155, 44, 0.14);
+}
+
+.status-dot-lg.success {
+    background: #1b9c60;
+    box-shadow: 0 0 0 3px rgba(27, 156, 96, 0.14);
+}
+
+.status-dot-lg.running {
+    background: #3975ff;
+    box-shadow: 0 0 0 3px rgba(57, 117, 255, 0.16);
+    animation: piply-pulse 1.6s ease-in-out infinite;
+}
+
+.status-dot-lg.failed,
+.status-dot-lg.timed_out {
+    background: #d95a5a;
+    box-shadow: 0 0 0 3px rgba(217, 90, 90, 0.14);
+}
+
+.status-dot-lg.interrupted {
+    background: #b85f16;
+    box-shadow: 0 0 0 3px rgba(184, 95, 22, 0.14);
+}
+
+.status-dot-lg.cancelled {
+    background: #6a5e9c;
+    box-shadow: 0 0 0 3px rgba(106, 94, 156, 0.14);
+}
+
+.status-dot-lg.skipped {
+    background: #7b8ca6;
+    box-shadow: 0 0 0 3px rgba(123, 140, 166, 0.14);
+}
+
+@keyframes piply-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+
+.pipeline-row-main {
+    min-width: 0;
+}
+
+.pipeline-row-title {
+    font-weight: 600;
+    color: inherit;
+    text-decoration: none;
+}
+
+.pipeline-row-title:hover {
+    color: var(--accent);
+}
+
+.pipeline-row-sub {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pipeline-row-tags {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-top: 5px;
+}
+
+.pipeline-row-cell {
+    min-width: 0;
+}
+
+.pipeline-row-cell.narrow {
+    text-align: right;
+}
+
+.cell-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.cell-value {
+    margin-top: 2px;
+    font-size: 0.86rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pipeline-row-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+.meta-pill.tiny {
+    padding: 2px 7px;
+    font-size: 0.7rem;
+}
+
+.definition-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+}
+
+.definition-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 0.5fr) minmax(0, 1fr);
+    gap: 10px;
+    padding: 7px 2px;
+    border-top: 1px solid var(--border);
+}
+
+.definition-row:first-child {
+    border-top: none;
+}
+
+.definition-row dt {
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.definition-row dd {
+    margin: 0;
+    word-break: break-word;
+    font-size: 0.86rem;
+}
+
+.two-column-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    align-items: start;
+}
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+}
+
+.stat-card {
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: #ffffff;
+}
+
+.stat-label {
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.stat-value {
+    margin-top: 6px;
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.status-badge.timed_out {
+    color: #a03030;
+    border-color: rgba(160, 48, 48, 0.24);
+    background: rgba(217, 90, 90, 0.12);
+}
+
+.status-badge.pending {
+    color: #7b8ca6;
+    border-color: rgba(123, 140, 166, 0.2);
+    background: rgba(123, 140, 166, 0.08);
+}
+
+.status-badge.stale,
+.status-badge.crashed {
+    color: #b85f16;
+    border-color: rgba(184, 95, 22, 0.24);
+    background: rgba(232, 155, 44, 0.12);
+}
+
+/* Preview drawer and artifact browser ------------------------------------- */
+
+.preview-stage {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    margin-top: 10px;
+}
+
+.preview-stage:first-child {
+    border-top: none;
+    padding-top: 0;
+    margin-top: 0;
+}
+
+.preview-task {
+    display: grid;
+    grid-template-columns: 70px minmax(0, 1fr);
+    gap: 10px;
+    padding: 7px 0;
+}
+
+.preview-task .mono {
+    overflow-wrap: anywhere;
+}
+
+.preview-task.skipped {
+    opacity: 0.62;
+}
+
+.artifact-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) 90px 110px;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+}
+
+.artifact-row:first-child {
+    border-top: none;
+}
+
+.artifact-name {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.artifact-path {
+    font-size: 0.76rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+
+/* Keep the run graph usable on narrow screens ------------------------------ */
+
+@media (max-width: 1180px) {
+    .two-column-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .pipeline-row {
+        grid-template-columns: 24px minmax(0, 1.6fr) 128px repeat(2, minmax(0, 1fr)) auto;
+    }
+
+    .pipeline-row-cell.narrow {
+        display: none;
+    }
+}
+
+@media (max-width: 900px) {
+    .pipeline-row {
+        grid-template-columns: 20px minmax(0, 1fr);
+        row-gap: 6px;
+    }
+
+    .pipeline-row-cell {
+        grid-column: 2;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        text-align: left;
+    }
+
+    .pipeline-row-cell.narrow {
+        display: flex;
+    }
+
+    .cell-label {
+        min-width: 74px;
+    }
+
+    .pipeline-row-actions {
+        grid-column: 2;
+        justify-content: flex-start;
+    }
+
+    .artifact-row {
+        grid-template-columns: 1fr;
+    }
+
+    /* The DAG stays the point of the run page, so it keeps real estate
+       instead of collapsing to a sliver on a phone. */
+    .dag-stage {
+        min-height: 300px;
+    }
+
+    .dag-viewport {
+        min-height: 340px;
+    }
+
+    .dag-svg {
+        min-height: 320px;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   Run history dots on the pipeline listing
+   --------------------------------------------------------------------------- */
+
+.run-history {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 4px;
+    min-height: 20px;
+}
+
+/* One dot per run, oldest on the left. Anchors so each is a real link that can
+   be opened in a new tab, focused, and read by a screen reader. */
+.run-dot {
+    position: relative;
+    width: 13px;
+    height: 13px;
+    border-radius: 4px;
+    flex: 0 0 auto;
+    background: #9aa8bd;
+    border: 1px solid rgba(15, 32, 56, 0.12);
+    text-decoration: none;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.run-dot:hover,
+.run-dot:focus-visible {
+    transform: scale(1.28);
+    box-shadow: 0 2px 8px rgba(15, 32, 56, 0.28);
+    z-index: 3;
+    outline: none;
+}
+
+.run-dot:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Placeholder for a pipeline with fewer than five runs, so every row's dots
+   stay column-aligned down the page. */
+.run-dot.empty {
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+    pointer-events: none;
+}
+
+.run-dot.success { background: #1b9c60; }
+.run-dot.running {
+    background: #3975ff;
+    animation: piply-pulse 1.6s ease-in-out infinite;
+}
+.run-dot.failed,
+.run-dot.timed_out { background: #d95a5a; }
+.run-dot.interrupted { background: #b85f16; }
+.run-dot.cancelled { background: #6a5e9c; }
+.run-dot.skipped { background: #7b8ca6; }
+.run-dot.queued { background: #e89b2c; }
+
+.run-dot-tip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 9px;
+    border-radius: 8px;
+    background: rgba(15, 32, 56, 0.94);
+    color: #ffffff;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    white-space: nowrap;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+    pointer-events: none;
+    z-index: 4;
+}
+
+.run-dot:hover .run-dot-tip,
+.run-dot:focus-visible .run-dot-tip {
+    opacity: 1;
+    visibility: visible;
+}
+
+.run-history-empty {
+    font-size: 0.74rem;
+    color: var(--muted);
+    margin-left: 2px;
+}
+
+.pipeline-row-cell.wide {
+    min-width: 128px;
+}
+
+@media (max-width: 900px) {
+    /* Stacked rows: the dots keep their own labelled line. */
+    .pipeline-row-cell.wide {
+        grid-column: 2;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .run-history {
+        margin-top: 0;
+    }
+
+    /* A tooltip anchored above would be clipped at the top of a stacked row. */
+    .run-dot-tip {
+        bottom: auto;
+        top: calc(100% + 8px);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   Runs page: trigger chips and execution lineage
+   --------------------------------------------------------------------------- */
+
+.runs-table td {
+    vertical-align: middle;
+}
+
+.nowrap {
+    white-space: nowrap;
+}
+
+.lineage-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+}
+
+/* How a run was started. Colour-coded so manual, scheduled, and
+   pipeline-triggered runs are distinguishable at a glance. */
+.trigger-chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    border: 1px solid var(--border);
+    background: rgba(123, 140, 166, 0.1);
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.trigger-chip.manual {
+    color: #3975ff;
+    border-color: rgba(57, 117, 255, 0.28);
+    background: rgba(57, 117, 255, 0.1);
+}
+
+.trigger-chip.schedule {
+    color: #1b7f9c;
+    border-color: rgba(27, 127, 156, 0.28);
+    background: rgba(27, 127, 156, 0.1);
+}
+
+.trigger-chip.pipeline {
+    color: #7a4bbd;
+    border-color: rgba(122, 75, 189, 0.28);
+    background: rgba(122, 75, 189, 0.1);
+}
+
+.trigger-chip.sensor {
+    color: #1b9c60;
+    border-color: rgba(27, 156, 96, 0.28);
+    background: rgba(27, 156, 96, 0.1);
+}
+
+.trigger-chip.retry {
+    color: #b85f16;
+    border-color: rgba(184, 95, 22, 0.28);
+    background: rgba(232, 155, 44, 0.12);
+}
+
+/* The chain that led to this run: Deployment -> A -> B -> this. */
+.lineage-chain {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    font-size: 0.74rem;
+}
+
+.lineage-step {
+    padding: 1px 6px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.7);
+    color: var(--muted);
+    text-decoration: none;
+    max-width: 190px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+a.lineage-step:hover {
+    color: var(--accent);
+    border-color: rgba(57, 117, 255, 0.32);
+    background: rgba(57, 117, 255, 0.06);
+}
+
+.lineage-step.current {
+    color: var(--ink);
+    font-weight: 600;
+    border-color: var(--border-strong);
+    background: rgba(15, 32, 56, 0.05);
+}
+
+.lineage-step.success { border-left: 3px solid #1b9c60; }
+.lineage-step.failed,
+.lineage-step.timed_out { border-left: 3px solid #d95a5a; }
+.lineage-step.running { border-left: 3px solid #3975ff; }
+.lineage-step.interrupted { border-left: 3px solid #b85f16; }
+.lineage-step.deleted {
+    border-style: dashed;
+    opacity: 0.65;
+}
+
+.lineage-arrow {
+    color: var(--muted);
+    font-size: 0.7rem;
+}
+
+.listing-toolbar select.toolbar-input,
+.listing-toolbar input[type="date"].toolbar-input {
+    flex: 0 1 auto;
+    min-width: 0;
+    width: auto;
+    padding: 7px 10px;
+}
+
+/* ---------------------------------------------------------------------------
+   Collapsible panels, so the DAG can take the page
+   --------------------------------------------------------------------------- */
+
+.collapsible-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.collapse-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 2px 0;
+    cursor: pointer;
+    color: var(--muted);
+    font: inherit;
+}
+
+.collapse-toggle:hover {
+    color: var(--accent);
+}
+
+.collapse-caret {
+    display: inline-block;
+    transition: transform 0.15s ease;
+    font-size: 0.7rem;
+}
+
+.collapsible.collapsed .collapse-caret {
+    transform: rotate(-90deg);
+}
+
+.collapsible-body {
+    margin-top: 10px;
+}
+
+.collapsible.collapsed .collapsible-body {
+    display: none;
+}
+
+/* The one-line digest shown in place of the full body. */
+.collapsed-summary {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.collapsible.collapsed .collapsed-summary {
+    display: flex;
+}
+
+/* With the inspector hidden the graph spans the full width, so give it real
+   vertical space too rather than leaving a wide, short strip. */
+.dag-operator-grid.inspector-collapsed .dag-stage {
+    min-height: 560px;
+}
+
+.dag-operator-grid.inspector-collapsed .dag-viewport {
+    min-height: 620px;
+}
+
+.dag-operator-grid.inspector-collapsed .dag-svg {
+    min-height: 560px;
+}
+
+/* ---------------------------------------------------------------------------
+   Sign-in page
+   --------------------------------------------------------------------------- */
+
+.login-shell {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.login-card {
+    width: 100%;
+    max-width: 360px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 28px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    background: #ffffff;
+    box-shadow: var(--shadow);
+}
+
+.login-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.login-field input {
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    font: inherit;
+}
+
+.login-field input:focus {
+    outline: none;
+    border-color: rgba(57, 117, 255, 0.45);
+}
+
+.login-error {
+    padding: 9px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(217, 90, 90, 0.28);
+    background: rgba(217, 90, 90, 0.1);
+    color: #a03030;
+    font-size: 0.86rem;
+}
+
+/* Settings forms ------------------------------------------------------------ */
+
+.settings-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    align-items: end;
+}
+
+.settings-form select {
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    font: inherit;
+}
+
+/* Runtime input prompt.
+   Shown when a manual run needs values the config leaves to run time, such as
+   a downstream pipeline started by hand rather than by its upstream. */
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(19, 36, 62, 0.32);
+    backdrop-filter: blur(2px);
+}
+
+body.modal-open {
+    overflow: hidden;
+}
+
+.modal {
+    width: min(520px, 100%);
+    max-height: 88vh;
+    overflow: auto;
+    padding: 22px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--surface);
+    box-shadow: 0 24px 60px rgba(28, 49, 78, 0.22);
+}
+
+.modal h2 {
+    margin: 0;
+    font-family: var(--display);
+    font-size: 1.15rem;
+}
+
+.runtime-inputs-subtitle {
+    margin: 2px 0 12px;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.runtime-inputs-note {
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--bg-accent);
+    color: var(--text);
+    font-size: 0.84rem;
+    line-height: 1.45;
+}
+
+.runtime-inputs-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.runtime-input-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 4px;
+}
+
+.runtime-input-name {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.runtime-input-row input {
+    padding: 9px 11px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 0.86rem;
+}
+
+.runtime-input-row input:focus {
+    border-color: var(--accent);
+    outline: 2px solid var(--bg-accent);
+}
+
+.runtime-input-row input.invalid {
+    border-color: var(--red);
+}
+
+.runtime-input-usage {
+    color: var(--muted);
+    font-size: 0.76rem;
+}
+
+.runtime-inputs-error {
+    margin: 0;
+    color: var(--red);
+    font-size: 0.82rem;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+@media (max-width: 520px) {
+    .modal {
+        padding: 16px;
+    }
+
+    .modal-actions {
+        flex-direction: column-reverse;
+    }
+
+    .modal-actions .button {
+        width: 100%;
+    }
+}
+
+/* Downstream states that are not run statuses: a triggered pipeline that has
+   produced no run yet, and why. Reporting all of these as "pending" hid the
+   ones that will never resolve on their own. */
+.status-badge.paused,
+.status-badge.disabled,
+.status-badge.waiting,
+.status-badge.unknown {
+    background: rgba(123, 140, 166, 0.12);
+    color: var(--muted);
+}
+
+.status-badge.disabled,
+.status-badge.unknown {
+    color: #8a6d3b;
+    background: rgba(232, 155, 44, 0.12);
+}
+
+.status-dot-lg.pending,
+.status-dot-lg.queued,
+.status-dot-lg.waiting {
+    background: var(--amber);
+}
+
+.status-dot-lg.paused,
+.status-dot-lg.disabled,
+.status-dot-lg.unknown {
+    background: #7b8ca6;
+}
+
+/* First-run database chooser. Wider than the sign-in card because each option
+   carries an explanation of when to pick it. */
+.setup-card {
+    width: min(560px, 100%);
+    text-align: left;
+}
+
+.setup-choice {
+    margin: 4px 0 0;
+    padding: 0;
+    border: 0;
+}
+
+.setup-choice legend {
+    padding: 0;
+    margin-bottom: 8px;
+}
+
+.setup-option {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+}
+
+.setup-option:hover {
+    border-color: var(--border-strong);
+    background: var(--bg-accent);
+}
+
+.setup-option:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--bg-accent);
+}
+
+.setup-option strong {
+    display: block;
+}
+
+.setup-hint {
+    display: block;
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.setup-fields {
+    margin-top: 4px;
+}
+
+.setup-fields[hidden] {
+    display: none;
 }

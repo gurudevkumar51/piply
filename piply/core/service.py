@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import json
+import logging
+import os
 import re
+import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -15,10 +20,24 @@ import yaml
 
 from piply.engine.base import BaseEngine
 from piply.engine.local_engine import LocalEngine
-from piply.settings import PiplySettings, load_settings
+from piply.settings import PiplySettings, load_settings, read_secret
 
+from .auth import (
+    ALL_PIPELINES,
+    ROLES,
+    AuthError,
+    LoginThrottle,
+    User,
+    generate_password,
+    hash_password,
+    normalize_permissions,
+    normalize_username,
+    verify_password,
+)
+from .dialects import is_postgres_dsn
 from .graph import upstream_closure
 from .loader import discover_config, load_project
+from .mailer import build_message, load_smtp_settings, save_smtp_settings, send_message
 from .models import (
     PipelineDefinition,
     PipelineSummary,
@@ -28,11 +47,18 @@ from .models import (
     RunRecord,
     TaskDefinition,
 )
+from .notifications import NotificationError, build_alert, send_alert
+from .preview import PipelinePreview, build_pipeline_preview, unresolved_placeholders
+from .processes import is_process_alive
 from .retry import build_retry_plan
 from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor
 from .store import RunStore
 
 _RUNTIME_VARIABLE_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Task fields whose YAML form is a list but whose runtime form is a tuple.
+_TUPLE_TASK_FIELDS = {"args", "email_to"}
+# Task fields that must stay plain strings after re-rendering.
+_STRING_TASK_FIELDS = {"command", "url", "body", "email_subject", "email_body", "host", "user"}
 
 
 def _expand_runtime_value(value: object, variables: dict[str, str]) -> object:
@@ -50,6 +76,19 @@ def _expand_runtime_value(value: object, variables: dict[str, str]) -> object:
     return value
 
 
+def _json_safe(value: object) -> object:
+    """Return a JSON-serializable copy of a runtime value, dropping what cannot be stored."""
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        if isinstance(value, dict):
+            return {str(key): _json_safe(item) for key, item in value.items()}
+        if isinstance(value, list | tuple):
+            return [_json_safe(item) for item in value]
+        return str(value)
+    return value
+
+
 def _format_relative_time(delta_seconds: float) -> str:
     """Format a short relative label like 'in 2 hours'."""
     if delta_seconds < 60:
@@ -61,6 +100,13 @@ def _format_relative_time(delta_seconds: float) -> str:
     hours = max(1, round(delta_seconds / 3600))
     suffix = "" if hours == 1 else "s"
     return f"in {hours} hour{suffix}"
+
+
+#: A runtime input has to be a valid placeholder name or it can never match one.
+_RUNTIME_INPUT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: Scheduler activity goes to the server log, where uvicorn already writes.
+_LOGGER = logging.getLogger("piply.scheduler")
 
 
 class PipelineService:
@@ -82,12 +128,20 @@ class PipelineService:
 
         self.settings = settings or load_settings(resolved_config_path)
         self.config_path = resolved_config_path
-        self.database_path = (
-            Path(database_path).resolve()
-            if database_path
-            else (self.settings.database_path or (self.config_path.parent / ".piply" / "piply.db").resolve())
-        )
-        self.store = RunStore(self.database_path)
+        # A PostgreSQL DSN is passed through untouched; anything else is a
+        # SQLite file path and is resolved relative to the config directory.
+        if database_path is not None and is_postgres_dsn(str(database_path)):
+            database_target: str | Path = str(database_path)
+        elif database_path is not None:
+            database_target = Path(database_path).resolve()
+        elif self.settings.database_dsn is not None:
+            database_target = self.settings.database_dsn
+        else:
+            database_target = self.settings.database_path or (self.config_path.parent / ".piply" / "piply.db").resolve()
+        self.store = RunStore(database_target)
+        # None for a server-backed store; `database_location` is always safe to print.
+        self.database_path = self.store.database_path
+        self.database_location = self.store.location
         self.engine = engine or LocalEngine(heartbeat_interval_seconds=self.settings.heartbeat_interval_seconds)
         self._engine_accepts_initial_context = self._detect_engine_initial_context_support()
         self._dispatch_context = threading.local()
@@ -97,7 +151,13 @@ class PipelineService:
         self.store.set_meta("runtime_accepting_work", "true")
         self._accept_new_work = True
         self._shutdown_reason: str | None = None
-        self.reconcile_runtime_health()
+        self._last_reconcile_monotonic = 0.0
+        #: Failed sign-in tracking, kept in memory alongside the single process.
+        self.login_throttle = LoginThrottle()
+        #: Hashed once so an unknown username costs the same as a wrong password
+        #: without paying for a second key derivation on every failed attempt.
+        self._timing_decoy_hash = hash_password(secrets.token_hex(16))
+        self.recover_interrupted_executions()
         self.reload_project(force=True)
 
     def _detect_engine_initial_context_support(self) -> bool:
@@ -122,7 +182,7 @@ class PipelineService:
     def reload_project(self, *, force: bool = False) -> ProjectDefinition:
         """Reload the config when it changes on disk."""
         with self._lock:
-            current_mtime = self.config_path.stat().st_mtime
+            current_mtime = self._config_fingerprint()
             if not force and self._project is not None and self._config_mtime == current_mtime:
                 return self._project
 
@@ -130,8 +190,29 @@ class PipelineService:
                 self.config_path,
                 default_max_parallel_tasks=self.settings.default_max_parallel_tasks,
             )
-            self._config_mtime = current_mtime
+            # Recomputed now that the project knows every file it was built from,
+            # so the next call compares like with like instead of reloading once more.
+            self._config_mtime = self._config_fingerprint()
             return self._project
+
+    def _config_fingerprint(self) -> float:
+        """Return a value that changes when any config file changes.
+
+        With `include:` the project spans several files, so watching only the
+        root one would mean edits to an included file never took effect.
+        """
+        total = self.config_path.stat().st_mtime
+        project = self._project
+        if project is not None:
+            for source in project.config_sources:
+                if source == self.config_path:
+                    continue
+                try:
+                    total += source.stat().st_mtime
+                except OSError:
+                    # A removed include shows up as a change, then as a load error.
+                    total += 1
+        return total
 
     def validate(self) -> ProjectDefinition:
         """Validate and return the current project config."""
@@ -140,9 +221,49 @@ class PipelineService:
             default_max_parallel_tasks=self.settings.default_max_parallel_tasks,
         )
 
-    def reconcile_runtime_health(self) -> list[str]:
-        """Reconcile stale queued or running executions before building UI views."""
+    def reconcile_runtime_health(self, *, force: bool = False) -> list[str]:
+        """Reconcile stale queued or running executions before building UI views.
+
+        Reconciliation runs a full table scan, so read paths call it through a
+        short cooldown window instead of on every request.
+        """
+        interval = self.settings.reconcile_interval_seconds
+        with self._lock:
+            elapsed = time.monotonic() - self._last_reconcile_monotonic
+            if not force and interval > 0 and elapsed < interval:
+                return []
+            self._last_reconcile_monotonic = time.monotonic()
         return self.store.reconcile_stale_runs(self.settings.stale_run_timeout_seconds)
+
+    def reconcile_run_health(self, run_id: str) -> None:
+        """Reconcile one run without paying for a full stale-run scan."""
+        self.store.reconcile_stale_runs(self.settings.stale_run_timeout_seconds, run_id=run_id)
+
+    def recover_interrupted_executions(self) -> list[str]:
+        """Interrupt runs left behind by a crashed or killed Piply process.
+
+        A run is only recovered when the process that owned it is gone, so a
+        second service instance inside the same process never disturbs work
+        that is still executing.
+        """
+        recovered: list[str] = []
+        for run_id, owner_pid in self.store.list_active_runs_with_owner():
+            if is_process_alive(owner_pid):
+                continue
+            reason = (
+                "Run marked interrupted during startup recovery because the process that owned it "
+                f"(pid {owner_pid if owner_pid is not None else 'unknown'}) is no longer running."
+            )
+            if self.store.interrupt_run(
+                run_id,
+                reason=reason,
+                queued_reason="Task never started because the owning Piply process stopped.",
+            ):
+                recovered.append(run_id)
+        self.store.set_meta("runtime_last_recovery_at", datetime.now(timezone.utc).isoformat())
+        self.store.set_meta("runtime_last_recovered_runs", str(len(recovered)))
+        self.reconcile_runtime_health(force=True)
+        return recovered
 
     @property
     def is_shutting_down(self) -> bool:
@@ -195,17 +316,35 @@ class PipelineService:
             return _format_relative_time((local_next - local_now).total_seconds())
         return local_next.strftime("%Y-%m-%d %H:%M")
 
+    def upstream_pipeline_map(self) -> dict[str, tuple[str, ...]]:
+        """Return, for each pipeline, the pipelines that trigger it on success."""
+        upstream: dict[str, list[str]] = {}
+        for pipeline in self.project.pipelines.values():
+            for target in pipeline.triggers_on_success:
+                upstream.setdefault(target, []).append(pipeline.pipeline_id)
+        return {key: tuple(sorted(value)) for key, value in upstream.items()}
+
     def list_pipelines(self) -> list[PipelineSummary]:
-        """Return pipeline summaries enriched with scheduling and run metadata."""
+        """Return pipeline summaries enriched with scheduling and run metadata.
+
+        Run metadata is loaded with three aggregate queries instead of four
+        per-pipeline queries so large projects stay cheap to render.
+        """
         self.reconcile_runtime_health()
         project = self.project
         paused_ids = self.store.list_paused_pipeline_ids()
+        # One windowed query supplies both the run-history dots and the latest
+        # run, so this stays at three queries regardless of pipeline count.
+        recent_runs = self.store.recent_runs_by_pipeline(self.settings.pipeline_run_history_count)
+        latest_runs = {pipeline_id: runs[0] for pipeline_id, runs in recent_runs.items() if runs}
+        active_counts = self.store.active_run_counts_by_pipeline()
+        task_states = self.store.task_states_for_runs([run.run_id for run in latest_runs.values()])
+        upstream_map = self.upstream_pipeline_map()
         now = datetime.now(timezone.utc)
         summaries: list[PipelineSummary] = []
         for pipeline in project.pipelines.values():
-            last_run = self.store.get_latest_run_for_pipeline(pipeline.pipeline_id)
+            last_run = latest_runs.get(pipeline.pipeline_id)
             next_run_at = pipeline.schedule.next_after(now) if pipeline.schedule else None
-            latest_task_states = self.store.get_latest_task_states_for_pipeline(pipeline.pipeline_id)
             summaries.append(
                 PipelineSummary(
                     pipeline_id=pipeline.pipeline_id,
@@ -224,9 +363,14 @@ class PipelineService:
                     max_parallel_tasks=pipeline.max_parallel_tasks,
                     task_count=pipeline.task_count,
                     trigger_targets=pipeline.triggers_on_success,
-                    latest_task_states=latest_task_states,
+                    timeout_seconds=pipeline.timeout_seconds,
+                    triggered_by=upstream_map.get(pipeline.pipeline_id, ()),
+                    latest_task_states=(
+                        {} if last_run is None else task_states.get(last_run.run_id, {})  # type: ignore[arg-type]
+                    ),
                     last_run=last_run,
-                    active_runs=self.store.count_running_runs(pipeline.pipeline_id),
+                    recent_runs=tuple(recent_runs.get(pipeline.pipeline_id, ())),
+                    active_runs=active_counts.get(pipeline.pipeline_id, 0),
                     retry_summary=pipeline.retry_policy.summary,
                     template_id=pipeline.template_id,
                     deployment_id=pipeline.deployment_id,
@@ -387,12 +531,40 @@ class PipelineService:
                     continue
                 sensor_key = self._sensor_state_key(pipeline.pipeline_id, sensor.sensor_id)
                 state = self.store.get_sensor_state(sensor_key)
-                if sensor.sensor_type == "file_sensor":
-                    next_state, event = poll_file_sensor(sensor, state)
-                elif sensor.sensor_type == "sql_sensor":
-                    next_state, event = poll_sql_sensor(sensor, state)
-                else:
-                    next_state, event = poll_api_sensor(sensor, state)
+                try:
+                    if sensor.sensor_type == "file_sensor":
+                        next_state, event = poll_file_sensor(sensor, state)
+                    elif sensor.sensor_type == "sql_sensor":
+                        next_state, event = poll_sql_sensor(sensor, state)
+                    else:
+                        next_state, event = poll_api_sensor(sensor, state)
+                except Exception as exc:  # noqa: BLE001 - one bad sensor must not stop the others
+                    message = f"{exc.__class__.__name__}: {exc}"
+                    self.store.record_sensor_health(
+                        sensor_key,
+                        pipeline_id=pipeline.pipeline_id,
+                        sensor_id=sensor.sensor_id,
+                        sensor_type=sensor.sensor_type,
+                        succeeded=False,
+                        produced_event=False,
+                        error=message,
+                    )
+                    self.store.set_meta(
+                        "sensor_last_error",
+                        f"Sensor '{pipeline.pipeline_id}:{sensor.sensor_id}' failed to poll: {message}",
+                    )
+                    continue
+
+                error_text = next_state.get("last_error") if isinstance(next_state, dict) else None
+                self.store.record_sensor_health(
+                    sensor_key,
+                    pipeline_id=pipeline.pipeline_id,
+                    sensor_id=sensor.sensor_id,
+                    sensor_type=sensor.sensor_type,
+                    succeeded=not error_text,
+                    produced_event=event is not None,
+                    error=None if not error_text else str(error_text),
+                )
                 self.store.set_sensor_state(sensor_key, next_state)
                 if event is None:
                     continue
@@ -412,6 +584,16 @@ class PipelineService:
                 ):
                     enqueued += 1
         return enqueued
+
+    def _note_trigger_skipped(self, item, reason: str) -> None:
+        """Log and record why a queued trigger was passed over this tick.
+
+        The reason is stored on the queue row so it is visible without reading
+        the server log, and logged only when it changes: a paused pipeline is
+        re-evaluated every tick and would otherwise print the same line forever.
+        """
+        if self.store.record_queue_skip(item.queue_id, reason):
+            _LOGGER.info("Skipping trigger for '%s': %s", item.pipeline_id, reason)
 
     def drain_trigger_queue(
         self,
@@ -439,14 +621,25 @@ class PipelineService:
                 self.store.mark_queue_failed(item.queue_id, str(exc))
                 continue
 
-            if not pipeline.enabled or self.store.is_pipeline_paused(item.pipeline_id):
-                blocked_pipelines.add(item.pipeline_id)
-                continue
-            if self.store.count_running_runs(item.pipeline_id) > 0:
+            # A trigger that cannot run yet stays queued and is retried on the
+            # next tick. Recording why turns "nothing happened" into something
+            # you can actually diagnose.
+            skip_reason: str | None = None
+            if not pipeline.enabled:
+                skip_reason = "pipeline is disabled in the config"
+            elif self.store.is_pipeline_paused(item.pipeline_id):
+                skip_reason = "pipeline is paused"
+            elif self.store.count_running_runs(item.pipeline_id) > 0:
+                skip_reason = "a run is already in progress"
+
+            if skip_reason is not None:
+                self._note_trigger_skipped(item, skip_reason)
                 blocked_pipelines.add(item.pipeline_id)
                 continue
 
             if not self.store.claim_queue_item(item.queue_id):
+                # Another worker took it between listing and claiming.
+                self._note_trigger_skipped(item, "the trigger was claimed by another dispatcher")
                 blocked_pipelines.add(item.pipeline_id)
                 continue
 
@@ -492,6 +685,11 @@ class PipelineService:
                         if isinstance(payload.get("variables"), dict)
                         else {}
                     )
+                    inherited_env = (
+                        {str(key): str(value) for key, value in payload.get("env", {}).items()}
+                        if isinstance(payload.get("env"), dict)
+                        else {}
+                    )
                     if parent_run_id is not None:
                         initial_context.setdefault(
                             "parent",
@@ -510,6 +708,7 @@ class PipelineService:
                         tenant_id=tenant_id,
                         initial_context=initial_context,
                         inherited_variables=inherited_variables,
+                        inherited_env=inherited_env,
                     )
                 self.store.mark_queue_dispatched(item.queue_id, run.run_id)
                 dispatched_run_ids.append(run.run_id)
@@ -563,24 +762,28 @@ class PipelineService:
         pipeline_id: str | None = None,
         status: str | None = None,
         tenant_id: str | None = None,
+        trigger: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        sort: str = "started_desc",
         limit: int = 50,
     ) -> list[RunRecord]:
-        """Return recent runs with optional filters."""
+        """Return recent runs with optional filters and sort order."""
         self.reconcile_runtime_health()
         return self.store.list_runs(
             pipeline_id=pipeline_id,
             status=status,
             tenant_id=tenant_id,
+            trigger=trigger,
             created_after=created_after,
             created_before=created_before,
+            sort=sort,
             limit=limit,
         )
 
     def get_run(self, run_id: str):
         """Return one run, its task runs, and its raw logs."""
-        self.reconcile_runtime_health()
+        self.reconcile_run_health(run_id)
         run = self.store.get_run(run_id)
         if run is None:
             raise KeyError(f"Unknown run '{run_id}'")
@@ -589,13 +792,177 @@ class PipelineService:
         return run, task_runs, logs
 
     def get_run_detail(self, run_id: str) -> dict[str, object]:
-        """Return one run plus task runs, logs, and upcoming schedule slots."""
+        """Return one run plus task runs, logs, lineage, and upcoming schedule slots."""
         run, task_runs, logs = self.get_run(run_id)
         return {
             "run": run,
             "task_runs": task_runs,
             "logs": logs,
             "upcoming_runs": self.list_upcoming_runs(run.pipeline_id, count=8),
+            "downstream": self.downstream_run_links(run),
+            "upstream": self.upstream_run_link(run),
+            "artifacts": self.store.list_task_artifacts(run_id),
+            "has_run_config": self.store.get_run_config(run_id) is not None,
+        }
+
+    def _downstream_pending_state(self, run: RunRecord, target: str) -> tuple[str, str]:
+        """Explain why a downstream pipeline has not produced a run yet.
+
+        Reporting everything as "pending" hides the cases that will never
+        resolve on their own — a paused or disabled target waits forever, and
+        that is exactly when someone opens this page to find out why.
+        """
+        if run.status in {"queued", "running"}:
+            return "waiting", "Waiting for this run to finish."
+        if run.status != "success":
+            return "skipped", f"Not triggered because this run ended as {run.status}."
+
+        try:
+            target_pipeline = self.get_pipeline(target)
+        except KeyError:
+            return "unknown", f"'{target}' is no longer defined in the config."
+
+        if not target_pipeline.enabled:
+            return "disabled", "Will not run: the pipeline is disabled in the config."
+        if self.store.is_pipeline_paused(target):
+            return "paused", "Will not run until the pipeline is resumed."
+
+        queued = self.store.pending_queue_item(target)
+        if queued is not None:
+            # `error` on a queued row holds the reason it was last passed over.
+            return "queued", queued.error or "Queued, waiting for the scheduler."
+        return "pending", "Trigger has not been queued yet."
+
+    def downstream_run_links(self, run: RunRecord) -> list[dict[str, object]]:
+        """Return every downstream pipeline this run triggers, with its run status.
+
+        Targets that have not been dispatched yet are still returned so the run
+        graph always shows the full chain rather than hiding what is pending.
+        """
+        try:
+            pipeline = self.get_pipeline(run.pipeline_id)
+        except KeyError:
+            return []
+
+        child_runs = {child.pipeline_id: child for child in self.store.list_child_runs(run.run_id)}
+        links: list[dict[str, object]] = []
+        for target in pipeline.triggers_on_success:
+            child = child_runs.pop(target, None)
+            target_title = target
+            try:
+                target_title = self.get_pipeline(target).title
+            except KeyError:
+                pass
+            state, reason = ("", "")
+            if child is None:
+                state, reason = self._downstream_pending_state(run, target)
+            links.append(
+                {
+                    "pipeline_id": target,
+                    "pipeline_title": target_title,
+                    "run_id": None if child is None else child.run_id,
+                    "status": child.status if child is not None else state,
+                    "reason": None if child is not None else reason,
+                    "started_at": None if child is None or child.started_at is None else child.started_at.isoformat(),
+                    "duration_seconds": None if child is None else child.duration_seconds,
+                    "successful_tasks": 0 if child is None else child.successful_tasks,
+                    "task_count": 0 if child is None else child.task_count,
+                    "error": None if child is None else child.error,
+                }
+            )
+
+        # Anything triggered through the API rather than triggers_on_success.
+        for pipeline_id, child in child_runs.items():
+            links.append(
+                {
+                    "pipeline_id": pipeline_id,
+                    "pipeline_title": child.pipeline_title,
+                    "run_id": child.run_id,
+                    "status": child.status,
+                    "reason": None,
+                    "started_at": None if child.started_at is None else child.started_at.isoformat(),
+                    "duration_seconds": child.duration_seconds,
+                    "successful_tasks": child.successful_tasks,
+                    "task_count": child.task_count,
+                    "error": child.error,
+                }
+            )
+        return links
+
+    #: How far up a trigger chain to walk before giving up. Chains are short in
+    #: practice; the cap only guards against a cycle in corrupted data.
+    MAX_LINEAGE_DEPTH = 12
+
+    def lineage_for_runs(self, runs: list[RunRecord]) -> dict[str, list[dict[str, object]]]:
+        """Return the full ancestor chain for each run, root first.
+
+        Walks one generation at a time across every run at once, so the cost is
+        one query per level of depth rather than one per run.
+        """
+        parents_by_run: dict[str, str] = {
+            run.run_id: run.parent_run_id for run in runs if run.parent_run_id is not None
+        }
+        known: dict[str, dict[str, object]] = {}
+
+        frontier = list(dict.fromkeys(parents_by_run.values()))
+        for _ in range(self.MAX_LINEAGE_DEPTH):
+            missing = [run_id for run_id in frontier if run_id not in known]
+            if not missing:
+                break
+            fetched = self.store.runs_by_ids(missing)
+            known.update(fetched)
+            frontier = [
+                str(item["parent_run_id"])
+                for item in fetched.values()
+                if item.get("parent_run_id") and str(item["parent_run_id"]) not in known
+            ]
+            if not frontier:
+                break
+
+        lineage: dict[str, list[dict[str, object]]] = {}
+        for run in runs:
+            chain: list[dict[str, object]] = []
+            cursor = run.parent_run_id
+            seen: set[str] = set()
+            while cursor and cursor not in seen and len(chain) < self.MAX_LINEAGE_DEPTH:
+                seen.add(cursor)
+                ancestor = known.get(cursor)
+                if ancestor is None:
+                    # The parent was pruned; record the reference so the chain
+                    # is honest about being incomplete rather than silently short.
+                    chain.append(
+                        {
+                            "run_id": cursor,
+                            "pipeline_id": run.parent_pipeline_id,
+                            "pipeline_title": run.parent_pipeline_id or cursor,
+                            "status": "deleted",
+                            "trigger": None,
+                            "available": False,
+                        }
+                    )
+                    break
+                chain.append({**ancestor, "available": True})
+                cursor = ancestor.get("parent_run_id")  # type: ignore[assignment]
+            lineage[run.run_id] = list(reversed(chain))
+        return lineage
+
+    def upstream_run_link(self, run: RunRecord) -> dict[str, object] | None:
+        """Return the parent run that triggered this one, when there is one."""
+        if run.parent_run_id is None:
+            return None
+        parent = self.store.get_run(run.parent_run_id)
+        if parent is None:
+            return {
+                "run_id": run.parent_run_id,
+                "pipeline_id": run.parent_pipeline_id,
+                "pipeline_title": run.parent_pipeline_id,
+                "status": "deleted",
+            }
+        return {
+            "run_id": parent.run_id,
+            "pipeline_id": parent.pipeline_id,
+            "pipeline_title": parent.pipeline_title,
+            "status": parent.status,
         }
 
     def get_task_detail(self, run_id: str, task_id: str) -> dict[str, object]:
@@ -650,14 +1017,21 @@ class PipelineService:
         self,
         pipeline: PipelineDefinition,
         inherited_variables: dict[str, str] | None,
+        inherited_env: dict[str, str] | None = None,
     ) -> PipelineDefinition:
-        """Resolve placeholders left by the downstream config with upstream deployment values."""
-        if not inherited_variables:
+        """Resolve placeholders left by the downstream config with upstream deployment values.
+
+        Environment values travel with the variables so a downstream deployment
+        sees the same env the upstream deployment ran with. Both layers are
+        applied by the parent because the parent deployment is the one that
+        knows the tenant/environment this chain belongs to.
+        """
+        if not inherited_variables and not inherited_env:
             return pipeline
         # Direct/manual downstream runs use their configured variables. Pipeline
         # triggers let the parent deployment override shared keys for that run.
         effective_variables = dict(pipeline.variables)
-        effective_variables.update(inherited_variables)
+        effective_variables.update(inherited_variables or {})
         updated_tasks: dict[str, TaskDefinition] = {}
         for task_id, task in pipeline.tasks.items():
             task_variables = effective_variables | task.entity_values
@@ -667,12 +1041,34 @@ class PipelineService:
                 if field_name != "variable_templates"
             }
             for field_name, template_value in task.variable_templates.items():
+                if field_name not in task.__dataclass_fields__:
+                    continue
                 rendered_value = _expand_runtime_value(template_value, task_variables)
-                if field_name == "args" and isinstance(rendered_value, list):
+                if field_name in _TUPLE_TASK_FIELDS and isinstance(rendered_value, list):
                     rendered_value = tuple(rendered_value)
+                if field_name in _STRING_TASK_FIELDS and rendered_value is not None:
+                    rendered_value = str(rendered_value)
                 expanded[field_name] = rendered_value
+            if inherited_env:
+                merged_env = dict(expanded.get("env") or {})
+                merged_env.update(inherited_env)
+                expanded["env"] = merged_env
             updated_tasks[task_id] = replace(task, **expanded)
         return replace(pipeline, tasks=updated_tasks, variables=effective_variables)
+
+    def _pipeline_env(self, pipeline: PipelineDefinition) -> dict[str, str]:
+        """Return the env values shared by every task in a pipeline.
+
+        Task-level env is layered on top of pipeline env at load time, so the
+        shared subset is the intersection of all task environments.
+        """
+        task_envs = [task.env for task in pipeline.tasks.values() if task.env]
+        if not task_envs:
+            return {}
+        shared = dict(task_envs[0])
+        for env in task_envs[1:]:
+            shared = {key: value for key, value in shared.items() if env.get(key) == value}
+        return shared
 
     def _clone_pipeline_for_task(self, pipeline: PipelineDefinition, task_id: str) -> PipelineDefinition:
         """Build a task-focused pipeline that includes the selected task and its dependencies."""
@@ -696,6 +1092,78 @@ class PipelineService:
             triggers_on_success=(),
             retry_policy=RetryPolicy(),
         )
+
+    def _build_run_config(
+        self,
+        pipeline: PipelineDefinition,
+        *,
+        trigger: str,
+        scheduled_for: datetime | None,
+        tenant_id: str | None,
+        command_overrides: dict[str, str] | None,
+        inherited_variables: dict[str, str] | None,
+        inherited_env: dict[str, str] | None,
+        initial_context: dict[str, object] | None,
+        parent_run_id: str | None = None,
+        parent_pipeline_id: str | None = None,
+        task_id: str | None = None,
+    ) -> dict[str, object]:
+        """Capture everything needed to reproduce this execution later.
+
+        Retries, task-scoped reruns, and backfills replay this snapshot instead
+        of re-deriving values from an upstream pipeline, so a downstream run can
+        be repaired without re-running the chain that produced it.
+        """
+        return {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "pipeline_id": pipeline.pipeline_id,
+            "template_id": pipeline.template_id,
+            "deployment_id": pipeline.deployment_id,
+            "trigger": trigger,
+            "scheduled_for": None if scheduled_for is None else scheduled_for.isoformat(),
+            "tenant_id": tenant_id,
+            "task_id": task_id,
+            "parent_run_id": parent_run_id,
+            "parent_pipeline_id": parent_pipeline_id,
+            "variables": dict(pipeline.variables),
+            "inherited_variables": dict(inherited_variables or {}),
+            "inherited_env": dict(inherited_env or {}),
+            "env": self._pipeline_env(pipeline),
+            "command_overrides": dict(command_overrides or {}),
+            "context": _json_safe(initial_context or {}),
+            "selectors": {
+                "entities": sorted(
+                    {task.entity_key for task in pipeline.tasks.values() if task.entity_key is not None}
+                ),
+                "task_ids": list(pipeline.tasks),
+            },
+            "settings": {
+                "max_parallel_tasks": pipeline.max_parallel_tasks,
+                "execution_mode": pipeline.execution_mode,
+                "timeout_seconds": pipeline.timeout_seconds,
+                "retry": {
+                    "attempts": pipeline.retry_policy.attempts,
+                    "mode": pipeline.retry_policy.mode,
+                    "delay_seconds": pipeline.retry_policy.delay_seconds,
+                },
+            },
+        }
+
+    def _replay_arguments(self, run_id: str) -> dict[str, object]:
+        """Return the trigger arguments captured for one run, if any."""
+        snapshot = self.store.get_run_config(run_id)
+        if not snapshot:
+            return {}
+        return {
+            "inherited_variables": {
+                str(key): str(value) for key, value in (snapshot.get("inherited_variables") or {}).items()
+            },
+            "inherited_env": {str(key): str(value) for key, value in (snapshot.get("inherited_env") or {}).items()},
+            "command_overrides": {
+                str(key): str(value) for key, value in (snapshot.get("command_overrides") or {}).items()
+            },
+            "context": dict(snapshot.get("context") or {}),
+        }
 
     def _dispatch_engine(
         self,
@@ -744,12 +1212,22 @@ class PipelineService:
         tenant_id: str | None = None,
         initial_context: dict[str, object] | None = None,
         inherited_variables: dict[str, str] | None = None,
+        inherited_env: dict[str, str] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
-        """Create and dispatch one new run for a pipeline."""
+        """Create and dispatch one new run for a pipeline.
+
+        ``actor`` records which account asked for the run, so history shows who
+        did what rather than only what happened.
+        """
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         pipeline = self._clone_pipeline_with_command_overrides(
-            self._clone_pipeline_with_inherited_variables(self.get_pipeline(pipeline_id), inherited_variables),
+            self._clone_pipeline_with_inherited_variables(
+                self.get_pipeline(pipeline_id),
+                inherited_variables,
+                inherited_env,
+            ),
             command_overrides,
         )
         if scheduled_for is not None and self.store.has_run_for_slot(pipeline_id, scheduled_for):
@@ -768,7 +1246,22 @@ class PipelineService:
                 parent_run_id=parent_run_id,
                 parent_pipeline_id=parent_pipeline_id,
                 tenant_id=tenant_id,
+                run_config=self._build_run_config(
+                    pipeline,
+                    trigger=trigger,
+                    scheduled_for=scheduled_for,
+                    tenant_id=tenant_id,
+                    command_overrides=command_overrides,
+                    inherited_variables=inherited_variables,
+                    inherited_env=inherited_env,
+                    initial_context=initial_context,
+                    parent_run_id=parent_run_id,
+                    parent_pipeline_id=parent_pipeline_id,
+                ),
+                actor=actor,
             )
+            if actor:
+                _LOGGER.info("Pipeline '%s' run %s by %s", pipeline.pipeline_id, trigger, actor)
             dispatch_context = dict(initial_context or {})
             if pipeline.variables:
                 dispatch_context.setdefault("variables", dict(pipeline.variables))
@@ -804,19 +1297,63 @@ class PipelineService:
         command_overrides: dict[str, str] | None = None,
         tenant_id: str | None = None,
         initial_context: dict[str, object] | None = None,
+        source_run_id: str | None = None,
+        inherited_variables: dict[str, str] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
-        """Create and dispatch one run scoped to a selected task and its dependencies."""
+        """Create and dispatch one run scoped to a selected task and its dependencies.
+
+        ``source_run_id`` replays the configuration of an earlier run so a single
+        failed task can be repaired with the variables and environment it was
+        originally given. ``inherited_variables`` supplies values directly, which
+        is how a manual run answers placeholders an upstream would normally fill.
+        """
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
-        pipeline = self._clone_pipeline_for_task(self.get_pipeline(pipeline_id), task_id)
-        pipeline = self._clone_pipeline_with_command_overrides(pipeline, command_overrides)
+        replay = self._replay_arguments(source_run_id) if source_run_id else {}
+        # Explicit values win over a replay: the caller just typed them in.
+        merged_variables = dict(replay.get("inherited_variables") or {})
+        merged_variables.update(inherited_variables or {})
+        inherited_variables = merged_variables or None
+        inherited_env = replay.get("inherited_env") or None
+        effective_overrides = command_overrides or replay.get("command_overrides") or None
+        pipeline = self._clone_pipeline_for_task(
+            self._clone_pipeline_with_inherited_variables(
+                self.get_pipeline(pipeline_id),
+                inherited_variables,  # type: ignore[arg-type]
+                inherited_env,  # type: ignore[arg-type]
+            ),
+            task_id,
+        )
+        pipeline = self._clone_pipeline_with_command_overrides(pipeline, effective_overrides)  # type: ignore[arg-type]
+        dispatch_context: dict[str, object] = dict(replay.get("context") or {})  # type: ignore[arg-type]
+        dispatch_context.update(initial_context or {})
+        if pipeline.variables:
+            dispatch_context.setdefault("variables", dict(pipeline.variables))
+            for key, value in pipeline.variables.items():
+                dispatch_context.setdefault(key, value)
+        if source_run_id:
+            dispatch_context.update(self.store.output_context_for_run(source_run_id))
         run = self.store.create_run(
             pipeline,
             trigger=trigger,
             retry_task_id=task_id,
             tenant_id=tenant_id,
+            run_config=self._build_run_config(
+                pipeline,
+                trigger=trigger,
+                scheduled_for=None,
+                tenant_id=tenant_id,
+                command_overrides=effective_overrides,  # type: ignore[arg-type]
+                inherited_variables=inherited_variables,  # type: ignore[arg-type]
+                inherited_env=inherited_env,  # type: ignore[arg-type]
+                initial_context=dispatch_context,
+                task_id=task_id,
+            ),
+            actor=actor,
         )
-        dispatch_context = dict(initial_context or {})
+        if actor:
+            _LOGGER.info("Pipeline '%s' task '%s' run by %s", pipeline_id, task_id, actor)
         if tenant_id is not None:
             dispatch_context.setdefault("tenant_id", tenant_id)
         self._dispatch_engine(
@@ -846,7 +1383,18 @@ class PipelineService:
         if previous_run.status in {"queued", "running"}:
             raise ValueError("Retry is only available after a run has finished.")
 
-        pipeline = self.get_pipeline(previous_run.pipeline_id)
+        # Replay the configuration the original run was launched with. Without
+        # this a downstream run could only be repaired by re-running the whole
+        # upstream chain that supplied its variables and environment.
+        replay = self._replay_arguments(previous_run.run_id)
+        pipeline = self._clone_pipeline_with_command_overrides(
+            self._clone_pipeline_with_inherited_variables(
+                self.get_pipeline(previous_run.pipeline_id),
+                replay.get("inherited_variables"),  # type: ignore[arg-type]
+                replay.get("inherited_env"),  # type: ignore[arg-type]
+            ),
+            replay.get("command_overrides"),  # type: ignore[arg-type]
+        )
         retry_plan = build_retry_plan(
             pipeline,
             previous_task_runs,
@@ -864,6 +1412,19 @@ class PipelineService:
             parent_run_id=previous_run.parent_run_id,
             parent_pipeline_id=previous_run.parent_pipeline_id,
             tenant_id=previous_run.tenant_id,
+            run_config=self._build_run_config(
+                pipeline,
+                trigger="retry",
+                scheduled_for=previous_run.scheduled_for,
+                tenant_id=previous_run.tenant_id,
+                command_overrides=replay.get("command_overrides"),  # type: ignore[arg-type]
+                inherited_variables=replay.get("inherited_variables"),  # type: ignore[arg-type]
+                inherited_env=replay.get("inherited_env"),  # type: ignore[arg-type]
+                initial_context=replay.get("context"),  # type: ignore[arg-type]
+                parent_run_id=previous_run.parent_run_id,
+                parent_pipeline_id=previous_run.parent_pipeline_id,
+                task_id=task_id,
+            ),
         )
 
         if mode == "resume":
@@ -884,7 +1445,13 @@ class PipelineService:
                 f"Retry created from run {previous_run.run_id} using startover mode.",
             )
 
-        retry_context: dict[str, object] = {}
+        # Seed with the upstream context the original run received so a retry
+        # never depends on the upstream pipeline still being available.
+        retry_context: dict[str, object] = dict(replay.get("context") or {})  # type: ignore[arg-type]
+        if pipeline.variables:
+            retry_context.setdefault("variables", dict(pipeline.variables))
+            for key, value in pipeline.variables.items():
+                retry_context.setdefault(key, value)
         if previous_run.tenant_id is not None:
             retry_context["tenant_id"] = previous_run.tenant_id
         if mode == "resume":
@@ -901,8 +1468,196 @@ class PipelineService:
         )
         return self.store.get_run(retry_run.run_id) or retry_run
 
+    def backfill_run(
+        self,
+        run_id: str,
+        *,
+        wait: bool = False,
+        on_log: Callable[[str], None] | None = None,
+    ) -> RunRecord:
+        """Re-execute one historic run with the exact configuration it was launched with."""
+        self._ensure_accepting_new_work()
+        source_run = self.store.get_run(run_id)
+        if source_run is None:
+            raise KeyError(f"Unknown run '{run_id}'")
+        snapshot = self.store.get_run_config(run_id)
+        if not snapshot:
+            raise ValueError(
+                "This run was created before runtime configuration capture was enabled, so it cannot be backfilled."
+            )
+        replay = self._replay_arguments(run_id)
+        scoped_task_id = snapshot.get("task_id")
+        if isinstance(scoped_task_id, str) and scoped_task_id:
+            return self.trigger_task(
+                source_run.pipeline_id,
+                scoped_task_id,
+                trigger="manual",
+                wait=wait,
+                on_log=on_log,
+                tenant_id=source_run.tenant_id,
+                source_run_id=run_id,
+            )
+        return self.trigger_pipeline(
+            source_run.pipeline_id,
+            trigger="manual",
+            scheduled_for=None,
+            wait=wait,
+            on_log=on_log,
+            command_overrides=replay.get("command_overrides"),  # type: ignore[arg-type]
+            parent_run_id=source_run.parent_run_id,
+            parent_pipeline_id=source_run.parent_pipeline_id,
+            tenant_id=source_run.tenant_id,
+            initial_context=replay.get("context"),  # type: ignore[arg-type]
+            inherited_variables=replay.get("inherited_variables"),  # type: ignore[arg-type]
+            inherited_env=replay.get("inherited_env"),  # type: ignore[arg-type]
+        )
+
+    def backfill_schedule(
+        self,
+        pipeline_id: str,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int = 200,
+    ) -> list[datetime]:
+        """Queue one run per scheduled slot in a historic window.
+
+        Each slot is enqueued rather than executed inline so the normal
+        per-pipeline concurrency and ordering rules still apply.
+        """
+        self._ensure_accepting_new_work()
+        pipeline = self.get_pipeline(pipeline_id)
+        if pipeline.schedule is None:
+            raise ValueError(f"Pipeline '{pipeline_id}' has no schedule to backfill.")
+        if end < start:
+            raise ValueError("Backfill end must not be earlier than start.")
+
+        queued: list[datetime] = []
+        cursor = start
+        for _ in range(max(1, limit)):
+            slot = pipeline.schedule.next_after(cursor)
+            if slot is None or slot > end:
+                break
+            cursor = slot
+            slot_iso = slot.isoformat()
+            if self.enqueue_pipeline_trigger(
+                pipeline_id,
+                trigger="schedule",
+                available_at=datetime.now(timezone.utc),
+                scheduled_for=slot,
+                payload={"scheduled_for": slot_iso, "backfill": True},
+                source_key=slot_iso,
+                dedupe_key=f"schedule:{pipeline_id}:{slot_iso}",
+            ):
+                queued.append(slot)
+        return queued
+
+    def notify_run_outcome(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Tell everyone configured about a finished run.
+
+        Email and Teams are independent: one failing never stops the other, and
+        neither changes the run's status. A pipeline lists *who* to tell; how to
+        reach them lives in central settings or the `notifications:` block.
+        """
+        self._send_teams_alert(pipeline, run)
+        self._send_email_notification(pipeline, run)
+
+    def _send_teams_alert(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Post the standard alert card to this pipeline's Teams destinations."""
+        names = pipeline.alert_on_success if run.status == "success" else pipeline.alert_on_failure
+        if not names:
+            return
+
+        settings = getattr(self.project, "notifications", None)
+        if settings is None or not settings.configured:
+            self.store.append_log(
+                run.run_id,
+                "Teams notification skipped: no 'notifications:' destinations are declared.",
+                stream="stderr",
+            )
+            return
+
+        try:
+            destinations = settings.resolve(names)
+        except NotificationError as exc:
+            # A typo in a destination name is reported against the run rather
+            # than blocking the whole project from loading.
+            self.store.append_log(run.run_id, f"Teams notification failed: {exc}", stream="stderr")
+            return
+
+        def _log(message: str, is_error: bool) -> None:
+            self.store.append_log(run.run_id, message, stream="stderr" if is_error else "stdout")
+
+        send_alert(
+            destinations,
+            build_alert(
+                title=pipeline.title,
+                pipeline_id=pipeline.pipeline_id,
+                status=run.status,
+                run_id=run.run_id,
+                trigger=run.trigger,
+                tasks=f"{run.successful_tasks}/{run.task_count} succeeded",
+                duration="unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s",
+                error=run.error,
+                run_url=self._run_url(run.run_id),
+            ),
+            on_log=_log,
+        )
+
+    def _run_url(self, run_id: str) -> str | None:
+        """Return a link back to the run, when a public base URL is configured."""
+        base = (os.environ.get("PIPLY_BASE_URL") or "").strip().rstrip("/")
+        return f"{base}/runs/{run_id}" if base else None
+
+    def _send_email_notification(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Email the configured recipients about a finished run.
+
+        Delivery uses the central SMTP settings, so a pipeline only lists who to
+        tell, never how to reach the mail server. A delivery failure is logged
+        against the run and never changes its status.
+        """
+        recipients = pipeline.notify_on_success if run.status == "success" else pipeline.notify_on_failure
+        if not recipients:
+            return
+
+        settings = load_smtp_settings(self.store)
+        if not settings.configured:
+            self.store.append_log(
+                run.run_id,
+                "Run notification skipped: no SMTP server is configured under Settings.",
+                stream="stderr",
+            )
+            return
+
+        duration = "unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s"
+        body = "\n".join(
+            [
+                f"Pipeline : {pipeline.title} ({pipeline.pipeline_id})",
+                f"Run      : {run.run_id}",
+                f"Status   : {run.status}",
+                f"Trigger  : {run.trigger}",
+                f"Tasks    : {run.successful_tasks}/{run.task_count} succeeded",
+                f"Duration : {duration}",
+                *([f"Error    : {run.error}"] if run.error else []),
+            ]
+        )
+        try:
+            send_message(
+                settings,
+                build_message(
+                    settings,
+                    to=list(recipients),
+                    subject=f"[Piply] {pipeline.title} {run.status}",
+                    body=body,
+                ),
+            )
+            self.store.append_log(run.run_id, f"Run notification sent to {', '.join(recipients)}.")
+        except Exception as exc:  # noqa: BLE001 - a mail failure must not fail the run
+            self.store.append_log(run.run_id, f"Run notification failed: {exc}", stream="stderr")
+
     def _handle_pipeline_success(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Trigger downstream pipelines after a successful run completes."""
+        self.notify_run_outcome(pipeline, run)
         wait_for_pipeline_triggers = self._should_wait_for_pipeline_triggers()
         if not pipeline.triggers_on_success:
             self.drain_trigger_queue(
@@ -911,6 +1666,7 @@ class PipelineService:
             )
             return
         output_context = self.store.output_context_for_run(run.run_id)
+        upstream_env = self._pipeline_env(pipeline)
         for target in pipeline.triggers_on_success:
             self.store.append_log(
                 run.run_id,
@@ -926,6 +1682,7 @@ class PipelineService:
                     "context": output_context,
                     "upstream": output_context,
                     "variables": pipeline.variables,
+                    "env": upstream_env,
                 },
                 source_key=run.run_id,
                 dedupe_key=f"pipeline:{run.run_id}:{target}",
@@ -949,6 +1706,7 @@ class PipelineService:
 
     def _handle_pipeline_failure(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Schedule an automatic retry when the pipeline retry policy allows it."""
+        self.notify_run_outcome(pipeline, run)
         retry_policy = pipeline.retry_policy
         if not retry_policy.enabled or run.status != "failed":
             self.drain_trigger_queue(limit=20)
@@ -987,10 +1745,16 @@ class PipelineService:
             return
         self.drain_trigger_queue(limit=20)
 
-    def set_pipeline_paused(self, pipeline_id: str, paused: bool) -> PipelineSummary:
-        """Pause or resume a pipeline schedule."""
+    def set_pipeline_paused(self, pipeline_id: str, paused: bool, *, actor: str | None = None) -> PipelineSummary:
+        """Pause or resume a pipeline schedule, recording who asked."""
         self.get_pipeline(pipeline_id)
         self.store.set_pipeline_paused(pipeline_id, paused)
+        _LOGGER.info(
+            "Pipeline '%s' %s by %s",
+            pipeline_id,
+            "paused" if paused else "resumed",
+            actor or "an unauthenticated caller",
+        )
         if not paused:
             self.drain_trigger_queue(limit=20)
         return self.get_pipeline_summary(pipeline_id)
@@ -1079,8 +1843,16 @@ class PipelineService:
                 heartbeat_age_seconds = None
 
         stale_after_seconds = max(6, self.settings.scheduler_poll_interval_seconds * 3)
+        raw_owner_pid = self.store.get_meta("scheduler_owner_pid")
+        owner_pid = int(raw_owner_pid) if raw_owner_pid and raw_owner_pid.isdigit() else None
+        owner_alive = is_process_alive(owner_pid) if owner_pid is not None else None
+
         state = configured_state
-        if configured_state == "running" and (
+        if configured_state == "running" and owner_alive is False:
+            # The process that claimed the scheduler is gone, so a stale
+            # heartbeat means a hard kill rather than a slow tick.
+            state = "crashed"
+        elif configured_state == "running" and (
             heartbeat_age_seconds is None or heartbeat_age_seconds > stale_after_seconds
         ):
             state = "stale"
@@ -1089,6 +1861,8 @@ class PipelineService:
             label = "scheduler live"
         elif state == "crashed":
             label = "scheduler crashed"
+        elif state == "stale":
+            label = "scheduler not responding"
         else:
             label = "scheduler offline"
         return {
@@ -1097,9 +1871,12 @@ class PipelineService:
             "label": label,
             "heartbeat": heartbeat,
             "heartbeat_age_seconds": heartbeat_age_seconds,
+            "owner_pid": owner_pid,
+            "owner_alive": owner_alive,
+            "started_at": self.store.get_meta("scheduler_started_at"),
             "last_error": self.store.get_meta("scheduler_last_error"),
             "config_path": str(self.config_path),
-            "database_path": str(self.database_path),
+            "database_path": self.database_location,
             "queue_depth": self.store.count_queue(),
             "sensor_count": sum(pipeline.sensor_count for pipeline in self.project.pipelines.values()),
             "accepting_work": not self.is_shutting_down,
@@ -1107,19 +1884,466 @@ class PipelineService:
             "worker_metrics": metrics["workers"],
         }
 
+    def preview_pipeline(
+        self,
+        pipeline_id: str,
+        *,
+        params: dict[str, object] | None = None,
+        tenant_id: str | None = None,
+        command_overrides: dict[str, str] | None = None,
+        source_run_id: str | None = None,
+    ) -> PipelinePreview:
+        """Build a dry-run preview without creating a run or touching the store."""
+        replay = self._replay_arguments(source_run_id) if source_run_id else {}
+        pipeline = self._clone_pipeline_with_command_overrides(
+            self._clone_pipeline_with_inherited_variables(
+                self.get_pipeline(pipeline_id),
+                replay.get("inherited_variables"),  # type: ignore[arg-type]
+                replay.get("inherited_env"),  # type: ignore[arg-type]
+            ),
+            command_overrides or replay.get("command_overrides"),  # type: ignore[arg-type]
+        )
+        context: dict[str, object] = dict(replay.get("context") or {})  # type: ignore[arg-type]
+        if params:
+            context["params"] = params
+            context.update(params)
+        if tenant_id is not None:
+            context["tenant_id"] = tenant_id
+        return build_pipeline_preview(pipeline, context=context)
+
+    def preview_project(self) -> list[PipelinePreview]:
+        """Build dry-run previews for every configured pipeline."""
+        return [build_pipeline_preview(pipeline) for pipeline in self.project.pipelines.values()]
+
+    def runtime_inputs(
+        self,
+        pipeline_id: str,
+        *,
+        provided: dict[str, str] | None = None,
+        task_id: str | None = None,
+        source_run_id: str | None = None,
+    ) -> dict[str, object]:
+        """Describe the values a manual run of this pipeline still needs.
+
+        A pipeline that normally receives its variables from an upstream trigger
+        has nothing to fill them in when it is started by hand. Rather than
+        running a command containing a literal ``{practice}``, this reports what
+        is missing so the caller can ask for it.
+
+        ``provided`` is applied first, so a caller can re-check after collecting
+        answers and confirm nothing is left.
+        """
+        pipeline = self.get_pipeline(pipeline_id)
+        replay = self._replay_arguments(source_run_id) if source_run_id else {}
+
+        merged: dict[str, str] = {}
+        merged.update(replay.get("inherited_variables") or {})  # type: ignore[arg-type]
+        merged.update(provided or {})
+
+        resolved = self._clone_pipeline_with_inherited_variables(
+            pipeline,
+            merged or None,
+            replay.get("inherited_env"),  # type: ignore[arg-type]
+        )
+        if task_id is not None:
+            resolved = self._clone_pipeline_for_task(resolved, task_id)
+
+        missing = unresolved_placeholders(resolved)
+        # A pipeline that something else triggers has an obvious source for these
+        # values, which is worth saying in the prompt: it tells the user this is
+        # a normal manual run of a downstream pipeline, not a broken config.
+        upstreams = sorted(
+            other.pipeline_id for other in self.project.pipelines.values() if pipeline_id in other.triggers_on_success
+        )
+        return {
+            "pipeline_id": pipeline_id,
+            "pipeline_title": pipeline.title,
+            "ready": not missing,
+            "triggered_by": upstreams,
+            "required": [{"name": name, "tasks": list(task_ids)} for name, task_ids in missing.items()],
+            "provided": dict(merged),
+        }
+
+    @staticmethod
+    def validate_runtime_inputs(values: dict[str, object] | None) -> dict[str, str]:
+        """Normalise and check user-supplied runtime values.
+
+        Names have to look like placeholders or they could never match one, and
+        a blank value is rejected because substituting an empty string silently
+        produces a different broken command rather than an obvious one.
+        """
+        cleaned: dict[str, str] = {}
+        for raw_name, raw_value in (values or {}).items():
+            name = str(raw_name).strip()
+            if not _RUNTIME_INPUT_NAME.fullmatch(name):
+                raise ValueError(
+                    f"'{name}' is not a usable variable name. Use letters, digits, and underscores, "
+                    "starting with a letter or underscore."
+                )
+            value = "" if raw_value is None else str(raw_value).strip()
+            if not value:
+                raise ValueError(f"'{name}' needs a value.")
+            cleaned[name] = value
+        return cleaned
+
+    def list_run_artifacts(self, run_id: str, task_id: str | None = None) -> list[dict[str, object]]:
+        """Return artifacts recorded for one run, refreshing size and mtime from disk."""
+        if self.store.get_run(run_id) is None:
+            raise KeyError(f"Unknown run '{run_id}'")
+        artifacts = self.store.list_task_artifacts(run_id, task_id)
+        for artifact in artifacts:
+            path = Path(str(artifact["path"]))
+            artifact["exists"] = path.is_file()
+            if artifact["exists"]:
+                artifact["size_bytes"] = path.stat().st_size
+        return artifacts
+
+    def artifact_roots(self) -> list[Path]:
+        """Return the directories artifact downloads are allowed to read from."""
+        roots = [self.project.workspace, self.config_path.parent]
+        if self.settings.artifacts_dir is not None:
+            roots.append(self.settings.artifacts_dir)
+        return [root for root in roots if root.exists()]
+
+    def prune(self, *, dry_run: bool = False, vacuum: bool = True, **overrides: int) -> dict[str, object]:
+        """Remove history beyond the configured retention window."""
+        run_days = int(overrides.get("run_retention_days", self.settings.retention_run_days))
+        log_days = int(overrides.get("log_retention_days", self.settings.retention_log_days))
+        max_runs = int(overrides.get("max_runs_per_pipeline", self.settings.retention_max_runs_per_pipeline))
+        size_before = self.store.database_size_bytes()
+        summary = self.store.prune(
+            run_retention_days=run_days,
+            log_retention_days=log_days,
+            max_runs_per_pipeline=max_runs,
+            vacuum=vacuum and not dry_run,
+            dry_run=dry_run,
+        )
+        return {
+            **summary,
+            "dry_run": dry_run,
+            "run_retention_days": run_days,
+            "log_retention_days": log_days,
+            "max_runs_per_pipeline": max_runs,
+            "database_bytes_before": size_before,
+            "database_bytes_after": self.store.database_size_bytes(),
+        }
+
+    def sensor_health(self) -> list[dict[str, object]]:
+        """Return the health of every configured sensor, including ones never polled."""
+        recorded = {str(item["sensor_key"]): item for item in self.store.list_sensor_health()}
+        results: list[dict[str, object]] = []
+        for pipeline in self.project.pipelines.values():
+            for sensor in pipeline.sensors.values():
+                key = self._sensor_state_key(pipeline.pipeline_id, sensor.sensor_id)
+                entry = recorded.get(key) or {
+                    "sensor_key": key,
+                    "pipeline_id": pipeline.pipeline_id,
+                    "sensor_id": sensor.sensor_id,
+                    "sensor_type": sensor.sensor_type,
+                    "status": "idle",
+                    "last_polled_at": None,
+                    "last_success_at": None,
+                    "last_event_at": None,
+                    "last_error": None,
+                    "consecutive_failures": 0,
+                    "poll_count": 0,
+                    "event_count": 0,
+                }
+                entry["title"] = sensor.title
+                entry["summary"] = sensor.summary
+                entry["enabled"] = sensor.enabled
+                results.append(entry)
+        return sorted(results, key=lambda item: (item["status"] != "failing", str(item["sensor_key"])))
+
+    def get_smtp_settings(self) -> dict[str, object]:
+        """Return the central SMTP configuration, without the password."""
+        return load_smtp_settings(self.store).public_dict()
+
+    def save_smtp_settings(self, values: dict[str, object]) -> dict[str, object]:
+        """Persist central SMTP configuration and return the safe view of it."""
+        return save_smtp_settings(self.store, values).public_dict()
+
+    def send_test_email(self, recipient: str) -> str:
+        """Send one test message so an admin can confirm the settings work."""
+        settings = load_smtp_settings(self.store)
+        if not settings.configured:
+            raise ValueError("No SMTP server is configured.")
+        send_message(
+            settings,
+            build_message(
+                settings,
+                to=[recipient],
+                subject="[Piply] SMTP test message",
+                body=f"This is a test message from Piply ({self.project.title}).",
+            ),
+        )
+        return f"Test message sent to {recipient} via {settings.host}."
+
+    # --- Users and permissions ---------------------------------------------
+
+    def bootstrap_admin(self) -> tuple[str, str | None] | None:
+        """Create the initial admin account when none exists.
+
+        This is how a server install gets its first account without shell
+        access. Only runs when authentication has been switched on: an existing
+        install that never enabled auth keeps working with no accounts and no
+        login page, which is what backward compatibility requires here.
+
+        Returns ``(username, password)`` exactly once, on the run that creates
+        the account. ``password`` is None when the operator supplied one, so
+        the caller knows not to echo a secret it was given into the logs. A
+        generated password is returned so it can be shown once; it is never
+        stored in clear text and cannot be retrieved again.
+        """
+        if not self.settings.auth_enabled or self.store.count_users() > 0:
+            return None
+        if self.settings.auth_username and self.settings.auth_password:
+            # PIPLY_AUTH_USERNAME/PASSWORD already define an administrator, so
+            # generating a second one would be surprising and unnecessary.
+            return None
+
+        username = normalize_username(os.environ.get("PIPLY_ADMIN_USERNAME") or "admin")
+        supplied = read_secret(os.environ, "PIPLY_ADMIN_PASSWORD")
+        password = supplied or generate_password()
+        self.store.upsert_user(username, password_hash=hash_password(password), role="admin", is_active=True)
+        self.store.set_meta("admin_bootstrapped_at", datetime.now(timezone.utc).isoformat())
+        return username, (None if supplied else password)
+
+    def get_user(self, username: str) -> User | None:
+        """Return one account, or None."""
+        record = self.store.get_user_record(normalize_username(username))
+        if record is None:
+            return None
+        return User(
+            username=str(record["username"]),
+            role=str(record["role"]),
+            is_active=bool(record["is_active"]),
+            created_at=record["created_at"],  # type: ignore[arg-type]
+            last_login_at=record["last_login_at"],  # type: ignore[arg-type]
+            permissions=dict(record["permissions"]),  # type: ignore[arg-type]
+        )
+
+    def list_users(self) -> list[User]:
+        """Return every account."""
+        return [
+            User(
+                username=str(item["username"]),
+                role=str(item["role"]),
+                is_active=bool(item["is_active"]),
+                created_at=item["created_at"],  # type: ignore[arg-type]
+                last_login_at=item["last_login_at"],  # type: ignore[arg-type]
+                permissions=dict(item["permissions"]),  # type: ignore[arg-type]
+            )
+            for item in self.store.list_user_records()
+        ]
+
+    def authenticate(self, username: str, password: str) -> User | None:
+        """Return the account when the credentials are valid and active.
+
+        Repeated failures lock the username out for a few minutes. Verification
+        is intentionally slow, so an unthrottled endpoint would be both a
+        guessing risk and a way to exhaust CPU.
+        """
+        try:
+            normalized = normalize_username(username)
+        except AuthError:
+            return None
+        if self.login_throttle.retry_after(normalized):
+            return None
+
+        record = self.store.get_user_record(normalized)
+        if record is None or not record["is_active"]:
+            # Still hash, so a missing user and a wrong password take the same
+            # time and cannot be told apart by an attacker.
+            verify_password(password, self._timing_decoy_hash)
+            self.login_throttle.record_failure(normalized)
+            return None
+        if not verify_password(password, str(record["password_hash"])):
+            self.login_throttle.record_failure(normalized)
+            return None
+
+        self.login_throttle.record_success(normalized)
+        self.store.touch_user_login(normalized)
+        return self.get_user(normalized)
+
+    def login_retry_after(self, username: str) -> int:
+        """Return the remaining lockout in seconds for a username, else 0."""
+        try:
+            return self.login_throttle.retry_after(normalize_username(username))
+        except AuthError:
+            return 0
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        role: str = "user",
+        permissions: dict[str, object] | None = None,
+    ) -> User:
+        """Create one account with optional initial grants."""
+        normalized = normalize_username(username)
+        if role not in ROLES:
+            raise AuthError(f"Role must be one of: {', '.join(ROLES)}.")
+        if self.store.get_user_record(normalized) is not None:
+            raise AuthError(f"User '{normalized}' already exists.")
+        self.store.upsert_user(normalized, password_hash=hash_password(password), role=role, is_active=True)
+        for pipeline_id, actions in (permissions or {}).items():
+            self.grant_permission(normalized, str(pipeline_id), actions)
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def update_user(
+        self,
+        username: str,
+        *,
+        password: str | None = None,
+        role: str | None = None,
+        is_active: bool | None = None,
+    ) -> User:
+        """Update one account's password, role, or active flag."""
+        normalized = normalize_username(username)
+        if self.store.get_user_record(normalized) is None:
+            raise AuthError(f"Unknown user '{normalized}'.")
+        if role is not None and role not in ROLES:
+            raise AuthError(f"Role must be one of: {', '.join(ROLES)}.")
+        if (role and role != "admin") or is_active is False:
+            self._ensure_another_admin_remains(normalized)
+        self.store.upsert_user(
+            normalized,
+            password_hash=hash_password(password) if password else None,
+            role=role,
+            is_active=is_active,
+        )
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def delete_user(self, username: str) -> None:
+        """Delete one account, refusing to remove the last active admin."""
+        normalized = normalize_username(username)
+        self._ensure_another_admin_remains(normalized)
+        if not self.store.delete_user(normalized):
+            raise AuthError(f"Unknown user '{normalized}'.")
+
+    def _ensure_another_admin_remains(self, username: str) -> None:
+        """Refuse a change that would leave the install with no way in."""
+        current = self.get_user(username)
+        if current is None or not current.is_admin or not current.is_active:
+            return
+        other_admins = [
+            item for item in self.list_users() if item.is_admin and item.is_active and item.username != username
+        ]
+        if not other_admins:
+            raise AuthError("This is the only active admin. Promote another admin first.")
+
+    def grant_permission(self, username: str, pipeline_id: str, actions: object) -> User:
+        """Grant pipeline actions to a user. Use '*' for every pipeline."""
+        normalized = normalize_username(username)
+        if self.store.get_user_record(normalized) is None:
+            raise AuthError(f"Unknown user '{normalized}'.")
+        if pipeline_id != ALL_PIPELINES and pipeline_id not in self.project.pipelines:
+            raise AuthError(f"Unknown pipeline '{pipeline_id}'.")
+        self.store.set_user_permission(normalized, pipeline_id, normalize_permissions(actions))
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def revoke_permission(self, username: str, pipeline_id: str) -> User:
+        """Remove every grant a user holds on one pipeline."""
+        return self.grant_permission(username, pipeline_id, frozenset())
+
+    @property
+    def auth_required(self) -> bool:
+        """Return whether requests must be authenticated.
+
+        Accounts existing in the database is itself enough to switch auth on,
+        so creating the first user secures the install without a second step.
+        """
+        return bool(self.settings.auth_enabled) or self.store.count_users() > 0
+
+    def diagnostics(self) -> dict[str, object]:
+        """Return the full runtime diagnostics payload used by the API and UI."""
+        scheduler = self.scheduler_snapshot()
+        sensors = self.sensor_health()
+        failing_sensors = [item for item in sensors if item["status"] == "failing"]
+        running_tasks = self.store.list_running_tasks()
+        return {
+            "scheduler": scheduler,
+            "queue": scheduler["queue_metrics"],
+            "workers": scheduler["worker_metrics"],
+            "running_tasks": running_tasks,
+            "sensors": sensors,
+            "sensor_summary": {
+                "total": len(sensors),
+                "failing": len(failing_sensors),
+                "healthy": sum(1 for item in sensors if item["status"] == "healthy"),
+                "idle": sum(1 for item in sensors if item["status"] == "idle"),
+                "last_error": self.store.get_meta("sensor_last_error"),
+            },
+            "reconciliation": {
+                "last_recovery_at": self.store.get_meta("runtime_last_recovery_at"),
+                "last_recovered_runs": int(self.store.get_meta("runtime_last_recovered_runs") or 0),
+                "stale_run_timeout_seconds": self.settings.stale_run_timeout_seconds,
+                "reconcile_interval_seconds": self.settings.reconcile_interval_seconds,
+                "accepting_work": not self.is_shutting_down,
+            },
+            "database": {
+                "path": self.database_location,
+                "backend": self.store.dialect.name,
+                "size_bytes": self.store.database_size_bytes(),
+                "retention_run_days": self.settings.retention_run_days,
+                "retention_log_days": self.settings.retention_log_days,
+                "retention_max_runs_per_pipeline": self.settings.retention_max_runs_per_pipeline,
+            },
+            "process": {
+                "pid": os.getpid(),
+                "config_path": str(self.config_path),
+                "workspace": str(self.project.workspace),
+            },
+        }
+
+    def tail_logs(
+        self,
+        *,
+        run_id: str | None = None,
+        pipeline_id: str | None = None,
+        task_id: str | None = None,
+        after: datetime | None = None,
+        after_id: int | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, object]]:
+        """Return log lines after a cursor for CLI and UI follow mode."""
+        cursor = after_id
+        if cursor is None and after is not None:
+            cursor = self.store.log_cursor_at(after)
+        return self.store.tail_logs(
+            run_id=run_id,
+            pipeline_id=pipeline_id,
+            task_id=task_id,
+            after_id=cursor or 0,
+            limit=limit,
+        )
+
     def search_logs(
         self,
         *,
         query: str | None = None,
         pipeline_id: str | None = None,
+        pipeline_ids: set[str] | None = None,
         task_id: str | None = None,
         limit: int = 300,
     ):
-        """Search recent log messages across runs."""
+        """Search recent log messages across runs.
+
+        ``pipeline_ids`` narrows the search to a permitted set of pipelines.
+        """
         self.reconcile_runtime_health()
         return self.store.search_logs(
             query=query,
             pipeline_id=pipeline_id,
+            pipeline_ids=pipeline_ids,
             task_id=task_id,
             limit=limit,
         )

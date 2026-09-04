@@ -12,12 +12,14 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from piply.api.auth import AuthMiddleware
+from piply.api.auth import auth_middleware, security_headers_middleware
 from piply.core.scheduler import PipelineScheduler
 from piply.core.service import PipelineService
 from piply.settings import PiplySettings, load_settings
+from piply.version import get_version
 
-from .routes import dashboard, execution, pipelines, runs, ui
+from .routes import accounts, dashboard, execution, maintenance, observability, pipelines, runs, setup, ui
+from .routes.setup import is_first_run
 
 
 def _ui_directory() -> Path:
@@ -32,11 +34,12 @@ def _build_service(
     """Build the shared service instance from config and environment overrides."""
     current_settings = settings or load_settings(config_path or os.getenv("PIPLY_CONFIG"))
     env_config = config_path or (str(current_settings.config_path) if current_settings.config_path else None)
-    env_database = (
-        str(current_settings.database_path)
-        if current_settings.database_path is not None
-        else os.getenv("PIPLY_DATABASE")
-    )
+    if current_settings.database_dsn is not None:
+        env_database: str | None = current_settings.database_dsn
+    elif current_settings.database_path is not None:
+        env_database = str(current_settings.database_path)
+    else:
+        env_database = os.getenv("PIPLY_DATABASE")
     return PipelineService(
         config_path=env_config,
         database_path=env_database,
@@ -56,7 +59,32 @@ def create_app(config_path: str | None = None) -> FastAPI:
         app.state.scheduler = scheduler
         app.state.settings = settings
         app.state.templates = Jinja2Templates(directory=str(_ui_directory() / "templates"))
-        scheduler.start()
+        # Decided here, before the scheduler starts. `piply init` generates
+        # scheduled pipelines, so a few seconds later the database would no
+        # longer look empty and a genuinely fresh install would miss setup.
+        app.state.setup_required = is_first_run(settings, service)
+        # Create the first admin when the install has no accounts yet. This is
+        # how a server deployment gets its first login without shell access.
+        bootstrap = service.bootstrap_admin()
+        if bootstrap is not None:
+            name, secret = bootstrap
+            print("=" * 68, flush=True)
+            print("Piply created an initial administrator account:", flush=True)
+            print(f"    username: {name}", flush=True)
+            if secret is None:
+                # The operator supplied the password, so echoing it here would
+                # only copy a known secret into the container's log stream.
+                print("    password: (as configured)", flush=True)
+            else:
+                print(f"    password: {secret}", flush=True)
+                print("Store it now. It cannot be shown again.", flush=True)
+            print("=" * 68, flush=True)
+
+        # Nothing is scheduled until the operator has chosen where data goes.
+        # Running pipelines first would write history into a database they may
+        # be about to replace.
+        if not app.state.setup_required:
+            scheduler.start()
 
         async def _shutdown_watcher():
             while True:
@@ -80,15 +108,27 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app = FastAPI(
         title="Piply",
         description="Lightweight script orchestration with a modular runtime and professional UI.",
-        version="0.2.0",
+        version=get_version(),
         lifespan=lifespan,
     )
 
-    app.add_middleware(AuthMiddleware)
+    # Registered through FastAPI's own middleware decorator so nothing here
+    # imports Starlette directly, keeping the declared dependencies honest.
+    app.middleware("http")(auth_middleware)
+    # Added last so it wraps outermost, which means the hardening headers are
+    # also present on the 401 and login-redirect responses the auth middleware
+    # returns without ever reaching a route.
+    app.middleware("http")(security_headers_middleware)
     app.mount("/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
+    app.include_router(setup.router)
+    app.include_router(accounts.router)
     app.include_router(ui.router)
     app.include_router(dashboard.router)
     app.include_router(execution.router)
+    app.include_router(observability.router)
+    # Registered before the pipeline/run routers so its explicit sub-paths are
+    # not shadowed by their `{pipeline_id}` / `{run_id}` wildcards.
+    app.include_router(maintenance.router)
     app.include_router(pipelines.router)
     app.include_router(runs.router)
     return app
