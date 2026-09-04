@@ -125,9 +125,7 @@ def test_a_group_fans_out_to_every_destination(tmp_path: Path, sink) -> None:
     run = service.trigger_pipeline("bad_pipeline", wait=True)
 
     assert sorted(item["path"] for item in receiver.received) == ["/chat", "/prod"]
-    facts = {
-        fact["name"]: fact["value"] for fact in receiver.received[0]["body"]["sections"][0]["facts"]
-    }
+    facts = {fact["name"]: fact["value"] for fact in receiver.received[0]["body"]["sections"][0]["facts"]}
     assert facts["Status"] == "failed"
     assert "exited with code 3" in facts["Error"]
     assert run.status == "failed"

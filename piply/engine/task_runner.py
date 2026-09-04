@@ -79,11 +79,7 @@ _retargeted_handlers: list[tuple[logging.StreamHandler, object]] = []
 def _existing_stream_handlers():
     """Yield every `StreamHandler` currently attached anywhere."""
     loggers = [logging.getLogger()]
-    loggers.extend(
-        item
-        for item in logging.Logger.manager.loggerDict.values()
-        if isinstance(item, logging.Logger)
-    )
+    loggers.extend(item for item in logging.Logger.manager.loggerDict.values() if isinstance(item, logging.Logger))
     for logger in loggers:
         for handler in list(logger.handlers):
             if isinstance(handler, logging.StreamHandler):

@@ -114,7 +114,9 @@ class NotificationSettings:
         return resolved
 
 
-def parse_notifications(raw_value: Any, env_values: dict[str, str] | None = None) -> tuple[NotificationSettings, list[str]]:
+def parse_notifications(
+    raw_value: Any, env_values: dict[str, str] | None = None
+) -> tuple[NotificationSettings, list[str]]:
     """Parse the project-level `notifications:` block.
 
     Returns the settings plus any warnings. An unresolved webhook is a warning
@@ -131,9 +133,7 @@ def parse_notifications(raw_value: Any, env_values: dict[str, str] | None = None
 
     for key in raw_value:
         if key not in ("teams", "groups"):
-            raise NotificationError(
-                f"Unsupported notification channel '{key}'. Supported: teams."
-            )
+            raise NotificationError(f"Unsupported notification channel '{key}'. Supported: teams.")
 
     raw_teams = raw_value.get("teams") or {}
     if not isinstance(raw_teams, dict):
@@ -146,9 +146,7 @@ def parse_notifications(raw_value: Any, env_values: dict[str, str] | None = None
 
         destination_type = str(raw_destination.get("type") or "channel").strip().lower()
         if destination_type not in VALID_TEAMS_TYPES:
-            raise NotificationError(
-                f"{label}.type must be one of: {', '.join(VALID_TEAMS_TYPES)}"
-            )
+            raise NotificationError(f"{label}.type must be one of: {', '.join(VALID_TEAMS_TYPES)}")
 
         webhook = _resolve_secret(raw_destination.get("webhook"), env_values)
         if not webhook:
@@ -156,13 +154,10 @@ def parse_notifications(raw_value: Any, env_values: dict[str, str] | None = None
         if not is_valid_webhook(webhook):
             if _looks_unresolved(webhook):
                 warnings.append(
-                    f"{label}: webhook '{webhook}' did not resolve to a value, "
-                    "so this destination will be skipped."
+                    f"{label}: webhook '{webhook}' did not resolve to a value, " "so this destination will be skipped."
                 )
             else:
-                raise NotificationError(
-                    f"{label}.webhook must be an https URL (a Teams webhook always is)"
-                )
+                raise NotificationError(f"{label}.webhook must be an https URL (a Teams webhook always is)")
 
         timeout = raw_destination.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
         try:
@@ -310,7 +305,9 @@ def build_alert(
     return payload
 
 
-async def _post_one(client: httpx.AsyncClient, destination: TeamsDestination, payload: dict[str, Any]) -> tuple[str, bool, str]:
+async def _post_one(
+    client: httpx.AsyncClient, destination: TeamsDestination, payload: dict[str, Any]
+) -> tuple[str, bool, str]:
     """Post one card, converting every failure into a reportable result."""
     try:
         response = await client.post(

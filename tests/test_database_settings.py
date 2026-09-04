@@ -195,9 +195,7 @@ def test_switching_is_refused_while_a_run_is_in_flight(configured) -> None:
     assert not (tmp_path / "moved.db").exists()
 
 
-def test_the_panel_is_locked_when_the_database_comes_from_the_environment(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_the_panel_is_locked_when_the_database_comes_from_the_environment(tmp_path: Path, monkeypatch) -> None:
     """`PIPLY_DATABASE` in the process environment overrides `.env`.
 
     Saving would write a file nothing reads, so Piply refuses rather than

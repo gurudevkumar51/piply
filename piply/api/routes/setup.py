@@ -235,7 +235,9 @@ def admin_bootstrap_available(request: Request) -> bool:
         return False
 
 
-def _render_admin_page(request: Request, error: str | None = None, submitted: dict | None = None, status_code: int = 200):
+def _render_admin_page(
+    request: Request, error: str | None = None, submitted: dict | None = None, status_code: int = 200
+):
     """Render the optional first-admin step."""
     return request.app.state.templates.TemplateResponse(
         request,

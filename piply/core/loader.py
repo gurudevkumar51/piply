@@ -160,10 +160,7 @@ def _merge_included_document(
             continue
         # Absent from `origins` means it came from the root file.
         first = origins.get(dotted, root)
-        raise ConfigError(
-            f"'{dotted}' is defined in more than one config file: "
-            f"'{first.name}' and '{source.name}'"
-        )
+        raise ConfigError(f"'{dotted}' is defined in more than one config file: " f"'{first.name}' and '{source.name}'")
 
 
 def load_raw_config(path: Path) -> tuple[dict[str, Any], list[Path]]:
@@ -200,9 +197,7 @@ def load_raw_config(path: Path) -> tuple[dict[str, Any], list[Path]]:
                 continue
             document = _read_yaml_document(resolved)
             if "include" in document:
-                raise ConfigError(
-                    f"'{resolved.name}' uses 'include', which only the root config file may do."
-                )
+                raise ConfigError(f"'{resolved.name}' uses 'include', which only the root config file may do.")
             _merge_included_document(raw_data, document, resolved, origins, path)
             sources.append(resolved)
 
