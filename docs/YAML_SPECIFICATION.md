@@ -533,7 +533,8 @@ pipelines:
   extract_flow:
     title: Extract Flow                  # display name
     description: Loads and validates.    # shown in the UI
-    enabled: true                        # false hides it from the scheduler
+    enabled: true                        # false hides it from the scheduler;
+                                         # accepts a conditional, see section 3
     tags: [ingest, tier1]
     timezone: UTC                        # overrides the project timezone
 
@@ -1147,6 +1148,7 @@ the config.
 | `PIPLY_SMTP_*` | unset | central SMTP, see Notifications above |
 | `PIPLY_ADMIN_USERNAME` | `admin` | bootstrapped admin username |
 | `PIPLY_ADMIN_PASSWORD` | generated | bootstrapped admin password |
+| `PIPLY_SCHEDULER_ENABLED` | `true` | `false` serves the UI and manual runs but fires no schedule or sensor |
 | `PIPLY_SESSION_SECRET` | generated | session cookie signing key |
 | `PIPLY_BASE_URL` | unset | public URL, used to link Teams alerts back to the run page |
 | `PIPLY_AUTH_ENABLED` | `false` | require authentication |
@@ -1520,6 +1522,7 @@ notifications:
 | `teams.<name>.type` | `channel` | `channel` or `chat` |
 | `teams.<name>.webhook` | *required* | Incoming webhook URL |
 | `teams.<name>.timeout_seconds` | `10` | Per-request timeout |
+| `teams.<name>.format` | guessed | `adaptive` (Power Automate) or `messagecard` (legacy connector) |
 | `groups.<name>` | — | List of destination names |
 
 An unresolved `${VAR}` is a **warning**, not an error, and the destination is

@@ -2350,3 +2350,16 @@ body.modal-open {
 .setup-fields[hidden] {
     display: none;
 }
+
+
+.status-button {
+    /* A status badge that is also a button: keep the badge look, gain a cursor. */
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    transition: filter 0.15s ease;
+}
+
+.status-button:hover {
+    filter: brightness(0.94);
+}

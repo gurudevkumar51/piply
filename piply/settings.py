@@ -136,6 +136,10 @@ class PiplySettings:
     stale_run_timeout_seconds: int
     heartbeat_interval_seconds: int
     scheduler_poll_interval_seconds: int
+    #: When false the server still serves the UI and runs manual triggers, but
+    #: no schedule or sensor fires. Set it in a dev `.env` so opening the
+    #: project does not immediately start last night's pipelines.
+    scheduler_enabled: bool
     queue_dispatch_batch_size: int
     queue_dispatch_stale_seconds: int
     upcoming_run_preview_count: int
@@ -265,6 +269,7 @@ def load_settings(
         stale_run_timeout_seconds=stale_run_timeout_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         scheduler_poll_interval_seconds=scheduler_poll_interval_seconds,
+        scheduler_enabled=_parse_bool(merged_env.get("PIPLY_SCHEDULER_ENABLED"), True),
         queue_dispatch_batch_size=queue_dispatch_batch_size,
         queue_dispatch_stale_seconds=queue_dispatch_stale_seconds,
         upcoming_run_preview_count=upcoming_run_preview_count,

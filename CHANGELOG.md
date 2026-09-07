@@ -9,6 +9,78 @@ rather than buried in the feature list.
 
 ---
 
+## 0.3.2 — 2026-09-06
+
+A fix release. Three of these were reported from a live install, and every
+0.3.1 config keeps working untouched.
+
+### Added
+
+- **`PIPLY_SCHEDULER_ENABLED=false` stops schedules without stopping Piply.**
+  Opening a project on a laptop otherwise starts whatever was due, which is
+  usually last night's pipelines. The UI, the API, and manual runs keep working;
+  the startup log and the header chip both say the scheduler is off, so a quiet
+  install is not mistaken for a broken one. `.env` is now gitignored — it holds
+  the database URL, the SMTP password, and the Teams webhooks, and only luck had
+  been keeping it out of commits.
+
+- **The runs list answers "why did that fail?" in place.** Clicking a run's
+  status opens its full log in a drawer beside the table, oldest first so a
+  traceback reads the right way up, without losing your filters or scroll
+  position. Finished runs also gain a **Re-run** action, so starting one again
+  no longer means opening it first.
+
+### Fixed
+
+- **Alerts are sent as Adaptive Cards, not MessageCards.** Microsoft retired
+  Office 365 connectors, and the Power Automate "Workflows" endpoints that
+  replace them reject the older `MessageCard` payload Piply was sending — so a
+  webhook that worked with `curl` produced nothing from Piply. Destinations now
+  default to the Adaptive Card envelope, fall back to `messagecard` for URLs on
+  `webhook.office.com`, and accept an explicit `format:` either way.
+
+- **Cancelling a run did not stop it.** `terminate()` signals only the direct
+  child, and CLI tasks run through a shell by default — so the shell died while
+  the real process kept going. Worse, the orphan held the stdout pipe open, so
+  the runner waited for output that never ended and the run never left
+  `running`: the task node kept its moving dot indefinitely. The whole process
+  tree is now stopped, on Windows and POSIX. A `type: python` task using
+  `function:` still cannot be interrupted — Python has no safe way to stop a
+  thread — but cancelling now says so in the run log instead of appearing to do
+  nothing.
+
+- **A failed Python task said almost nothing about why.** Only `str(exc)` was
+  logged, and for the most common failures that is meaningless on its own — a
+  `KeyError` logged just `'pre-flight'`, with no type, no file, and no line. The
+  run log now carries the traceback and the run's error names the exception
+  type, so the same failure reads as `KeyError: 'pre-flight'` with the file and
+  line that raised it. Piply's own dispatch frames are trimmed, and the
+  traceback is stored as one entry so a newest-first log does not render it
+  upside down.
+
+- **A Teams delivery failure could arrive as a bare `[Errno 2] No such file or
+  directory`.** A `FileNotFoundError` from a missing TLS certificate bundle is
+  not an `httpx.HTTPError`, so it escaped the transport handler and was reported
+  with no exception type and no cause. Failures now name the exception type and,
+  where the environment suggests one, the reason — a `SSL_CERT_FILE` pointing at
+  a path that does not exist, or a configured proxy. The failure is also logged
+  server-side, so the console shows more than `502 Bad Gateway`.
+
+- **A pipeline's `enabled:` ignored conditionals and was always true.** It was
+  read with `bool(...)` and without evaluating the condition, so both
+  `enabled: {if: env == "dev", then: false, else: true}` and a bare
+  `enabled: "false"` left the pipeline scheduled in every environment — a
+  non-empty mapping is truthy, and so is the string `"false"`. Conditionals are
+  now evaluated, false-looking values are honoured, and anything that is
+  neither raises a config error instead of being silently treated as true.
+
+- **`SyntaxWarning: invalid escape sequence` on every config reload.** Any value
+  that looks like a ternary is speculatively parsed, so a Windows path such as
+  `D:\Dumps` reached Python's parser as data and warned about the backslash.
+  The warning was about the user's data, not their code.
+
+---
+
 ## 0.3.1 — 2026-09-05
 
 Follow-on release to 0.3.0. Every 0.3.0 config keeps working untouched.
@@ -39,6 +111,9 @@ Follow-on release to 0.3.0. Every 0.3.0 config keeps working untouched.
 
 - **The task graph uses the full page width**, with the task panel opening when
   a node is clicked rather than permanently occupying a third of the screen.
+  The panel closes from its own **Close** button, with `Escape`, or by clicking
+  the same node again; closing clears the node selection so the two cannot
+  disagree.
 
 ### Fixed
 

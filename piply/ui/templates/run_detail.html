@@ -63,6 +63,7 @@
             <aside class="task-inspector" id="run-task-inspector">
                 <div class="inspector-header">
                     <div class="detail-label">Task focus</div>
+                    <button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closeTaskFocus()">Close</button>
                 </div>
                 <div class="empty-state">Select a task node to inspect it.</div>
             </aside>
@@ -308,7 +309,7 @@ function renderRunInspector(taskId) {
     const inspector = document.getElementById("run-task-inspector");
     const task = currentTaskRuns.find((item) => item.task_id === taskId);
     if (!task) {
-        inspector.innerHTML = '<div class="inspector-header"><div class="detail-label">Task focus</div></div><div class="empty-state">Select a task node to inspect it.</div>';
+        inspector.innerHTML = '<div class="inspector-header"><div class="detail-label">Task focus</div><button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closeTaskFocus()">Close</button></div><div class="empty-state">Select a task node to inspect it.</div>';
         return;
     }
     const dependencyText = task.depends_on && task.depends_on.length ? task.depends_on.join(", ") : "none";
@@ -327,6 +328,7 @@ function renderRunInspector(taskId) {
     inspector.innerHTML = `
         <div class="inspector-header">
             <div class="detail-label">Task focus</div>
+            <button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closeTaskFocus()">Close</button>
         </div>
         <h3 class="panel-title" style="margin-top:10px;">${escapeHtml(task.title)}</h3>
         <div class="task-stats" style="margin-top:12px;">
@@ -434,6 +436,13 @@ function renderRunGraph(taskRuns) {
             onNodeClick: (node) => {
                 if (node.task_type === "pipeline") {
                     openDownstream(node.task_id.replace("downstream::", ""));
+                    return;
+                }
+                // Clicking the node you are already inspecting closes the
+                // panel, so the graph goes back to full width without hunting
+                // for a button.
+                if (!taskFocusCollapsed && selectedRunTaskId === node.task_id) {
+                    closeTaskFocus();
                     return;
                 }
                 focusRunTask(node.task_id, false, false);
@@ -555,6 +564,14 @@ async function backfillRun(id) {
     } catch (error) {
         alert(error.message);
     }
+}
+
+function closeTaskFocus() {
+    // Closing the panel also clears the node selection, so the highlighted node
+    // and the panel never disagree about what is being inspected.
+    selectedRunTaskId = null;
+    taskFocusCollapsed = true;
+    applyTaskFocusState();
 }
 
 function applyTaskFocusState({ persist = true, rerenderDag = true } = {}) {
@@ -714,8 +731,18 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
+    if (event.key !== "Escape") {
+        return;
+    }
+    // The drawer sits on top, so it wins the first Escape; a second one closes
+    // the focus panel underneath.
+    const drawer = document.getElementById("output-preview-drawer");
+    if (drawer && drawer.classList.contains("open")) {
         closeOutputPreview();
+        return;
+    }
+    if (!taskFocusCollapsed) {
+        closeTaskFocus();
     }
 });
 </script>

@@ -670,7 +670,8 @@ def test_streamed_output_survives_failure_and_keeps_stream_order(tmp_path: Path)
     assert "ERR-1" in messages
     # A trailing write with no newline is still flushed, exactly once.
     assert messages.count("NO-NEWLINE-AT-END") == 1
-    assert "kaboom" in messages
+    # The failure arrives as a traceback naming the type, not a bare message.
+    assert any(m.startswith("Traceback") and m.rstrip().endswith("RuntimeError: kaboom") for m in messages)
 
 
 def test_logging_output_reaches_the_run_log(tmp_path: Path) -> None:
@@ -876,3 +877,188 @@ def test_a_file_sensor_hands_the_filenames_to_its_tasks(tmp_path: Path) -> None:
     # ...and the whole event to a Python task.
     assert any("FILES=" in message and "claims_2026.csv" in message for message in messages)
     assert threading.active_count() >= 1
+
+
+def test_a_failing_python_task_reports_the_type_and_traceback(tmp_path: Path) -> None:
+    """`str(KeyError('x'))` is just "'x'" — useless on its own.
+
+    A run page showing only `'pre-flight'` gives no type, no file, and no line,
+    so there is nothing to act on.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "jobs.py").write_text(
+        "\n".join(
+            [
+                "CONFIG = {'claims': 1}",
+                "",
+                "",
+                "def _lookup(name):",
+                "    return CONFIG[name]",
+                "",
+                "",
+                "def extract(reports):",
+                "    for report in reports:",
+                "        _lookup(report)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Traceback",
+                "workspace: workspace",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: jobs.py",
+                "        function: extract",
+                "        kwargs:",
+                "          reports: ['pre-flight']",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "failed"
+    # The type is named, not just the key.
+    assert stored_run.error == "KeyError: 'pre-flight'"
+
+    trace = next(line.message for line in logs if line.message.startswith("Traceback"))
+    # One entry, so a newest-first log does not render it upside down.
+    assert trace.count("Traceback (most recent call last)") == 1
+    assert trace.rstrip().endswith("KeyError: 'pre-flight'")
+    # The user's frames are there...
+    assert "jobs.py" in trace and "_lookup" in trace
+    # ...and Piply's own dispatch frames are not.
+    assert "task_runner.py" not in trace
+
+
+def test_cancelling_stops_a_cli_task_and_everything_it_started(tmp_path: Path) -> None:
+    """`terminate()` only signals the direct child.
+
+    CLI tasks run through a shell by default, so signalling the shell left the
+    real work running — and the orphan held the stdout pipe open, so the runner
+    waited for output that never came and the run never left `running`.
+    """
+    import threading
+    import time as time_module
+
+    # Absolute paths: a CLI task inherits the server's working directory, not
+    # the config directory, so relative paths would resolve somewhere else.
+    progress = tmp_path / "progress.txt"
+    script = tmp_path / "slow.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import pathlib, sys, time",
+                "for index in range(60):",
+                "    pathlib.Path(sys.argv[1]).write_text(str(index))",
+                "    time.sleep(0.2)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Cancel",
+                "workspace: .",
+                "pipelines:",
+                "  slow:",
+                "    tasks:",
+                "      t:",
+                "        type: cli",
+                f'        command: python "{script}" "{progress}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    threading.Thread(target=lambda: service.trigger_pipeline("slow", wait=True), daemon=True).start()
+
+    deadline = time_module.monotonic() + 20
+    while time_module.monotonic() < deadline and not progress.exists():
+        time_module.sleep(0.1)
+    assert progress.exists(), "the task never started"
+
+    run = service.list_runs(pipeline_id="slow", limit=1)[0]
+    service.cancel_run(run.run_id)
+    at_cancel = progress.read_text()
+
+    # The work itself stops, not just the shell wrapping it.
+    time_module.sleep(3)
+    assert progress.read_text() == at_cancel, "the task kept running after cancellation"
+
+    # And the run reaches a terminal state, so the UI stops showing it as active.
+    deadline = time_module.monotonic() + 20
+    while time_module.monotonic() < deadline:
+        stored, task_runs, _ = service.get_run(run.run_id)
+        if stored.status not in {"queued", "running"}:
+            break
+        time_module.sleep(0.2)
+    assert stored.status == "cancelled"
+    assert [item.status for item in task_runs] == ["cancelled"]
+
+
+def test_cancelling_says_why_a_python_callable_cannot_be_stopped(tmp_path: Path) -> None:
+    """Python cannot interrupt a thread, so say so rather than look broken."""
+    import threading
+    import time as time_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "jobs.py").write_text("import time\n\n\ndef slow():\n    time.sleep(8)\n", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Uninterruptible",
+                "workspace: workspace",
+                "pipelines:",
+                "  slow:",
+                "    tasks:",
+                "      t: {type: python, path: jobs.py, function: slow}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    threading.Thread(target=lambda: service.trigger_pipeline("slow", wait=True), daemon=True).start()
+
+    # Wait for the *task* to be running, not just the run. A queued task has
+    # not started, so cancelling it works cleanly and no warning is due — the
+    # warning is only about a callable already executing.
+    deadline = time_module.monotonic() + 45
+    run = None
+    while time_module.monotonic() < deadline:
+        runs = service.list_runs(pipeline_id="slow", limit=1)
+        if runs:
+            _, task_runs, _ = service.get_run(runs[0].run_id)
+            if any(item.status == "running" for item in task_runs):
+                run = runs[0]
+                break
+        time_module.sleep(0.1)
+    assert run is not None, "the task never reached 'running'"
+
+    service.cancel_run(run.run_id)
+    _, _, logs = service.get_run(run.run_id)
+
+    assert any("cannot be interrupted" in line.message for line in logs)

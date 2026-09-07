@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import warnings
 from typing import Any
 
 # `{name}` placeholders are substituted as quoted literals before parsing, so a
@@ -88,6 +89,21 @@ def _compare_equal(left: Any, right: Any) -> bool:
     return False
 
 
+def _parse_expression(source: str) -> ast.Expression:
+    r"""Parse a config value as an expression, without warning about its content.
+
+    Every scalar that *looks* like a ternary is speculatively parsed, so a
+    Windows path such as ``D:\Dumps`` reaches the parser as ordinary data and
+    Python emits ``SyntaxWarning: invalid escape sequence '\D'`` — once per
+    value, on every config reload. That warning is about the user's data, not
+    their code, so it is pure noise. A genuinely malformed expression still
+    raises ``SyntaxError`` and is reported with the value that caused it.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(source, mode="eval")
+
+
 def evaluate(expression: str, context: dict[str, Any]) -> Any:
     """Evaluate one small expression against a context mapping.
 
@@ -96,7 +112,7 @@ def evaluate(expression: str, context: dict[str, Any]) -> Any:
     """
     resolved = resolve_placeholders(expression, context)
     try:
-        tree = ast.parse(resolved, mode="eval")
+        tree = _parse_expression(resolved)
     except SyntaxError as exc:
         raise ConditionError(f"Invalid expression '{expression}'.") from exc
 
@@ -208,7 +224,7 @@ def looks_like_conditional(value: Any) -> bool:
     if not isinstance(value, str) or not _TERNARY_SHAPE.search(value):
         return False
     try:
-        tree = ast.parse(resolve_placeholders(value, {}), mode="eval")
+        tree = _parse_expression(resolve_placeholders(value, {}))
     except SyntaxError:
         return False
     return isinstance(tree.body, ast.IfExp)

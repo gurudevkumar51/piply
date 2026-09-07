@@ -9,10 +9,12 @@ import json
 import logging
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -145,6 +147,72 @@ def _release_routing() -> None:
             _restore_log_handlers()
             sys.stdout, sys.stderr = _captured_streams
             _captured_streams = None
+
+
+#: Piply's own package root, used to trim its frames off a task traceback.
+_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
+
+
+def _task_traceback(exc: BaseException) -> str:
+    """Format a task's traceback without Piply's own call frames.
+
+    The first frames are always `task_runner` dispatching into the callable.
+    They are noise to someone debugging their own extraction, and they push the
+    line that actually matters off the top of the panel.
+    """
+    frames = exc.__traceback__
+    while frames is not None:
+        filename = frames.tb_frame.f_code.co_filename
+        try:
+            inside_piply = str(Path(filename).resolve()).startswith(_PACKAGE_ROOT)
+        except OSError:  # pragma: no cover - unresolvable path, keep the frame
+            inside_piply = False
+        if not inside_piply:
+            break
+        frames = frames.tb_next
+    # A failure entirely inside Piply keeps its full traceback; trimming it to
+    # nothing would hide a real bug in the runner.
+    return "".join(traceback.format_exception(type(exc), exc, frames or exc.__traceback__)).rstrip()
+
+
+def terminate_process_tree(process, *, force: bool = False) -> None:
+    """Stop a process and everything it started.
+
+    `Popen.terminate()` signals only the direct child. CLI tasks run through a
+    shell by default, so terminating it leaves the real work running — and the
+    orphan keeps the stdout pipe open, so the runner waits for output that never
+    ends and the run never leaves `running`. Cancelling then appears to do
+    nothing at all.
+    """
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # Windows has no process groups to signal, and taskkill is always
+        # forceful, so the graceful/forceful distinction does not apply here.
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+        )
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL if force else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        # No process group — fall back to the child alone rather than give up.
+        process.kill() if force else process.terminate()
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """Return a one-line summary that names the exception type.
+
+    Several common exceptions stringify to something meaningless on their own:
+    `KeyError` gives just the key, `IndexError` gives just the index. Prefixing
+    the class name is the difference between `'pre-flight'` and
+    `KeyError: 'pre-flight'`.
+    """
+    detail = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {detail}" if detail else name
 
 
 class _StreamingLogSink:
@@ -374,6 +442,8 @@ class TaskRunner:
                 text=True,
                 bufsize=1,
                 shell=shell,
+                # Its own session on POSIX, so the whole tree can be signalled.
+                start_new_session=os.name != "nt",
             )
             if self.register_process is not None:
                 self.register_process(process)
@@ -409,18 +479,21 @@ class TaskRunner:
                         output_size += len(stripped_line.encode("utf-8")) + 1
                     self.emit(stripped_line, task_id=task_id)
 
+            cancelling = False
             while True:
                 _drain_queue()
 
                 if self.is_cancelled and self.is_cancelled() and process.poll() is None:
-                    process.terminate()
+                    self.emit("Cancelling: stopping the task process tree.", task_id=task_id)
+                    terminate_process_tree(process)
+                    cancelling = True
                 if deadline is not None and time.monotonic() >= deadline and process.poll() is None:
                     timed_out = True
                     self.emit(
                         f"Task timed out after {timeout_seconds} seconds; terminating process.",
                         task_id=task_id,
                     )
-                    process.terminate()
+                    terminate_process_tree(process)
                     try:
                         process.wait(timeout=kill_grace_period_seconds)
                     except subprocess.TimeoutExpired:
@@ -428,9 +501,9 @@ class TaskRunner:
                             f"Task did not stop within the {kill_grace_period_seconds}s kill grace period; killing it.",
                             task_id=task_id,
                         )
-                        process.kill()
+                        terminate_process_tree(process, force=True)
                     break
-                if process.poll() is not None and reader_done.is_set() and line_queue.empty():
+                if process.poll() is not None and ((reader_done.is_set() and line_queue.empty()) or cancelling):
                     break
                 time.sleep(0.02)
 
@@ -602,8 +675,14 @@ class TaskRunner:
         except Exception as exc:
             stdout_sink.close()
             stderr_sink.close()
-            message = str(exc) or exc.__class__.__name__
-            self.emit(message, task_id=task.task_id)
+            # `str(KeyError("pre-flight"))` is just "'pre-flight'" — no type, no
+            # file, no line. On its own that tells you nothing about what broke.
+            #
+            # The traceback is emitted as a *single* entry rather than one line
+            # each: the log is displayed newest-first, so separate lines would
+            # render the traceback upside down.
+            message = _describe_exception(exc)
+            self.emit(_task_traceback(exc), task_id=task.task_id)
             return TaskExecutionResult(status="failed", error=message)
 
         stdout_sink.close()

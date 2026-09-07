@@ -357,3 +357,82 @@ def test_dag_labels_are_measured_and_shortened(tmp_path: Path) -> None:
     # An entity task's id restates its title, so it is dropped rather than
     # shown twice in shortened form.
     assert "titleRestatesId" in script
+
+
+def test_runs_page_offers_logs_from_the_status_and_a_rerun_action(tmp_path: Path) -> None:
+    """Answering "why did that fail?" should not cost you the list you were on.
+
+    The status opens the run's logs in place, and a finished run can be started
+    again without first navigating into it.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Runs Page",
+                "workspace: .",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # No explicit database: the shared fixture points both this service and the
+    # app at the same one, so the run is visible to the page.
+    service = PipelineService(config_path=config_path)
+    run = service.trigger_pipeline("flow", wait=True)
+
+    with TestClient(create_app(str(config_path))) as client:
+        page = client.get("/runs")
+        assert page.status_code == 200
+        # The status is a control, not just a label.
+        assert f"openRunLogs('{run.run_id}'" in page.text
+        # A finished run can be started again from the list.
+        assert f"rerunRun('{run.run_id}'" in page.text
+        assert 'id="run-logs-drawer"' in page.text
+
+        # The endpoints those controls call actually work.
+        logs = client.get(f"/api/runs/{run.run_id}/logs")
+        assert logs.status_code == 200
+
+        again = client.post(f"/api/runs/{run.run_id}/retry", json={"mode": "startover"})
+        assert again.status_code == 200
+        assert again.json()["id"] != run.run_id
+
+
+def test_the_task_focus_panel_can_be_closed(tmp_path: Path) -> None:
+    """Opening the panel from a node click needs a way back to a full-width graph."""
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Focus",
+                "workspace: .",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      extract: {type: cli, command: echo hi}",
+                "      load: {type: cli, command: echo bye, depends_on: [extract]}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path)
+    run = service.trigger_pipeline("flow", wait=True)
+
+    with TestClient(create_app(str(config_path))) as client:
+        run_page = client.get(f"/runs/{run.run_id}").text
+        pipeline_page = client.get("/pipelines/flow").text
+
+    for page, closer in ((run_page, "closeTaskFocus"), (pipeline_page, "closePipelineFocus")):
+        # A visible control on the panel itself, not only in the toolbar.
+        assert f'onclick="{closer}()"' in page
+        assert f"function {closer}()" in page
+        # Escape closes it, but only once any drawer on top has been dismissed.
+        assert 'if (event.key !== "Escape")' in page

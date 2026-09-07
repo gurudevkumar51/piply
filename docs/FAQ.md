@@ -171,6 +171,33 @@ config long. A file that is long because 8 tenants each spell out the same 12
 tasks wants templates; a file that is long because it has 29 legitimate
 deployments wants `include:`. Most real projects want both.
 
+### Piply starts running my pipelines the moment I open the project locally.
+
+Turn the scheduler off on that machine:
+
+```
+# .env on the development machine only
+PIPLY_SCHEDULER_ENABLED=false
+```
+
+The UI, the API, and manual runs all keep working — only schedules and sensors
+are held back. The startup log says so and the header chip reads
+`scheduler offline`, so it is never mistaken for a broken install.
+
+If some pipelines should still run locally, disable them individually instead:
+
+```yaml
+pipelines:
+  nightly_load:
+    enabled:
+      if: env == "dev"
+      then: false
+      else: true
+```
+
+`env` falls back to `PIPLY_ENV`. A disabled pipeline stays visible and can still
+be triggered by hand.
+
 ### How do I check my config without running anything?
 
 ```bash
@@ -1141,12 +1168,68 @@ URL into YAML, because the URL is the credential. Full guide, including how to
 get a webhook URL for a channel or a group chat, in
 [Notifications](NOTIFICATIONS.md).
 
+### `SyntaxWarning: invalid escape sequence` on every save.
+
+Fixed in 0.3.2. Any value that *looks* like a ternary is speculatively parsed to
+find out, so a Windows path such as `D:\Dumps` reached Python's parser as data
+and it warned about the backslash — once per value, on every reload. The
+speculative parse no longer emits that warning. Your paths were never wrong.
+
+### A Python task failed but the log just shows a bare value.
+
+Fixed in 0.3.2. Previously only `str(exception)` was recorded, which for the
+most common failures says nothing — `KeyError` stringifies to just the key, so a
+run showed `'pre-flight'` and nothing else.
+
+The run log now holds the full traceback with the file and line that raised, and
+the run's error names the type: `KeyError: 'pre-flight'`. Piply's own dispatch
+frames are trimmed so the first line you see is your code.
+
 ### How does a task know which file the sensor found?
 
 Sensor-triggered runs get `{sensor_file}`, `{sensor_file_name}`,
 `{sensor_files}`, and `{sensor_file_count}` in any command, and Python tasks get
 the whole event as `context["sensor"]`. Quote the path — a share path can
 contain spaces. See [Sensors §2](SENSORS.md#what-the-triggered-run-receives).
+
+### Should notifications go on the pipeline, template, or deployment?
+
+All three work. Put them on the **template** when every deployment alerts the
+same people — write it once, and all 29 tenants inherit it. Put them on a
+**deployment** only when that tenant differs; it **replaces** the template's
+list rather than adding to it, so list both names or use a group if you want
+both. Use the **pipeline** level for standalone pipelines that are not built
+from a template. See [Notifications §3](NOTIFICATIONS.md#which-level-should-it-go-on).
+
+### Cancelling a run does not stop it.
+
+Fixed for `type: cli` and script tasks in 0.3.2: they were killed with
+`terminate()`, which signals only the shell Piply starts, leaving the real
+process running and holding the log pipe open — so the run never left
+`running` either. The whole process tree is now stopped.
+
+A `type: python` task using `function:` still cannot be interrupted: it runs in
+a thread and Python offers no safe way to stop one. Cancelling now says so in
+the run log, and the task finishes before the run turns `cancelled`. If a task
+must be cancellable, use `type: cli` or a script path so it runs as its own
+process.
+
+### `curl` to my webhook works, but Piply's alert never appears.
+
+Almost certainly the payload format. Microsoft retired Office 365 connectors;
+the Power Automate "Workflows" endpoints that replaced them expect an Adaptive
+Card inside `{"type": "message", "attachments": [...]}` and reject the older
+`MessageCard`. Piply sends the Adaptive shape by default and only uses
+`messagecard` for URLs on `webhook.office.com`. Force it either way with
+`format: adaptive` or `format: messagecard` on the destination.
+
+### Send test fails with `[Errno 2] No such file or directory`.
+
+That is a TLS certificate bundle, not a Piply file. `SSL_CERT_FILE`,
+`SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` is set in the server's
+environment and points somewhere that does not exist — usually a conda
+environment that was removed. Piply names the offending variable and path in the
+error. Unset it, or point it at a real bundle.
 
 ### A Teams alert did not arrive. Where do I look?
 
@@ -1378,6 +1461,9 @@ What the message means and what to do about it.
 | `notifications.teams.x.webhook must be an https URL` | A literal that is not a URL | Use `${VAR}`; a Teams webhook is always https |
 | `x run(s) are still in progress` | Switching the database while something is running | Wait, or pause the schedules first |
 | `PIPLY_DATABASE is set in this process's environment` | The variable wins over `.env`, so the Settings switch cannot take effect | Change it in the compose file or unit, and restart |
+| `FileNotFoundError: [Errno 2] No such file or directory` from a Teams alert | A CA-bundle variable — `SSL_CERT_FILE` and friends — points at a path that is gone | The message names the variable; unset it or point it at a real bundle |
+| `request failed (ConnectError)` | DNS or the network, from the machine Piply runs on | Check the webhook host is reachable there, and any configured proxy |
+| `notifications.teams.x.format must be one of` | A typo in `format:` | `adaptive` for Power Automate, `messagecard` for a legacy connector |
 | `Pipeline 'x' cannot trigger itself on success` | Self-reference | Remove it |
 | `... task 'y' requires command or path for cli tasks` | `type: cli` with neither | Add `command:` |
 | `... task 'y' points to a missing script` | Path wrong, or relative to the wrong base | Remember paths resolve against `workspace:` |

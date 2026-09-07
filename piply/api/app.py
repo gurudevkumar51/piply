@@ -83,7 +83,15 @@ def create_app(config_path: str | None = None) -> FastAPI:
         # Nothing is scheduled until the operator has chosen where data goes.
         # Running pipelines first would write history into a database they may
         # be about to replace.
-        if not app.state.setup_required:
+        if not settings.scheduler_enabled:
+            # Said out loud: a silent no-schedule install is indistinguishable
+            # from a broken one, and the reason belongs where you are looking.
+            print(
+                "Scheduler disabled by PIPLY_SCHEDULER_ENABLED=false. "
+                "Schedules and sensors will not fire; manual runs still work.",
+                flush=True,
+            )
+        elif not app.state.setup_required:
             scheduler.start()
 
         async def _shutdown_watcher():

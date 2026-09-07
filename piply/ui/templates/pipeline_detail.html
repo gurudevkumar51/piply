@@ -103,7 +103,10 @@
                 <div class="dag-stage" id="dag-stage"></div>
             </div>
             <aside class="task-inspector" id="pipeline-task-inspector">
-                <div class="detail-label">Task focus</div>
+                <div class="inspector-header">
+                    <div class="detail-label">Task focus</div>
+                    <button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closePipelineFocus()">Close</button>
+                </div>
                 <div class="empty-state">Select a task node to inspect it.</div>
             </aside>
         </div>
@@ -266,7 +269,7 @@ function renderPipelineInspector(taskId) {
     const inspector = document.getElementById("pipeline-task-inspector");
     const task = pipelineDagTasks.find((item) => item.task_id === taskId);
     if (!task) {
-        inspector.innerHTML = '<div class="detail-label">Task focus</div><div class="empty-state">Select a task node to inspect it.</div>';
+        inspector.innerHTML = '<div class="inspector-header"><div class="detail-label">Task focus</div><button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closePipelineFocus()">Close</button></div><div class="empty-state">Select a task node to inspect it.</div>';
         return;
     }
     const latest = taskRunMap(currentLatestTaskRuns)[task.task_id];
@@ -283,7 +286,10 @@ function renderPipelineInspector(taskId) {
         ? `<a class="button secondary" href="/pipelines/${task.task_id.replace("trigger_", "")}">Open downstream pipeline</a>`
         : `<button class="button primary" onclick="triggerTask('${pipelineId}', '${task.task_id}', { scope: document.getElementById('command-override-panel') || document })">Run this task</button>`;
     inspector.innerHTML = `
-        <div class="detail-label">Task focus</div>
+        <div class="inspector-header">
+            <div class="detail-label">Task focus</div>
+            <button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closePipelineFocus()">Close</button>
+        </div>
         <h3 class="panel-title" style="margin-top:10px;">${escapeHtml(task.title)}</h3>
         <div class="task-stats" style="margin-top:12px;">
             <span class="task-type-badge">${escapeHtml(task.task_type)}</span>
@@ -321,6 +327,13 @@ function renderPipelineDag() {
             selectedNodeId: selectedPipelineTaskId,
             clickableStatuses: ["queued", "running", "success", "failed", "interrupted", "skipped", "cancelled"],
             onNodeClick: (node) => {
+                // Clicking the node you are already inspecting closes the panel.
+                const grid = document.getElementById("pipeline-dag-grid");
+                const open = grid && !grid.classList.contains("inspector-collapsed");
+                if (open && selectedPipelineTaskId === node.task_id) {
+                    closePipelineFocus();
+                    return;
+                }
                 focusPipelineTask(node.task_id, false, false);
                 openPipelineFocusForNode();
             },
@@ -432,6 +445,13 @@ function applyPipelineFocusState(open, { persist = true, rerender = true } = {})
     if (persist) window.localStorage.setItem(FOCUS_KEY, open ? "true" : "false");
     // The SVG is laid out to its container, so it has to be redrawn.
     if (rerender) renderPipelineDag();
+}
+
+function closePipelineFocus() {
+    // Clearing the selection too, so the highlighted node and the panel never
+    // disagree about what is being inspected.
+    selectedPipelineTaskId = null;
+    applyPipelineFocusState(false);
 }
 
 function openPipelineFocusForNode() {
@@ -550,8 +570,18 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
+    if (event.key !== "Escape") {
+        return;
+    }
+    // The preview drawer sits on top, so it wins the first Escape.
+    const drawer = document.getElementById("preview-drawer");
+    if (drawer && drawer.classList.contains("open")) {
         closePreview();
+        return;
+    }
+    const grid = document.getElementById("pipeline-dag-grid");
+    if (grid && !grid.classList.contains("inspector-collapsed")) {
+        closePipelineFocus();
     }
 });
 </script>

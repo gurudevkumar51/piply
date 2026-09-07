@@ -100,7 +100,12 @@
                     <tr>
                         <td><a class="mono" href="/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
                         <td><a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_title }}</a></td>
-                        <td><span class="status-badge {{ run.status }}">{{ run.status }}</span></td>
+                        <td>
+                            <button class="status-badge {{ run.status }} status-button"
+                                    type="button"
+                                    title="Show this run's logs"
+                                    onclick="openRunLogs('{{ run.run_id }}', '{{ run.status }}', '{{ run.pipeline_title|e }}')">{{ run.status }}</button>
+                        </td>
                         <td>
                             <div class="lineage-cell">
                                 {{ trigger_chip(run.trigger) }}
@@ -130,6 +135,8 @@
                                 {% if run.status in ['queued', 'running'] %}
                                 <button class="button warn tiny-button" onclick="cancelRun('{{ run.run_id }}')">Cancel</button>
                                 {% else %}
+                                <button class="button secondary tiny-button"
+                                        onclick="rerunRun('{{ run.run_id }}', '{{ run.pipeline_title|e }}')">Re-run</button>
                                 <button class="button ghost tiny-button" onclick="deleteRun('{{ run.run_id }}')">Delete</button>
                                 {% endif %}
                             </div>
@@ -147,4 +154,94 @@
         {% endif %}
     </section>
 </div>
+
+<div class="drawer-backdrop" id="run-logs-backdrop" hidden onclick="closeRunLogs()"></div>
+<aside class="side-drawer" id="run-logs-drawer" aria-hidden="true" aria-labelledby="run-logs-title">
+    <div class="drawer-header">
+        <div>
+            <div class="detail-label">Run logs</div>
+            <h2 class="panel-title" id="run-logs-title">&nbsp;</h2>
+            <p class="panel-copy" id="run-logs-meta"></p>
+        </div>
+        <div class="table-actions">
+            <a class="button ghost tiny-button" id="run-logs-open" href="#">Open run</a>
+            <button class="button ghost" type="button" onclick="closeRunLogs()">Close</button>
+        </div>
+    </div>
+    <pre class="code-block drawer-code" id="run-logs-content">Loading&hellip;</pre>
+</aside>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Opening the drawer keeps you on the list. Following the link to the run page
+// loses your filters and scroll position, which is the wrong trade when all you
+// want is "why did that one fail?".
+async function openRunLogs(runId, status, pipelineTitle) {
+    const drawer = document.getElementById("run-logs-drawer");
+    const content = document.getElementById("run-logs-content");
+    document.getElementById("run-logs-title").textContent = pipelineTitle || runId;
+    document.getElementById("run-logs-meta").textContent = `${runId} — ${status}`;
+    document.getElementById("run-logs-open").href = `/runs/${runId}`;
+    content.textContent = "Loading…";
+
+    document.getElementById("run-logs-backdrop").hidden = false;
+    drawer.classList.add("open");
+    drawer.setAttribute("aria-hidden", "false");
+    document.body.classList.add("drawer-open");
+
+    try {
+        const payload = await piplyRequest(`/api/runs/${runId}/logs`);
+        const lines = payload.logs || payload || [];
+        if (!lines.length) {
+            content.textContent = "This run recorded no logs.";
+            return;
+        }
+        // Oldest first here, unlike the run page: read top to bottom to follow
+        // what happened, and a multi-line traceback stays the right way up.
+        content.textContent = lines
+            .slice()
+            .reverse()
+            .map((item) => {
+                const at = (item.created_at || "").slice(11, 23);
+                const task = item.task_id ? ` [${item.task_id}]` : "";
+                return `${at}${task} ${item.message}`;
+            })
+            .join("\n");
+    } catch (error) {
+        content.textContent = `Could not load logs: ${error.message}`;
+    }
+}
+
+function closeRunLogs() {
+    const drawer = document.getElementById("run-logs-drawer");
+    drawer.classList.remove("open");
+    drawer.setAttribute("aria-hidden", "true");
+    document.getElementById("run-logs-backdrop").hidden = true;
+    document.body.classList.remove("drawer-open");
+}
+
+async function rerunRun(runId, pipelineTitle) {
+    if (!window.confirm(`Re-run ${pipelineTitle} from the start?`)) {
+        return;
+    }
+    try {
+        // startover, not resume: from this list the intent is "run it again",
+        // and resume would silently skip the tasks that already succeeded.
+        const run = await piplyRequest(`/api/runs/${runId}/retry`, {
+            method: "POST",
+            body: JSON.stringify({ mode: "startover" }),
+        });
+        window.location.href = `/runs/${run.id || run.run_id}`;
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        closeRunLogs();
+    }
+});
+</script>
 {% endblock %}

@@ -9,6 +9,7 @@ run.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -54,6 +55,15 @@ def sink():
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _facts(payload: dict) -> dict[str, str]:
+    """Read the card's fields whichever wire format it used."""
+    if payload.get("type") == "message":
+        card = payload["attachments"][0]["content"]
+        factset = next(item for item in card["body"] if item["type"] == "FactSet")
+        return {item["title"]: item["value"] for item in factset["facts"]}
+    return {item["name"]: item["value"] for item in payload["sections"][0]["facts"]}
 
 
 def _project(tmp_path: Path, base_url: str, *, extra_pipelines: str = "") -> Path:
@@ -110,10 +120,7 @@ def test_success_and_failure_route_to_different_destinations(tmp_path: Path, sin
     service.trigger_pipeline("ok_pipeline", wait=True)
 
     assert [item["path"] for item in receiver.received] == ["/chat"]
-    card = receiver.received[0]["body"]
-    assert card["@type"] == "MessageCard"
-    facts = {fact["name"]: fact["value"] for fact in card["sections"][0]["facts"]}
-    assert facts["Status"] == "success"
+    assert _facts(receiver.received[0]["body"])["Status"] == "success"
 
 
 def test_a_group_fans_out_to_every_destination(tmp_path: Path, sink) -> None:
@@ -125,7 +132,7 @@ def test_a_group_fans_out_to_every_destination(tmp_path: Path, sink) -> None:
     run = service.trigger_pipeline("bad_pipeline", wait=True)
 
     assert sorted(item["path"] for item in receiver.received) == ["/chat", "/prod"]
-    facts = {fact["name"]: fact["value"] for fact in receiver.received[0]["body"]["sections"][0]["facts"]}
+    facts = _facts(receiver.received[0]["body"])
     assert facts["Status"] == "failed"
     assert "exited with code 3" in facts["Error"]
     assert run.status == "failed"
@@ -279,9 +286,9 @@ def test_a_long_error_is_truncated_rather_than_dropped() -> None:
         error="x" * 5000,
     )
 
-    error_fact = [f for f in card["sections"][0]["facts"] if f["name"] == "Error"][0]
-    assert len(error_fact["value"]) < 1000
-    assert error_fact["value"].endswith("…")
+    error_value = _facts(card)["Error"]
+    assert len(error_value) < 1000
+    assert error_value.endswith("…")
 
 
 def test_delivery_attempts_are_recorded_for_the_ui(tmp_path: Path, sink) -> None:
@@ -316,3 +323,144 @@ def test_a_run_with_no_matching_destinations_is_still_recorded(tmp_path: Path, s
 
     assert [item["outcome"] for item in deliveries] == ["not_configured"]
     assert "no 'on_success' destinations" in deliveries[0]["detail"]
+
+
+def test_a_broken_ca_bundle_names_the_variable_at_fault(tmp_path: Path, monkeypatch) -> None:
+    """`[Errno 2] No such file or directory` on its own is unactionable.
+
+    A CA-bundle variable left pointing at a removed conda environment raises
+    `FileNotFoundError`, which is not an `httpx.HTTPError`, so it used to escape
+    the transport handler and arrive as a bare errno with no clue what was
+    missing.
+    """
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "not-here" / "cacert.pem"))
+    (tmp_path / "piply.yaml").write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: CA",
+                "workspace: .",
+                "notifications:",
+                "  teams:",
+                "    ops: {type: channel, webhook: 'https://example.com/hook'}",
+                "pipelines:",
+                "  p:",
+                "    notifications: {on_success: [ops]}",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=tmp_path / "piply.yaml")
+
+    with pytest.raises(RuntimeError) as error:
+        service.send_test_notification("ops")
+
+    message = str(error.value)
+    assert "FileNotFoundError" in message
+    assert "SSL_CERT_FILE" in message
+    # The webhook is the credential and must not appear even in a diagnostic.
+    assert "example.com/hook" not in message
+
+
+def test_a_transport_failure_names_the_exception_type(tmp_path: Path, monkeypatch) -> None:
+    """`request failed` alone does not distinguish DNS from TLS from a proxy.
+
+    Points at a closed loopback port rather than an unresolvable name: real DNS
+    would make the exception type depend on how fast the resolver fails.
+    """
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    (tmp_path / "piply.yaml").write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Unreachable",
+                "workspace: .",
+                "notifications:",
+                "  teams:",
+                f"    ops: {{type: channel, webhook: 'http://127.0.0.1:{closed_port}/hook'}}",
+                "pipelines:",
+                "  p:",
+                "    notifications: {on_success: [ops]}",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=tmp_path / "piply.yaml")
+
+    with pytest.raises(RuntimeError) as error:
+        service.send_test_notification("ops")
+
+    message = str(error.value)
+    # The class name is what distinguishes DNS from TLS from a refused connection.
+    assert "ConnectError" in message or "ConnectTimeout" in message
+    assert "Check the host is reachable" in message
+    assert str(closed_port) not in message
+
+
+def test_workflows_endpoints_get_an_adaptive_card(tmp_path: Path, sink) -> None:
+    """Office 365 connectors are retired; Workflows rejects a MessageCard.
+
+    The two wire formats are not interchangeable, so the shape is chosen per
+    destination rather than shared.
+    """
+    receiver, base_url = sink
+    (tmp_path / "piply.yaml").write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Formats",
+                "workspace: .",
+                "notifications:",
+                "  teams:",
+                f"    modern: {{type: channel, webhook: '{base_url}/workflows'}}",
+                f"    legacy: {{type: channel, webhook: '{base_url}/legacy', format: messagecard}}",
+                "pipelines:",
+                "  p:",
+                "    notifications: {on_success: [modern, legacy]}",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=tmp_path / "piply.yaml")
+    service.trigger_pipeline("p", wait=True)
+
+    by_path = {item["path"]: item["body"] for item in receiver.received}
+    modern = by_path["/workflows"]
+    # The envelope Power Automate expects, matching what a working curl sends.
+    assert modern["type"] == "message"
+    attachment = modern["attachments"][0]
+    assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
+    assert attachment["content"]["type"] == "AdaptiveCard"
+    facts = {f["title"]: f["value"] for f in attachment["content"]["body"][1]["facts"]}
+    assert facts["Status"] == "success"
+
+    # An explicit format still produces the old connector shape.
+    assert by_path["/legacy"]["@type"] == "MessageCard"
+
+
+def test_the_card_format_is_guessed_from_the_host() -> None:
+    """A connector URL keeps the old shape; anything else gets the new one."""
+    from piply.core.notifications import detect_card_format
+
+    assert detect_card_format("https://contoso.webhook.office.com/webhookb2/a/IncomingWebhook/b") == "messagecard"
+    assert detect_card_format("https://prod-12.westus.logic.azure.com:443/workflows/a/triggers/x") == "adaptive"
+
+
+def test_an_unknown_card_format_is_rejected() -> None:
+    """A typo must fail at load, not produce a card Teams silently drops."""
+    with pytest.raises(NotificationError, match="format must be one of"):
+        parse_notifications({"teams": {"a": {"webhook": "https://x.invalid/h", "format": "slack"}}})

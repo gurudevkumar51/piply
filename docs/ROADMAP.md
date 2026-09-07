@@ -19,6 +19,9 @@ An item that costs one of those to buy another is called out as such.
 
 Shipped in 0.3.x, so the roadmap does not relitigate them:
 
+process-tree cancellation · Adaptive Card alerts for Power Automate endpoints ·
+run logs and re-run from the runs list ·
+
 multi-file config with `include:` · Microsoft Teams notifications with an alerts
 panel · first-run database setup and the optional first admin · admin database
 management · sensor variables handed to the tasks they trigger · entity
@@ -46,7 +49,7 @@ an optional extra.
 it grows.**
 
 The config-size problem is solved (`include:`, shipped in 0.3.0) and outbound
-alerting is in (Teams, 0.3.0–0.3.1). What remains is the audit trail — "who
+alerting is in (Teams, 0.3.0–0.3.2). What remains is the audit trail — "who
 *did* what" — and the reliability gap where one flaky task still costs a whole
 run.
 
@@ -80,7 +83,7 @@ included files rather than one. Full design, including the rules table, is in
 Shipped as `include:`, with duplicate detection across files, both file
 names in every conflict error, and reload watching every included file.
 
-### 0.3.2 Audit log — **highest value**
+### 0.3.3 Audit log — **highest value**
 
 There is currently no record of who triggered, retried, cancelled, deleted, or
 reconfigured anything. For a tool sitting in front of healthcare or financial
@@ -102,7 +105,7 @@ existing prune settings.
 
 **Cost:** S · no new dependency · one table
 
-### 0.3.3 Task-level retry
+### 0.3.4 Task-level retry
 
 Pipeline-level `retry:` means one flaky vendor API forces a whole-run retry.
 Most real flakiness is one task.
@@ -120,7 +123,7 @@ Retries happen inside the task slot, so the DAG never sees the failure.
 
 **Cost:** S · no new dependency
 
-### 0.3.4 Session and token management
+### 0.3.5 Session and token management
 
 Follow-through on the auth work:
 
@@ -133,7 +136,7 @@ the permission model.
 
 **Cost:** M · no new dependency
 
-### 0.3.5 SLA tracking
+### 0.3.6 SLA tracking
 
 A pipeline that normally takes 10 minutes and is now at 55 is invisible until
 its hard timeout. `expected_duration: 15m` plus a warning state, reusing the
@@ -141,7 +144,7 @@ its hard timeout. `expected_duration: 15m` plus a warning state, reusing the
 
 **Cost:** S
 
-### 0.3.6 Polish
+### 0.3.7 Polish
 
 - **Dark mode.** The palette is already CSS variables; this is one media query
   and a toggle.
@@ -247,9 +250,9 @@ Recorded so it is not relitigated. Full reasoning in
 | --- | --- | --- |
 | Lightweight | Nothing pressing — 8 runtime dependencies | Hold the line: new backends stay extras |
 | Fast | Log table growth on long-lived installs | 0.4.3 log persistence, existing prune |
-| Secure | No audit trail; global API token | 0.3.2 audit log, 0.3.4 token management |
+| Secure | No audit trail; global API token | 0.3.3 audit log, 0.3.5 token management |
 | Easy to use | UI cannot supply run parameters | 0.5 declared `params:` |
 
-If only one thing gets built next, make it **0.3.2 audit logging**. It is small,
+If only one thing gets built next, make it **0.3.3 audit logging**. It is small,
 needs no new dependency, and it is the question every reviewer asks first once
 more than one person can press Run.

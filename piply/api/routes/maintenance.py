@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +39,8 @@ from piply.core.store import RunStore
 from piply.settings import SettingsError
 
 router = APIRouter(tags=["operations"])
+
+_LOGGER = logging.getLogger("piply.notifications")
 
 
 @router.post("/api/pipelines/{pipeline_id}/preview", response_model=dict[str, object])
@@ -292,6 +295,9 @@ def test_notification(request: Request, payload: NotificationTestRequest) -> dic
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - surfaced to the admin as a message
+        # Logged as well as returned: the server console otherwise shows only
+        # "502 Bad Gateway", which says nothing about why the post failed.
+        _LOGGER.warning("Teams test notification to '%s' failed: %s", payload.destination, exc)
         raise HTTPException(status_code=502, detail=f"Test notification failed: {exc}") from exc
 
 

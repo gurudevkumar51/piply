@@ -64,3 +64,10 @@ piply.db
 reports/
 sensor_inbox/
 artifacts/
+
+# Local configuration and secrets
+# `env/` above is a virtualenv directory, not this file: `.env` holds
+# PIPLY_DATABASE, PIPLY_SMTP_PASSWORD, and the Teams webhook URLs.
+.env
+.env.*
+!.env.example

@@ -95,9 +95,29 @@ notifications:
 | `type` | no | `channel` for a channel connector, `chat` for a group chat. Default `channel`. |
 | `webhook` | **yes** | Incoming webhook URL. Must resolve to `https://`. |
 | `timeout_seconds` | no | Per-request timeout. Default `10`, must be greater than zero. |
+| `format` | no | `adaptive` or `messagecard`. Guessed from the URL when omitted. |
 
-Both kinds accept the same payload, so a channel and a group chat are configured
-identically apart from `type`.
+### Two wire formats, and why it matters
+
+Microsoft **retired Office 365 connectors**. New webhooks are created through
+Power Automate ("Workflows"), and the two accept different payloads:
+
+| `format` | For | Shape |
+| --- | --- | --- |
+| `adaptive` *(default)* | Power Automate Workflows | Adaptive Card inside `{"type": "message", "attachments": [...]}` |
+| `messagecard` | Legacy connector URLs | The older `MessageCard` |
+
+**They are not interchangeable** — a Workflows endpoint rejects a MessageCard.
+Piply guesses from the host: a URL on `webhook.office.com` gets `messagecard`,
+anything else gets `adaptive`. Set `format:` explicitly to override the guess.
+
+If a curl like this works but Piply's alert does not, the format is the reason:
+
+```bash
+curl -H "Content-Type: application/json"   -d '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"type":"AdaptiveCard","body":[{"type":"TextBlock","text":"hello"}],"version":"1.4"}}]}'   "$WEBHOOK_URL"
+```
+
+That is the `adaptive` shape, and it is what Piply now sends by default.
 
 ### Getting a webhook URL
 
@@ -133,6 +153,40 @@ A bare list means **on failure**, matching `notify:`:
 
 A group name works anywhere a destination name does. Naming both a group and one
 of its members notifies that member **once**, not twice.
+
+### Which level should it go on?
+
+`notifications:` is accepted on a pipeline, a template, and a deployment. Pick
+the *widest* level where the answer is the same for everything under it.
+
+| Level | Use it when | Behaviour |
+| --- | --- | --- |
+| **Template** | Every deployment should alert the same people | Inherited by all of them — write it once |
+| **Deployment** | One tenant needs different destinations | **Replaces** the template's list for that deployment |
+| **Pipeline** | A standalone pipeline, not built from a template | Applies to that pipeline only |
+
+```yaml
+pipeline_templates:
+  scrape:
+    notifications:
+      on_failure: [ops]            # every deployment inherits this
+    tasks: { ... }
+
+pipeline_deployments:
+  alpha_scrape:
+    template: scrape               # -> alerts ops
+  beta_scrape:
+    template: scrape
+    notifications:
+      on_failure: [data_team]      # -> alerts data_team INSTEAD of ops
+```
+
+The deployment **replaces** rather than adds, following the ordinary
+[list-replaces rule](YAML_SPECIFICATION.md#8-templates-and-deployments). To
+alert both, list both: `on_failure: [ops, data_team]`, or use a group.
+
+**Start at the template.** With one deployment per tenant, putting it on each
+deployment means editing 29 places when the on-call channel changes.
 
 ---
 
@@ -255,6 +309,22 @@ you filled in: `on_success` and `on_failure` are separate.
 The `${VAR}` did not resolve. `piply validate` warns about this at load time.
 Check the variable is set in the environment Piply actually runs in — a
 `systemd` unit does not inherit your shell.
+
+**`FileNotFoundError: [Errno 2] No such file or directory`.**
+Not a Piply file — a TLS certificate bundle. One of `SSL_CERT_FILE`,
+`SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` is set in the server's
+environment and points at a path that no longer exists, commonly a removed conda
+environment or a path the service account cannot see. The message names the
+variable and its value. Fix or unset it and retry:
+
+```bash
+echo $SSL_CERT_FILE      # then unset it, or point it at a real bundle
+```
+
+**`request failed (ConnectError)`.**
+DNS or the network, not Teams. If a proxy is set in the server's environment the
+message says so — the webhook host has to be reachable from the machine Piply
+runs on, which is often not the machine you are browsing from.
 
 **`HTTP 400` from Teams.**
 Usually a revoked or mistyped connector URL. Recreate the connector.

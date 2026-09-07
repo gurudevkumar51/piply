@@ -70,6 +70,47 @@ a stale heartbeat alone cannot tell those apart.
 
 ---
 
+### Not running schedules on a development machine
+
+Opening a project locally otherwise starts whatever was due — usually last
+night's pipelines, against whatever database the `.env` points at.
+
+**Turn the scheduler off for the whole install**, which is the blunt and
+reliable option:
+
+```
+# .env on the development machine only
+PIPLY_SCHEDULER_ENABLED=false
+```
+
+The server still serves the UI, the API, and manual runs; nothing fires by
+itself. The startup log says so, and the header chip reads `scheduler offline`,
+so a quiet install is never mistaken for a broken one.
+
+`.env` is gitignored, so this stays on the machine you wrote it on. And the real
+environment wins over `.env`, so a server that exports
+`PIPLY_SCHEDULER_ENABLED=true` keeps its scheduler even if the file were ever
+deployed by accident.
+
+**Or disable individual pipelines per environment**, when some should still run:
+
+```yaml
+pipelines:
+  nightly_load:
+    enabled:
+      if: env == "dev"
+      then: false
+      else: true
+    schedule:
+      every: 15m
+```
+
+`env` falls back to `PIPLY_ENV`, so nothing else needs declaring. A disabled
+pipeline is still visible and can still be triggered by hand — it is only
+withheld from the scheduler.
+
+---
+
 ## 3. Trigger Queue
 
 Every non-inline trigger goes through a durable SQLite queue rather than

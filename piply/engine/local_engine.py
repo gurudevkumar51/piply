@@ -15,7 +15,7 @@ from piply.core.store import RunStore
 
 from .base import BaseEngine, CompletionCallback, LogCallback
 from .heartbeat import RunHeartbeat
-from .task_runner import TaskExecutionResult, TaskRunner
+from .task_runner import TaskExecutionResult, TaskRunner, terminate_process_tree
 
 
 def _task_sort_key(index_by_task_id: dict[str, int], task: TaskDefinition) -> tuple[int, int, str]:
@@ -669,8 +669,10 @@ class LocalEngine(BaseEngine):
         cancel_event.set()
         for process in processes:
             try:
-                if hasattr(process, "poll") and process.poll() is None:
-                    process.terminate()
-            except Exception:
+                if hasattr(process, "poll"):
+                    # The whole tree: a CLI task runs through a shell, so
+                    # signalling only the shell leaves the real work running.
+                    terminate_process_tree(process)
+            except Exception:  # noqa: BLE001 - one stubborn process must not stop the rest
                 continue
         return True

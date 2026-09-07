@@ -164,13 +164,34 @@ Laid out so the DAG is the first substantial thing on screen.
 4. **Manual command overrides** — edit a CLI command for one manual run.
 5. **Tasks** and **Recent runs**.
 
+### Why a task failed
+
+A failed `type: python` task records the full traceback as a single log entry,
+ending in the exception type and message. The task panel's status line and the
+run's error field show the summary — `KeyError: 'pre-flight'` — while the log
+entry has the file and line. Piply's own call frames are trimmed, so the first
+frame is your code.
+
+`type: cli` and script tasks surface whatever the process wrote to stderr, which
+for Python is the interpreter's own traceback.
+
 ### The task graph
 
 The graph uses the **full width** of the page. Clicking any task node opens the
 task panel beside it, showing the task id, type, status, duration, log count,
 dependencies, and the resolved command, plus actions — run just that task, copy
-the command, or filter the logs to it. Closing the panel returns the graph to
-full width, and the choice is remembered per browser.
+the command, or filter the logs to it.
+
+Three ways to close it, whichever is nearest to hand:
+
+- **Close** on the panel header
+- **Escape** — after any open drawer, which takes the first press
+- **Clicking the same node again**, which toggles it shut
+
+Closing clears the node selection too, so the highlighted node and the panel
+never disagree about what is being inspected. Clicking a *different* node keeps
+the panel open and switches focus. The graph returns to full width, and the
+choice is remembered per browser.
 
 ### Long task names
 
@@ -236,6 +257,18 @@ up a multi-level chain without leaving the page. A step whose run has since been
 pruned is shown dashed and greyed rather than being silently dropped.
 
 ---
+
+### Reading a run without leaving the list
+
+Click a run's **status** to open its full log beside the table. It reads oldest
+first, so a multi-line traceback is the right way up, and closing it — the
+button, the backdrop, or `Escape` — leaves your filters and scroll position
+intact. **Open run** in the drawer header goes to the full run page.
+
+**Re-run** appears on any finished run and starts it again from the beginning,
+then takes you to the new run. It is deliberately a start-over rather than a
+resume: from a list, "run it again" means all of it. Use the run page's task
+actions when you want to resume from a particular task instead.
 
 ## Run detail
 

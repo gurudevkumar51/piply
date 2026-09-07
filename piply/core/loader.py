@@ -408,6 +408,27 @@ def _unused_global_entity_warnings(
     return warnings
 
 
+#: Values a config boolean may use for false. Config values arrive as strings
+#: once a conditional has been evaluated, so plain truthiness is not enough.
+_FALSE_TEXT = frozenset({"false", "no", "off", "0", "none", "null", ""})
+
+
+def _parse_config_bool(raw_value: Any, label: str) -> bool:
+    """Interpret a config boolean, including one produced by a conditional."""
+    if isinstance(raw_value, bool):
+        return raw_value
+    if raw_value is None:
+        return False
+    if isinstance(raw_value, int | float):
+        return bool(raw_value)
+    text = str(raw_value).strip().lower()
+    if text in _FALSE_TEXT:
+        return False
+    if text in {"true", "yes", "on", "1"}:
+        return True
+    raise ConfigError(f"{label} must be true or false, not '{raw_value}'")
+
+
 def _parse_entities(raw_value: Any, label: str, env_values: dict[str, str]):
     """Parse entities after normal Piply string interpolation."""
     try:
@@ -1453,7 +1474,16 @@ def load_project(
             _expand_string(str(tag), pipeline_values)
             for tag in _ensure_list(raw_pipeline.get("tags"), f"Pipeline '{pipeline_id}' tags")
         )
-        enabled = bool(raw_pipeline.get("enabled", True))
+        # Conditionals were never applied here, and `bool(...)` made every
+        # result true anyway — a non-empty mapping is truthy, and so is the
+        # string "false". `enabled: {if: env == "dev", then: false}` therefore
+        # left the pipeline scheduled in every environment.
+        enabled_label = f"Pipeline '{pipeline_id}' enabled"
+        try:
+            raw_enabled = evaluate_value(raw_pipeline.get("enabled", True), pipeline_values, enabled_label)
+        except ConditionError as exc:
+            raise ConfigError(str(exc)) from exc
+        enabled = _parse_config_bool(raw_enabled, enabled_label)
         max_concurrent_runs = int(raw_pipeline.get("max_concurrent_runs", 1))
         if max_concurrent_runs < 1:
             raise ConfigError(f"Pipeline '{pipeline_id}' must have max_concurrent_runs greater than zero")

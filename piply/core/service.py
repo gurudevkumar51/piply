@@ -1631,7 +1631,7 @@ class PipelineService:
 
         results = send_alert(
             destinations,
-            build_alert(
+            lambda destination: build_alert(
                 title=pipeline.title,
                 pipeline_id=pipeline.pipeline_id,
                 status=run.status,
@@ -1641,6 +1641,7 @@ class PipelineService:
                 duration="unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s",
                 error=run.error,
                 run_url=self._run_url(run.run_id),
+                card_format=destination.card_format,
             ),
             on_log=_log,
         )
@@ -1812,10 +1813,45 @@ class PipelineService:
             raise ValueError("Only queued or running runs can be cancelled.")
 
         self.store.append_log(run_id, "Cancellation requested by user.", stream="stderr")
+        self._warn_about_uninterruptible_tasks(run)
         cancelled = self.engine.cancel(run_id)
         if run.status == "queued" or not cancelled:
             self.store.cancel_run(run_id)
         return self.store.get_run(run_id) or run
+
+    def _warn_about_uninterruptible_tasks(self, run: RunRecord) -> None:
+        """Say so when an in-flight task cannot actually be stopped.
+
+        A subprocess is killed with its whole tree, but Python offers no safe way
+        to interrupt a thread, so a `type: python` task using `function:` runs to
+        completion. Leaving that unsaid is why cancelling looks broken: the node
+        keeps its running dot and nothing explains why.
+        """
+        try:
+            pipeline = self.project.pipelines.get(run.pipeline_id)
+            if pipeline is None:
+                return
+            _, task_runs, _ = self.get_run(run.run_id)
+        except Exception:  # noqa: BLE001 - a warning must never break cancelling
+            return
+
+        stuck = [
+            item.task_id
+            for item in task_runs
+            if item.status == "running" and getattr(pipeline.tasks.get(item.task_id), "call", None)
+        ]
+        if not stuck:
+            return
+        self.store.append_log(
+            run.run_id,
+            (
+                f"{', '.join(stuck)} cannot be interrupted: a Python 'function:' task runs in a "
+                "thread, and Python has no safe way to stop one. It will finish first, and the run "
+                "stays 'running' until it does. Use 'type: cli' or a script path to make a task "
+                "cancellable."
+            ),
+            stream="stderr",
+        )
 
     def delete_run(self, run_id: str) -> None:
         """Delete one finished run from the runtime store."""
@@ -2157,7 +2193,7 @@ class PipelineService:
 
         results = send_alert(
             targets,
-            build_alert(
+            lambda destination: build_alert(
                 title="Piply test",
                 pipeline_id="-",
                 status="success",
@@ -2167,6 +2203,7 @@ class PipelineService:
                 duration="0.0s",
                 error=None,
                 run_url=self._run_url("test"),
+                card_format=destination.card_format,
             ),
         )
         for name, delivered, detail in results:

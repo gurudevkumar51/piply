@@ -15,9 +15,11 @@ it can post to the channel.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -28,6 +30,25 @@ _MAX_FIELD_CHARS = 800
 #: Deliberately short. A notification is not worth holding a run's completion
 #: path open for, and Teams either accepts a card quickly or not at all.
 DEFAULT_TIMEOUT_SECONDS = 10.0
+
+#: Adaptive Card colour names, which are keywords rather than hex values.
+_ADAPTIVE_COLOURS = {
+    "success": "Good",
+    "failed": "Attention",
+    "timed_out": "Warning",
+    "cancelled": "Default",
+}
+
+#: How the card is shaped on the wire.
+#:
+#: `adaptive` is the Power Automate "Workflows" format, which is what Microsoft
+#: directs you to now that Office 365 connectors are retired. `messagecard` is
+#: the older connector format. They are not interchangeable: a Workflows
+#: endpoint rejects a MessageCard.
+VALID_CARD_FORMATS = ("adaptive", "messagecard")
+
+#: Hosts that serve the legacy connector endpoints.
+_MESSAGECARD_HOSTS = ("webhook.office.com", "outlook.office.com", "outlook.office365.com")
 
 #: Teams' own accent colours, so failures actually look like failures.
 _STATUS_COLOURS = {
@@ -44,6 +65,17 @@ VALID_TEAMS_TYPES = ("channel", "chat")
 #: credential in the URL — but refusing plain http outright makes the feature
 #: impossible to exercise against a local stub.
 _LOCAL_PREFIXES = ("http://127.0.0.1", "http://localhost", "http://[::1]")
+
+
+def detect_card_format(webhook: str) -> str:
+    """Guess the payload shape a webhook expects, from its host.
+
+    Legacy connector URLs live on `webhook.office.com`; everything else is
+    assumed to be a Workflows endpoint, because that is what Microsoft issues
+    now. An explicit `format:` always wins over this guess.
+    """
+    host = urlparse(webhook).hostname or ""
+    return "messagecard" if any(host.endswith(name) for name in _MESSAGECARD_HOSTS) else "adaptive"
 
 
 def is_valid_webhook(value: str) -> bool:
@@ -63,6 +95,7 @@ class TeamsDestination:
     destination_type: str
     webhook: str
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    card_format: str = "adaptive"
 
     @property
     def configured(self) -> bool:
@@ -167,11 +200,19 @@ def parse_notifications(
         if timeout_seconds <= 0:
             raise NotificationError(f"{label}.timeout_seconds must be greater than zero")
 
+        card_format = raw_destination.get("format")
+        if card_format in (None, ""):
+            card_format = detect_card_format(webhook)
+        card_format = str(card_format).strip().lower()
+        if card_format not in VALID_CARD_FORMATS:
+            raise NotificationError(f"{label}.format must be one of: {', '.join(VALID_CARD_FORMATS)}")
+
         settings.destinations[str(name)] = TeamsDestination(
             name=str(name),
             destination_type=destination_type,
             webhook=webhook,
             timeout_seconds=timeout_seconds,
+            card_format=card_format,
         )
 
     raw_groups = raw_value.get("groups") or {}
@@ -268,13 +309,58 @@ def build_alert(
     duration: str,
     error: str | None = None,
     run_url: str | None = None,
+    card_format: str = "adaptive",
 ) -> dict[str, Any]:
-    """Build one standardised Teams card.
+    """Build one standardised Teams card in the requested wire format.
 
-    MessageCard rather than an Adaptive Card because it is the format both
-    incoming-webhook kinds accept — channel connectors and group chats — so one
-    payload works for every destination.
+    `adaptive` is an Adaptive Card wrapped in the `{"type": "message",
+    "attachments": [...]}` envelope that Power Automate Workflows expects — the
+    replacement for the retired Office 365 connectors. `messagecard` is the old
+    connector shape. A Workflows endpoint rejects a MessageCard, so the two are
+    not interchangeable and the format is chosen per destination.
     """
+    fields = [
+        ("Pipeline", f"{title} ({pipeline_id})"),
+        ("Status", status),
+        ("Run", run_id),
+        ("Trigger", trigger),
+        ("Tasks", tasks),
+        ("Duration", duration),
+    ]
+    if error:
+        fields.append(("Error", _truncate(error)))
+
+    if card_format == "adaptive":
+        body: list[dict[str, Any]] = [
+            {
+                "type": "TextBlock",
+                "text": f"{title} — {status}",
+                "weight": "Bolder",
+                "size": "Medium",
+                "color": _ADAPTIVE_COLOURS.get(status, "Default"),
+                "wrap": True,
+            },
+            {"type": "FactSet", "facts": [{"title": name, "value": value} for name, value in fields]},
+        ]
+        content: dict[str, Any] = {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.4",
+            "body": body,
+        }
+        if run_url:
+            content["actions"] = [{"type": "Action.OpenUrl", "title": "Open run in Piply", "url": run_url}]
+        return {
+            "type": "message",
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "contentUrl": None,
+                    "content": content,
+                }
+            ],
+        }
+
     facts = [
         {"name": "Pipeline", "value": f"{title} ({pipeline_id})"},
         {"name": "Status", "value": status},
@@ -305,6 +391,28 @@ def build_alert(
     return payload
 
 
+#: Environment variables that redirect TLS verification at a file or directory.
+#: A stale one — a removed conda environment, a service account that cannot see
+#: the path — is the usual cause of a FileNotFoundError from an HTTPS post.
+_CA_BUNDLE_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+
+
+def _transport_hint() -> str:
+    """Return a pointer at the likely cause, when the environment suggests one."""
+    broken = [
+        f"{name}={value}" for name in _CA_BUNDLE_VARS if (value := os.environ.get(name)) and not os.path.exists(value)
+    ]
+    if broken:
+        return (
+            "A certificate-authority path in this process's environment does not exist: "
+            + "; ".join(broken)
+            + ". Fix or unset it, then retry."
+        )
+    if any(os.environ.get(name) for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")):
+        return "A proxy is configured in this process's environment; check it can reach the webhook host."
+    return "Check the host is reachable from the server Piply runs on."
+
+
 async def _post_one(
     client: httpx.AsyncClient, destination: TeamsDestination, payload: dict[str, Any]
 ) -> tuple[str, bool, str]:
@@ -318,8 +426,14 @@ async def _post_one(
     except httpx.TimeoutException:
         return destination.name, False, f"timed out after {destination.timeout_seconds:g}s"
     except httpx.HTTPError as exc:
-        # str(exc) can contain the URL, and the URL is the credential.
-        return destination.name, False, f"request failed ({type(exc).__name__})"
+        # str(exc) can contain the URL, and the URL is the credential, so only
+        # the class name is reported. It is enough to tell DNS from TLS.
+        return destination.name, False, f"request failed ({type(exc).__name__}): {_transport_hint()}"
+    except OSError as exc:
+        # Not an httpx error, so it used to escape to the generic handler and
+        # arrive as a bare "[Errno 2] No such file or directory" with no clue
+        # what was missing. Overwhelmingly this is a CA bundle that is not there.
+        return destination.name, False, f"{type(exc).__name__}: {exc}. {_transport_hint()}"
 
     if response.status_code >= 400:
         detail = response.text.strip()[:200] or "no response body"
@@ -327,15 +441,18 @@ async def _post_one(
     return destination.name, True, ""
 
 
-async def _post_all(destinations: list[TeamsDestination], payload: dict[str, Any]) -> list[tuple[str, bool, str]]:
-    """Post to every destination concurrently."""
+async def _post_all(
+    destinations: list[TeamsDestination],
+    build: Callable[[TeamsDestination], dict[str, Any]],
+) -> list[tuple[str, bool, str]]:
+    """Post to every destination concurrently, each in its own format."""
     async with httpx.AsyncClient() as client:
-        return list(await asyncio.gather(*(_post_one(client, item, payload) for item in destinations)))
+        return list(await asyncio.gather(*(_post_one(client, item, build(item)) for item in destinations)))
 
 
 def send_alert(
     destinations: list[TeamsDestination],
-    payload: dict[str, Any],
+    payload: dict[str, Any] | Callable[[TeamsDestination], dict[str, Any]],
     *,
     on_log: Callable[[str, bool], None] | None = None,
 ) -> list[tuple[str, bool, str]]:
@@ -359,12 +476,18 @@ def send_alert(
     if not usable:
         return []
 
+    # Destinations can want different wire formats, so the payload is built per
+    # destination rather than shared.
+    build = payload if callable(payload) else (lambda _destination: payload)
     try:
-        results = _run_async(_post_all(usable, payload))
+        results = _run_async(_post_all(usable, build))
     except Exception as exc:  # noqa: BLE001 - delivery must never fail a run
+        # Naming the type matters: a bare `str(exc)` on an OSError is just
+        # "[Errno 2] No such file or directory", which says nothing at all.
+        detail = f"{type(exc).__name__}: {exc}. {_transport_hint()}"
         if on_log:
-            on_log(f"Teams notification failed: {type(exc).__name__}: {exc}", True)
-        return [(item.name, False, str(exc)) for item in usable]
+            on_log(f"Teams notification failed: {detail}", True)
+        return [(item.name, False, detail) for item in usable]
 
     if on_log:
         delivered = [name for name, ok, _ in results if ok]
