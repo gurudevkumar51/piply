@@ -310,15 +310,31 @@ The `${VAR}` did not resolve. `piply validate` warns about this at load time.
 Check the variable is set in the environment Piply actually runs in — a
 `systemd` unit does not inherit your shell.
 
-**`FileNotFoundError: [Errno 2] No such file or directory`.**
-Not a Piply file — a TLS certificate bundle. One of `SSL_CERT_FILE`,
-`SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` is set in the server's
-environment and points at a path that no longer exists, commonly a removed conda
-environment or a path the service account cannot see. The message names the
-variable and its value. Fix or unset it and retry:
+**`curl` works but Piply cannot reach the same webhook.**
+`curl` uses its own certificate store and ignores `SSL_CERT_FILE`; Python reads
+it. If that variable — or `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`
+— points at a file that no longer exists, every HTTPS post used to fail with
+`FileNotFoundError: [Errno 2] No such file or directory` before reaching the
+network. A rebuilt conda environment is the usual cause, because `conda
+activate` exports the variable into the environment.
+
+Piply now **ignores a certificate path that does not exist** and verifies
+against the system trust store, logging this once:
+
+```
+Ignoring a certificate-authority path that does not exist
+(SSL_CERT_FILE=/…/envs/py313/ssl/cacert.pem) and verifying against the system
+trust store instead. Fix or unset it to silence this.
+```
+
+Verification still happens — only the missing override is dropped. A path that
+*does* exist is always honoured, so a corporate CA bundle keeps working. Fix the
+environment anyway:
 
 ```bash
-echo $SSL_CERT_FILE      # then unset it, or point it at a real bundle
+echo $SSL_CERT_FILE                                            # is it really there?
+unset SSL_CERT_FILE                                            # or
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt   # or your platform's bundle
 ```
 
 **`request failed (ConnectError)`.**

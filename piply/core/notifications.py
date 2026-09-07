@@ -15,7 +15,9 @@ it can post to the channel.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import ssl
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -59,6 +61,8 @@ _STATUS_COLOURS = {
 }
 
 VALID_TEAMS_TYPES = ("channel", "chat")
+
+_LOGGER = logging.getLogger("piply.notifications")
 
 
 #: Loopback only. A Teams webhook is always https in production — it carries the
@@ -397,6 +401,55 @@ def build_alert(
 _CA_BUNDLE_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 
 
+#: Warned about once per process rather than once per alert.
+_ca_fallback_warned = False
+
+
+def _broken_ca_variables() -> list[str]:
+    """Return CA-bundle variables whose path does not exist."""
+    return [
+        f"{name}={value}" for name in _CA_BUNDLE_VARS if (value := os.environ.get(name)) and not os.path.exists(value)
+    ]
+
+
+def _verify_option() -> Any:
+    """Return what httpx should verify against.
+
+    `SSL_CERT_FILE` and friends are read by Python's TLS stack but ignored by
+    `curl`, which is why a webhook can work from a terminal and fail here. When
+    one of them points at a file that no longer exists — a conda environment
+    that was rebuilt, most often — every HTTPS post raises `FileNotFoundError`
+    before it reaches the network.
+
+    A path that does not exist cannot be a deliberate choice, so it is dropped
+    in favour of the platform's own trust store. Verification still happens;
+    only the missing override is ignored, and it is reported once so the
+    environment still gets fixed.
+
+    Built from the standard library rather than `certifi`: certifi arrives only
+    as a dependency of httpx, and importing something Piply does not declare is
+    exactly the packaging bug its own tests guard against.
+    """
+    global _ca_fallback_warned
+    broken = _broken_ca_variables()
+    if not broken:
+        return True
+
+    if not _ca_fallback_warned:
+        _ca_fallback_warned = True
+        _LOGGER.warning(
+            "Ignoring a certificate-authority path that does not exist (%s) and verifying "
+            "against the system trust store instead. Fix or unset it to silence this.",
+            "; ".join(broken),
+        )
+    try:
+        # `create_default_context` tolerates the bogus path — the hard failure
+        # came from httpx calling `load_verify_locations` on it explicitly.
+        return ssl.create_default_context()
+    except Exception:  # noqa: BLE001 - fall back to httpx's own default
+        return True
+
+
 def _transport_hint() -> str:
     """Return a pointer at the likely cause, when the environment suggests one."""
     broken = [
@@ -446,7 +499,7 @@ async def _post_all(
     build: Callable[[TeamsDestination], dict[str, Any]],
 ) -> list[tuple[str, bool, str]]:
     """Post to every destination concurrently, each in its own format."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=_verify_option()) as client:
         return list(await asyncio.gather(*(_post_one(client, item, build(item)) for item in destinations)))
 
 

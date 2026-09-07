@@ -9,6 +9,30 @@ rather than buried in the feature list.
 
 ---
 
+## 0.3.3 — 2026-09-06
+
+Two fixes, both reported from a live install. Every 0.3.2 config keeps working
+untouched.
+
+### Fixed
+
+- **A webhook that worked from `curl` could fail from Piply.** `curl` uses its
+  own certificate store; Python reads `SSL_CERT_FILE`, and a rebuilt conda
+  environment leaves it pointing at a bundle that is gone — so every HTTPS post
+  raised `FileNotFoundError` before reaching the network. A certificate path
+  that does not exist is now ignored in favour of the system trust store,
+  logged once. Verification still happens, and a path that *does* exist is
+  always honoured, so a corporate CA bundle is unaffected.
+- **The run-history tooltip on the pipelines page was cut off and covered its
+  own label.** The dots table clipped its contents, so hovering a dot on the
+  first or last row — the two most likely to be hovered — showed a tooltip with
+  its edges sliced away. It also opened upward, directly over the "Last 5 runs"
+  label it was describing. It now opens downward and is no longer clipped, and
+  the run id and full timestamp were moved into it, replacing the duplicate
+  browser tooltip that used to appear alongside.
+
+---
+
 ## 0.3.2 — 2026-09-06
 
 A fix release. Three of these were reported from a live install, and every

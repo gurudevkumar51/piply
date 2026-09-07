@@ -152,9 +152,8 @@ function renderRunHistory(pipeline) {
         return `
             <a class="run-dot ${escapeHtml(run.status)}"
                href="/runs/${escapeHtml(run.run_id)}"
-               title="${escapeHtml(run.status)} — ${escapeHtml(when)}"
-               aria-label="Run ${escapeHtml(run.run_id)}: ${escapeHtml(run.status)}, ${escapeHtml(ago)}">
-                <span class="run-dot-tip">${label}<br><span class="mono">${escapeHtml(run.run_id)}</span></span>
+               aria-label="Run ${escapeHtml(run.run_id)}: ${escapeHtml(run.status)}, ${escapeHtml(when)}">
+                <span class="run-dot-tip">${label}<br><span class="mono">${escapeHtml(run.run_id)}</span><br>${escapeHtml(when)}</span>
             </a>`;
     }).join("");
 

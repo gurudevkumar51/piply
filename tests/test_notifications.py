@@ -325,31 +325,70 @@ def test_a_run_with_no_matching_destinations_is_still_recorded(tmp_path: Path, s
     assert "no 'on_success' destinations" in deliveries[0]["detail"]
 
 
-def test_a_broken_ca_bundle_names_the_variable_at_fault(tmp_path: Path, monkeypatch) -> None:
-    """`[Errno 2] No such file or directory` on its own is unactionable.
+def test_a_broken_ca_path_is_ignored_rather_than_fatal(tmp_path: Path, monkeypatch, sink) -> None:
+    """`curl` ignores `SSL_CERT_FILE`; Python does not, and used to die on it.
 
-    A CA-bundle variable left pointing at a removed conda environment raises
-    `FileNotFoundError`, which is not an `httpx.HTTPError`, so it used to escape
-    the transport handler and arrive as a bare errno with no clue what was
-    missing.
+    A conda environment that was rebuilt leaves the variable pointing at a file
+    that is gone, and every HTTPS post then failed before reaching the network —
+    so the same webhook worked from a terminal and not from Piply.
     """
-    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "not-here" / "cacert.pem"))
+    import piply.core.notifications as notifications
+
+    monkeypatch.setattr(notifications, "_ca_fallback_warned", False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "gone" / "cacert.pem"))
+    receiver, base_url = sink
+    config = _project(tmp_path, base_url)
+    service = PipelineService(config_path=config, database_path=tmp_path / "runs.db")
+
+    run = service.trigger_pipeline("ok_pipeline", wait=True)
+
+    # Delivered, rather than dying on the missing bundle.
+    assert [item["path"] for item in receiver.received] == ["/chat"]
+    _, _, logs = service.get_run(run.run_id)
+    assert not [line for line in logs if "FileNotFoundError" in line.message]
+    assert run.status == "success"
+
+
+def test_a_valid_ca_path_is_left_alone(monkeypatch) -> None:
+    """Only a *missing* path is overridden; a real corporate bundle still wins."""
+    import certifi
+
+    import piply.core.notifications as notifications
+
+    monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
+    assert notifications._broken_ca_variables() == []
+    # True means "httpx's own default", which honours the environment.
+    assert notifications._verify_option() is True
+
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
+    assert notifications._verify_option() is True
+
+
+def test_a_broken_ca_variable_is_still_named_when_delivery_fails(tmp_path: Path, monkeypatch) -> None:
+    """The fallback keeps TLS working, but the environment still wants fixing.
+
+    So when delivery fails for some *other* reason, the diagnostic still points
+    at the misconfigured variable rather than leaving it to be discovered later.
+    """
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "gone" / "cacert.pem"))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+
     (tmp_path / "piply.yaml").write_text(
-        "\n".join(
-            [
-                'version: "1"',
-                "title: CA",
-                "workspace: .",
-                "notifications:",
-                "  teams:",
-                "    ops: {type: channel, webhook: 'https://example.com/hook'}",
-                "pipelines:",
-                "  p:",
-                "    notifications: {on_success: [ops]}",
-                "    tasks:",
-                "      t: {type: cli, command: echo hi}",
-            ]
-        ),
+        f"""version: "1"
+title: CA
+workspace: .
+notifications:
+  teams:
+    ops: {{type: channel, webhook: 'http://127.0.0.1:{closed_port}/hook'}}
+pipelines:
+  p:
+    notifications: {{on_success: [ops]}}
+    tasks:
+      t: {{type: cli, command: echo hi}}
+""",
         encoding="utf-8",
     )
 
@@ -359,10 +398,8 @@ def test_a_broken_ca_bundle_names_the_variable_at_fault(tmp_path: Path, monkeypa
         service.send_test_notification("ops")
 
     message = str(error.value)
-    assert "FileNotFoundError" in message
     assert "SSL_CERT_FILE" in message
-    # The webhook is the credential and must not appear even in a diagnostic.
-    assert "example.com/hook" not in message
+    assert str(closed_port) not in message
 
 
 def test_a_transport_failure_names_the_exception_type(tmp_path: Path, monkeypatch) -> None:

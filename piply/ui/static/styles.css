@@ -1430,12 +1430,16 @@ body.drawer-open {
     color: var(--muted);
 }
 
+/* Deliberately not `overflow: hidden`. That is the obvious way to keep the row
+   hover tint inside the rounded corners, but it also clips anything a row wants
+   to overflow — notably the run-dot tooltip, which got cut off on exactly the
+   first and last rows. Only the end rows need the radius, so they carry it
+   themselves and the container stays unclipped. */
 .pipeline-table {
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    overflow: hidden;
     background: #ffffff;
 }
 
@@ -1450,6 +1454,13 @@ body.drawer-open {
 
 .pipeline-row:first-child {
     border-top: none;
+    border-top-left-radius: var(--radius-md);
+    border-top-right-radius: var(--radius-md);
+}
+
+.pipeline-row:last-child {
+    border-bottom-left-radius: var(--radius-md);
+    border-bottom-right-radius: var(--radius-md);
 }
 
 .pipeline-row:hover {
@@ -1828,7 +1839,11 @@ body.drawer-open {
 
 .run-dot-tip {
     position: absolute;
-    bottom: calc(100% + 8px);
+    /* Below the dot, not above: the dots sit directly under their own
+       "LAST 5 RUNS" label, so an upward tooltip covers the very column it is
+       describing. Downward it overhangs the next row instead, which is
+       transient and click-through. */
+    top: calc(100% + 8px);
     left: 50%;
     transform: translateX(-50%);
     padding: 6px 9px;
@@ -1842,7 +1857,8 @@ body.drawer-open {
     visibility: hidden;
     transition: opacity 0.12s ease;
     pointer-events: none;
-    z-index: 4;
+    /* Above the neighbouring rows it overhangs, or it renders behind them. */
+    z-index: 20;
 }
 
 .run-dot:hover .run-dot-tip,
@@ -1872,12 +1888,6 @@ body.drawer-open {
 
     .run-history {
         margin-top: 0;
-    }
-
-    /* A tooltip anchored above would be clipped at the top of a stacked row. */
-    .run-dot-tip {
-        bottom: auto;
-        top: calc(100% + 8px);
     }
 }
 

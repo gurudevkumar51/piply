@@ -1100,7 +1100,7 @@ otherwise behave differently depending on which tenant happened to fire it.
 
 To make a downstream stage behave differently per tenant, give it its own
 deployment rather than relying on inheritance — see
-[Roadmap §0.4.1](ROADMAP.md) on concurrency pools for the related bottleneck.
+the [Roadmap](ROADMAP.md) on concurrency pools for the related bottleneck.
 
 ### It propagates through the whole chain
 

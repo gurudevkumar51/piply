@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -292,6 +293,38 @@ def test_pipelines_page_renders_clickable_run_dots(tmp_path: Path) -> None:
     assert [item["id"] for item in by_id["ok_flow"]["recent_runs"]] == list(reversed(passing))
     assert by_id["failing_flow"]["recent_runs"][0]["status"] == "failed"
     assert by_id["never_run"]["recent_runs"] == []
+
+
+def _css_rule(selector: str) -> str:
+    """The declarations of the first `selector { ... }` block in the stylesheet."""
+    css = (Path(__file__).resolve().parents[1] / "piply/ui/static/styles.css").read_text(encoding="utf-8")
+    match = re.search(r"(?<![\w.-])" + re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert match, f"{selector} not found in styles.css"
+    return match.group(1)
+
+
+def test_the_run_dot_tooltip_is_not_clipped_by_its_own_table() -> None:
+    """The tooltip must escape the table and point away from the label it explains.
+
+    Two separate things once broke it, and both are invisible in the markup. The
+    table clipped its children, so the tooltip was cut off on the first and last
+    rows — the two most likely to be hovered. And it was anchored above the dot,
+    which is exactly where that row's own "LAST 5 RUNS" label sits.
+    """
+    table = _css_rule(".pipeline-table")
+    tip = _css_rule(".run-dot-tip")
+
+    # `overflow: hidden` on the container clips the tooltip regardless of z-index.
+    assert "overflow" not in table, f"overflow on .pipeline-table clips the tooltip: {table!r}"
+    # The end rows carry the radius instead, or the hover tint bleeds past the corners.
+    assert "border-top-left-radius" in _css_rule(".pipeline-row:first-child")
+    assert "border-bottom-left-radius" in _css_rule(".pipeline-row:last-child")
+
+    # Anchored below the dot, not above it.
+    assert "top:" in tip and "bottom:" not in tip, f"tooltip should hang below the dot: {tip!r}"
+    # It overhangs the next row, so it must render over it and stay click-through.
+    assert "pointer-events: none" in tip
+    assert "z-index" in tip
 
 
 def test_pipeline_groups_are_collapsible(tmp_path: Path, monkeypatch) -> None:

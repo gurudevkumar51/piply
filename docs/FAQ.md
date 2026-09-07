@@ -1223,13 +1223,20 @@ Card inside `{"type": "message", "attachments": [...]}` and reject the older
 `messagecard` for URLs on `webhook.office.com`. Force it either way with
 `format: adaptive` or `format: messagecard` on the destination.
 
-### Send test fails with `[Errno 2] No such file or directory`.
+### The webhook works from `curl` but not from Piply.
 
-That is a TLS certificate bundle, not a Piply file. `SSL_CERT_FILE`,
-`SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` is set in the server's
-environment and points somewhere that does not exist — usually a conda
-environment that was removed. Piply names the offending variable and path in the
-error. Unset it, or point it at a real bundle.
+`curl` uses its own certificate store; Python reads `SSL_CERT_FILE`. If that
+variable points at a file that is gone — a rebuilt conda environment is the
+usual cause, since `conda activate` exports it — every HTTPS post from Piply
+failed before reaching the network.
+
+Piply now ignores a certificate path that does not exist and verifies against
+the system trust store, logging it once. A path that *does* exist is honoured,
+so a corporate CA bundle keeps working. Fix the environment anyway:
+
+```bash
+unset SSL_CERT_FILE
+```
 
 ### A Teams alert did not arrive. Where do I look?
 
