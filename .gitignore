@@ -40,6 +40,7 @@ logs/
 *.log
 
 # Testing
+.ruff_cache/
 .pytest_cache/
 .pytest_tmp/
 pytest_tmp*/
@@ -56,3 +57,17 @@ build_tmp/
 .prefect/
 piply-demo/*
 piply.db
+
+# Piply runtime state and demo output. `piply-demo/piply.yaml` sets
+# `workspace: .`, so running the demo writes these at the repository root.
+.piply/
+reports/
+sensor_inbox/
+artifacts/
+
+# Local configuration and secrets
+# `env/` above is a virtualenv directory, not this file: `.env` holds
+# PIPLY_DATABASE, PIPLY_SMTP_PASSWORD, and the Teams webhook URLs.
+.env
+.env.*
+!.env.example

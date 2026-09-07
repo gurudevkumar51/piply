@@ -125,21 +125,27 @@ exactly.
 
 ## What A Deployment Inherits
 
-Everything on the template, unless the deployment overrides it:
+Everything on the template, unless the deployment overrides it. **Every pipeline
+key is valid in both places** — there is no template-only key. What differs is
+*how* an override combines with the template's value:
 
-| Inherited | Overridable per deployment |
+| Key | When the deployment also sets it |
 | --- | --- |
-| `tasks` (deep-merged) | yes |
-| `variables` | yes, merged |
-| `env`, `env_file`, `env_files` | yes, merged |
-| `schedule` | yes |
-| `retry` | yes |
-| `timeout` | yes |
-| `execution`, `max_parallel_tasks`, `max_concurrent_runs` | yes |
-| `triggers_on_success` | yes |
-| `sensors` | yes |
-| `entities` | yes |
-| `tags`, `description`, `enabled` | yes |
+| `tasks` | **merged** — override one key of one task without restating it |
+| `variables` | **merged** — the template's other variables survive |
+| `env`, `env_file`, `env_files` | **merged** |
+| `retry`, `notify` | **merged** — set `attempts` alone and keep `mode` |
+| `timeout`, `execution`, `max_parallel_tasks`, `max_concurrent_runs` | replaced |
+| `description`, `enabled`, `title` | replaced |
+| `tags`, `triggers_on_success` | **replaced wholesale** — lists do not append |
+| `schedule` | merged, but see the warning below |
+| `sensors`, `entities` | merged by key |
+
+> ⚠️ **`schedule` merges, and `cron` beats `every`.** A template with `cron:` and
+> a deployment with `every:` produces a mapping holding both, and the parser
+> picks `cron` — so that deployment silently keeps the template's cron. The
+> reverse (`every:` on the template, `cron:` on the deployment) works fine.
+> Check with `piply plan`, which prints each deployment's effective schedule.
 
 Deployment-only keys:
 
@@ -190,3 +196,16 @@ purpose; `piply plan` also reports them as a warning.
 Downstream runs inherit the upstream deployment's variables and env. If the
 downstream is also deployed per tenant, give it its own deployment so its own
 values win where they are explicitly set.
+
+**A deployment's `schedule` seems to be ignored**
+See the `cron` / `every` warning above. `piply plan` prints the effective
+schedule for each deployment.
+
+**A deployment's `tags` lost the template's tags**
+Lists are replaced, not appended. Restate the full list on the deployment.
+
+**A downstream pipeline ignores the parent's `max_parallel_tasks` or `timeout`**
+That is by design. A child inherits *data* — variables, env, outputs — but keeps
+its own execution settings, so a shared downstream stage behaves the same
+whichever tenant triggered it. See
+[YAML Specification §9](YAML_SPECIFICATION.md#9-downstream-inheritance).

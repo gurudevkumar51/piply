@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import yaml
 
 from piply.pipeline.expander import (
+    EntityMap,
     ExpansionError,
     expand_task_templates,
     merge_entity_maps,
@@ -20,6 +21,7 @@ from piply.pipeline.expander import (
 )
 from piply.settings import load_settings
 
+from .conditions import ConditionError, evaluate_value
 from .models import (
     PipelineDefinition,
     ProjectDefinition,
@@ -27,6 +29,11 @@ from .models import (
     SensorDefinition,
     TaskDefinition,
     UpstreamFailureBehavior,
+)
+from .notifications import (
+    NotificationError,
+    parse_notifications,
+    parse_pipeline_notifications,
 )
 from .scheduling import CronSchedule, IntervalSchedule, ScheduleError, parse_interval
 from .secrets import load_secret_values, secret_env_aliases
@@ -58,6 +65,144 @@ def discover_config(start_dir: Path | None = None) -> Path:
     raise ConfigError(
         "Could not find a Piply config file. Looked for piply.yaml, piply.yml, and piply-demo/piply.yaml."
     )
+
+
+def _read_yaml_document(path: Path) -> dict[str, Any]:
+    """Read one YAML config file, naming the file in any error."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Could not parse '{path.name}': {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"The root of '{path.name}' must be a mapping")
+    return data
+
+
+#: Blocks whose *members* may be spread across files. Splitting the config is
+#: only useful if `pipelines:` can appear in several files, but merging two
+#: definitions of the same pipeline is never what anyone means — so recursion
+#: stops one level inside each of these, and a repeated member is an error.
+_MERGEABLE_PATHS = frozenset(
+    {
+        "",
+        "pipelines",
+        "jobs",
+        "pipeline_templates",
+        "pipeline_deployments",
+        "notifications",
+        "notifications.teams",
+        "notifications.groups",
+        "connections",
+        "entities",
+        "variables",
+        "defaults",
+        "secrets",
+    }
+)
+
+
+#: Patterns where `*` matches exactly one path segment. Splitting a pipeline's
+#: *blocks* across files is the point of `piply_sensor.yaml` — tasks in one file,
+#: sensors in another. Splitting a single block is not: two files both defining
+#: `tasks` for one pipeline stays an error, because merging them has no obvious
+#: reading.
+_MERGEABLE_PATTERNS = ("pipelines.*", "jobs.*")
+
+
+def _is_mergeable(dotted: str) -> bool:
+    """Whether members below this path may come from different files."""
+    if dotted in _MERGEABLE_PATHS:
+        return True
+    parts = dotted.split(".")
+    for pattern in _MERGEABLE_PATTERNS:
+        expected = pattern.split(".")
+        if len(expected) == len(parts) and all(
+            want == "*" or want == have for want, have in zip(expected, parts, strict=True)
+        ):
+            return True
+    return False
+
+
+def _record_origins(value: Any, source: Path, origins: dict[str, Path], dotted: str) -> None:
+    """Remember which file supplied a key, and its members."""
+    origins[dotted] = source
+    if _is_mergeable(dotted) and isinstance(value, dict):
+        for key, child in value.items():
+            _record_origins(child, source, origins, f"{dotted}.{key}")
+
+
+def _merge_included_document(
+    base: dict[str, Any],
+    incoming: dict[str, Any],
+    source: Path,
+    origins: dict[str, Path],
+    root: Path,
+    prefix: str = "",
+) -> None:
+    """Merge one included file into the combined config.
+
+    A key defined in two files is an **error**, never last-wins: silently
+    preferring one file would mean editing a pipeline and watching nothing
+    change, which is exactly the confusion splitting the config is meant to
+    remove. The error names both files and points at the pipeline, not at some
+    leaf field deep inside it.
+    """
+    for key, value in incoming.items():
+        dotted = f"{prefix}{key}"
+        if key not in base:
+            base[key] = value
+            # Record the members too, not just the container, or a later
+            # duplicate would be blamed on the root file instead of this one.
+            _record_origins(value, source, origins, dotted)
+            continue
+        existing = base[key]
+        if _is_mergeable(dotted) and isinstance(existing, dict) and isinstance(value, dict):
+            _merge_included_document(existing, value, source, origins, root, prefix=f"{dotted}.")
+            continue
+        # Absent from `origins` means it came from the root file.
+        first = origins.get(dotted, root)
+        raise ConfigError(f"'{dotted}' is defined in more than one config file: '{first.name}' and '{source.name}'")
+
+
+def load_raw_config(path: Path) -> tuple[dict[str, Any], list[Path]]:
+    """Read the root config plus anything it includes.
+
+    A config with no `include:` behaves exactly as it always has — the feature
+    is purely additive. Returns the merged mapping and every file that fed it,
+    so the caller can watch them all for changes.
+    """
+    raw_data = _read_yaml_document(path)
+    patterns = raw_data.pop("include", None)
+    if patterns in (None, "", False):
+        return raw_data, [path]
+
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not isinstance(patterns, list):
+        raise ConfigError("'include' must be a list of file paths or glob patterns")
+
+    sources = [path]
+    origins: dict[str, Path] = {}
+    for pattern in patterns:
+        text = str(pattern).strip()
+        if not text:
+            continue
+        # Sorted so the same set of files always merges in the same order, which
+        # keeps duplicate errors reproducible rather than filesystem-dependent.
+        matches = sorted(path.parent.glob(text))
+        if not matches:
+            raise ConfigError(f"include pattern '{text}' matched no files next to '{path.name}'")
+        for match in matches:
+            resolved = match.resolve()
+            if resolved == path.resolve() or resolved in sources:
+                continue
+            document = _read_yaml_document(resolved)
+            if "include" in document:
+                raise ConfigError(f"'{resolved.name}' uses 'include', which only the root config file may do.")
+            _merge_included_document(raw_data, document, resolved, origins, path)
+            sources.append(resolved)
+
+    return raw_data, sources
 
 
 def _expand_string(value: str, env_values: dict[str, str] | None = None) -> str:
@@ -195,15 +340,93 @@ def _normalize_pipeline_definitions(raw_data: dict[str, Any]) -> dict[str, dict[
     return pipeline_definitions
 
 
+def _render_variable_value(value: Any) -> str:
+    """Render a resolved variable as the string the rest of the loader expects."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    return str(value)
+
+
 def _parse_variables(raw_value: Any, label: str, env_values: dict[str, str]) -> dict[str, str]:
-    """Parse reusable config variables and allow earlier variables in later values."""
+    """Parse reusable config variables and allow earlier variables in later values.
+
+    A value may be conditional, either inline (``true if env == "dev" else false``)
+    or as an explicit ``{if:, then:, else:}`` mapping. Conditions see the
+    environment plus every variable defined before them, so ordering matters the
+    same way it already does for plain interpolation.
+    """
     raw_variables = _ensure_mapping(raw_value, label)
     variables: dict[str, str] = {}
     scoped_values = dict(env_values)
     for raw_key, raw_variable in raw_variables.items():
         key = str(raw_key)
-        variables[key] = _expand_string(str(raw_variable), scoped_values | variables)
+        context = scoped_values | variables
+        try:
+            resolved = evaluate_value(raw_variable, context, f"{label}.{key}")
+        except ConditionError as exc:
+            raise ConfigError(str(exc)) from exc
+        variables[key] = _expand_string(_render_variable_value(resolved), context)
     return variables
+
+
+def _unused_global_entity_warnings(
+    pipeline_id: str,
+    *,
+    raw_tasks: Any,
+    root_entities: EntityMap,
+    own_entities: EntityMap,
+) -> list[str]:
+    """Warn when a project-level entity expands a pipeline that never uses it.
+
+    A top-level `entities:` block applies to *every* pipeline. That is fine for
+    the pipeline it was written for and silently wrong for the rest: a nightly
+    cleanup job beside one entity-driven pipeline quietly runs three times, and
+    a summary email is sent three times, because the generated tasks are
+    identical apart from their ids. Nothing fails, so nobody notices.
+    """
+    inherited = [name for name in root_entities if name not in own_entities]
+    if not inherited or not isinstance(raw_tasks, dict) or not raw_tasks:
+        return []
+
+    # A task opting out entirely, or selecting dimensions by name, is a
+    # deliberate choice and never needs warning about.
+    referenced = repr(raw_tasks)
+    warnings: list[str] = []
+    for name in inherited:
+        if f"{{{name}}}" in referenced or f"{{{name}_value}}" in referenced:
+            continue
+        if any(isinstance(task, dict) and isinstance(task.get("entities"), list | bool) for task in raw_tasks.values()):
+            continue
+        count = len(root_entities[name])
+        warnings.append(
+            f"Pipeline '{pipeline_id}' is expanded {count}x by the project-level entity "
+            f"'{name}', but no task uses {{{name}}}. That runs identical tasks {count} times. "
+            f"Move the entity onto the pipelines that need it, or set 'entities: false' here."
+        )
+    return warnings
+
+
+#: Values a config boolean may use for false. Config values arrive as strings
+#: once a conditional has been evaluated, so plain truthiness is not enough.
+_FALSE_TEXT = frozenset({"false", "no", "off", "0", "none", "null", ""})
+
+
+def _parse_config_bool(raw_value: Any, label: str) -> bool:
+    """Interpret a config boolean, including one produced by a conditional."""
+    if isinstance(raw_value, bool):
+        return raw_value
+    if raw_value is None:
+        return False
+    if isinstance(raw_value, int | float):
+        return bool(raw_value)
+    text = str(raw_value).strip().lower()
+    if text in _FALSE_TEXT:
+        return False
+    if text in {"true", "yes", "on", "1"}:
+        return True
+    raise ConfigError(f"{label} must be true or false, not '{raw_value}'")
 
 
 def _parse_entities(raw_value: Any, label: str, env_values: dict[str, str]):
@@ -423,6 +646,40 @@ def _normalize_task_priority_suffixes(raw_tasks: dict[str, Any], pipeline_id: st
             raw_task.setdefault("priority", star_count)
         normalized[stripped] = raw_task
     return normalized
+
+
+def _parse_notify(raw_value: Any, pipeline_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Parse a pipeline ``notify`` block into failure and success recipients.
+
+    A bare list is the common case and means "on failure", because that is what
+    people actually want to be told about.
+    """
+    if raw_value in (None, "", False):
+        return (), ()
+
+    def _emails(value: Any, label: str) -> tuple[str, ...]:
+        if value in (None, "", False):
+            return ()
+        items = value if isinstance(value, list) else [value]
+        addresses: list[str] = []
+        for item in items:
+            address = str(item).strip()
+            if not address:
+                continue
+            if "@" not in address:
+                raise ConfigError(f"{label} contains an invalid email address '{address}'")
+            addresses.append(address)
+        return tuple(addresses)
+
+    label = f"Pipeline '{pipeline_id}' notify"
+    if isinstance(raw_value, list | str):
+        return _emails(raw_value, label), ()
+    if not isinstance(raw_value, dict):
+        raise ConfigError(f"{label} must be a list of addresses or a mapping")
+    return (
+        _emails(raw_value.get("on_failure"), f"{label}.on_failure"),
+        _emails(raw_value.get("on_success"), f"{label}.on_success"),
+    )
 
 
 def _parse_depends_on(raw_value: Any, label: str) -> tuple[str, ...]:
@@ -1068,7 +1325,12 @@ def _parse_task(
             kill_grace_period_seconds=kill_grace_period_seconds,
             run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
             artifact_paths=artifact_paths,
-            smtp_host=_expand_string(str(raw_task.get("smtp_host") or "localhost"), env_values),
+            # Left unset when absent, so the task inherits the central SMTP
+            # settings. Defaulting to localhost here would silently override
+            # them on every task.
+            smtp_host=(
+                None if raw_task.get("smtp_host") is None else _expand_string(str(raw_task["smtp_host"]), env_values)
+            ),
             smtp_port=int(raw_task.get("smtp_port") or 587),
             smtp_user=_expand_string(str(raw_task.get("smtp_user", "")), env_values) or None,
             smtp_password=_expand_string(str(raw_task.get("smtp_password", "")), env_values) or None,
@@ -1118,13 +1380,7 @@ def load_project(
     if not path.exists():
         raise ConfigError(f"Config file '{path}' does not exist")
 
-    try:
-        raw_data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"Could not parse '{path.name}': {exc}") from exc
-
-    if not isinstance(raw_data, dict):
-        raise ConfigError("The root of the config file must be a mapping")
+    raw_data, config_sources = load_raw_config(path)
 
     settings = load_settings(path)
     env_values = settings.env_values
@@ -1146,6 +1402,14 @@ def load_project(
     root_values = env_values | root_variables
 
     connections = _parse_connections(raw_data.get("connections"), root_values)
+    try:
+        # Expanded first so `webhook: ${TEAMS_PROD_WEBHOOK}` resolves from the
+        # environment and secrets files, never from a literal in the YAML.
+        notifications, notification_warnings = parse_notifications(
+            _expand_value(raw_data.get("notifications"), root_values), root_values
+        )
+    except NotificationError as exc:
+        raise ConfigError(str(exc)) from exc
     root_entities = _parse_entities(raw_data.get("entities"), "entities", root_values)
 
     default_python = _expand_string(str(defaults.get("python") or sys.executable), root_values)
@@ -1159,6 +1423,7 @@ def load_project(
     raw_pipelines = _normalize_pipeline_definitions(raw_data)
 
     pipelines: dict[str, PipelineDefinition] = {}
+    project_warnings: list[str] = list(notification_warnings)
     for pipeline_id, raw_pipeline in raw_pipelines.items():
         pipeline_variables = dict(root_variables)
         pipeline_variables.update(
@@ -1169,9 +1434,17 @@ def load_project(
             )
         )
         pipeline_values = root_values | pipeline_variables
-        pipeline_entities = merge_entity_maps(
-            root_entities,
-            _parse_entities(raw_pipeline.get("entities"), f"Pipeline '{pipeline_id}' entities", pipeline_values),
+        own_entities = _parse_entities(
+            raw_pipeline.get("entities"), f"Pipeline '{pipeline_id}' entities", pipeline_values
+        )
+        pipeline_entities = merge_entity_maps(root_entities, own_entities)
+        project_warnings.extend(
+            _unused_global_entity_warnings(
+                pipeline_id,
+                raw_tasks=raw_pipeline.get("tasks"),
+                root_entities=root_entities,
+                own_entities=own_entities,
+            )
         )
 
         schedule_timezone = _expand_string(str(raw_pipeline.get("timezone") or timezone_name), pipeline_values)
@@ -1201,7 +1474,16 @@ def load_project(
             _expand_string(str(tag), pipeline_values)
             for tag in _ensure_list(raw_pipeline.get("tags"), f"Pipeline '{pipeline_id}' tags")
         )
-        enabled = bool(raw_pipeline.get("enabled", True))
+        # Conditionals were never applied here, and `bool(...)` made every
+        # result true anyway — a non-empty mapping is truthy, and so is the
+        # string "false". `enabled: {if: env == "dev", then: false}` therefore
+        # left the pipeline scheduled in every environment.
+        enabled_label = f"Pipeline '{pipeline_id}' enabled"
+        try:
+            raw_enabled = evaluate_value(raw_pipeline.get("enabled", True), pipeline_values, enabled_label)
+        except ConditionError as exc:
+            raise ConfigError(str(exc)) from exc
+        enabled = _parse_config_bool(raw_enabled, enabled_label)
         max_concurrent_runs = int(raw_pipeline.get("max_concurrent_runs", 1))
         if max_concurrent_runs < 1:
             raise ConfigError(f"Pipeline '{pipeline_id}' must have max_concurrent_runs greater than zero")
@@ -1221,9 +1503,23 @@ def load_project(
         if raw_pipeline.get("env_file"):
             env_file_paths.append(str(raw_pipeline["env_file"]))
         for env_file_path in env_file_paths:
+            expanded_env_file = _expand_string(str(env_file_path), pipeline_values)
+            # A missing env file loads nothing rather than raising, because it is
+            # legitimately absent in some environments. Record it so `validate`
+            # and `plan` can say so: the silent version of this presents much
+            # later as "my credentials aren't set", which is hard to trace back.
+            resolved_env_file = Path(expanded_env_file)
+            if not resolved_env_file.is_absolute():
+                resolved_env_file = workspace / resolved_env_file
+            if not resolved_env_file.exists():
+                project_warnings.append(
+                    f"Pipeline '{pipeline_id}' env_file '{env_file_path}' was not found at "
+                    f"{resolved_env_file}. Paths resolve against workspace ('{workspace}'), "
+                    "not the config file. No variables were loaded from it."
+                )
             pipeline_env.update(
                 load_secret_values(
-                    {"backend": "file", "path": _expand_string(str(env_file_path), pipeline_values)},
+                    {"backend": "file", "path": expanded_env_file},
                     workspace=workspace,
                     env_values=pipeline_values,
                 )
@@ -1246,6 +1542,8 @@ def load_project(
             if isinstance(raw_task, dict)
             and "entities" in raw_task
             and raw_task.get("entities") not in (None, "", False)
+            # A list selects existing dimensions; only a mapping declares values.
+            and not isinstance(raw_task.get("entities"), list)
         }
         try:
             runtime_task_specs = expand_task_templates(
@@ -1275,6 +1573,9 @@ def load_project(
             task.template_id = task_spec.template_id if task_spec.template_id != task_spec.runtime_id else None
             task.entity_key = task_spec.entity_key
             task.entity_values = dict(task_spec.entity_values)
+            # An entity's '*' suffix raises the priority of the tasks generated
+            # for it, on top of whatever the task template already declared.
+            task.priority += task_spec.priority
             tasks[task_id] = task
 
         _validate_task_graph(pipeline_id, tasks)
@@ -1298,6 +1599,14 @@ def load_project(
         if pipeline_id in triggers_on_success:
             raise ConfigError(f"Pipeline '{pipeline_id}' cannot trigger itself on success")
 
+        notify_on_failure, notify_on_success = _parse_notify(raw_pipeline.get("notify"), pipeline_id)
+        try:
+            alert_on_failure, alert_on_success = parse_pipeline_notifications(
+                raw_pipeline.get("notifications"), pipeline_id
+            )
+        except NotificationError as exc:
+            raise ConfigError(str(exc)) from exc
+
         pipelines[pipeline_id] = PipelineDefinition(
             pipeline_id=pipeline_id,
             title=title,
@@ -1316,6 +1625,10 @@ def load_project(
             max_parallel_tasks=max_parallel_tasks,
             timeout_seconds=pipeline_timeout_seconds,
             triggers_on_success=triggers_on_success,
+            notify_on_failure=notify_on_failure,
+            notify_on_success=notify_on_success,
+            alert_on_failure=alert_on_failure,
+            alert_on_success=alert_on_success,
             retry_policy=retry_policy,
             sensors=sensors,
         )
@@ -1330,4 +1643,7 @@ def load_project(
         default_python=default_python,
         timezone_name=timezone_name,
         pipelines=pipelines,
+        config_sources=tuple(config_sources),
+        notifications=notifications,
+        warnings=tuple(project_warnings),
     )

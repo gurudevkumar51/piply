@@ -5,24 +5,305 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
-import io
 import json
+import logging
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
 from piply.core.context import RuntimeTaskContext
 from piply.core.models import TaskDefinition
 from piply.core.store import RunStore
+
+#: Per-thread capture buffers, consulted by the proxy installed on `sys.stdout`
+#: and `sys.stderr` while any Python task is running.
+_capture_bindings = threading.local()
+
+#: Guards installing and removing the proxy. `_capture_users` counts the threads
+#: currently capturing, so the last one out restores the real streams.
+_capture_lock = threading.Lock()
+_capture_users = 0
+_captured_streams: tuple[object, object] | None = None
+
+
+class _ThreadRoutedStream:
+    """Writes to the calling thread's capture buffer, or the real stream.
+
+    `contextlib.redirect_stdout` swaps the process-global `sys.stdout`, which is
+    wrong as soon as two Python tasks run at once: their enter/exit order
+    interleaves, so one task's output is recorded against another task's log and
+    the real stream is never put back. Routing per thread keeps each task's
+    output its own, and leaves anything else printing in the process — uvicorn's
+    logs, say — going where it always did.
+    """
+
+    def __init__(self, slot: str, real_stream) -> None:
+        self._slot = slot
+        self._real_stream = real_stream
+
+    def _target(self):
+        return getattr(_capture_bindings, self._slot, None) or self._real_stream
+
+    def write(self, text: str) -> int:
+        return self._target().write(text)
+
+    def writelines(self, lines) -> None:
+        self._target().writelines(lines)
+
+    def flush(self) -> None:
+        target = self._target()
+        # Flushing a StringIO is a no-op; only the real stream needs it.
+        if target is self._real_stream:
+            self._real_stream.flush()
+
+    def writable(self) -> bool:
+        return True
+
+    def __getattr__(self, name: str):
+        # `encoding`, `fileno`, `buffer`, and friends belong to the real stream.
+        return getattr(self._real_stream, name)
+
+
+#: Stream handlers retargeted at the proxy, and the stream each one had before.
+_retargeted_handlers: list[tuple[logging.StreamHandler, object]] = []
+
+
+def _existing_stream_handlers():
+    """Yield every `StreamHandler` currently attached anywhere."""
+    loggers = [logging.getLogger()]
+    loggers.extend(item for item in logging.Logger.manager.loggerDict.values() if isinstance(item, logging.Logger))
+    for logger in loggers:
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.StreamHandler):
+                yield handler
+
+
+def _retarget_log_handlers(replaced: tuple[object, object], proxies: tuple[object, object]) -> None:
+    """Point existing log handlers at the proxy for the duration of a task.
+
+    Redirecting `sys.stdout` alone is not enough for real code. A
+    `StreamHandler` resolves `sys.stderr` when it is **constructed** and keeps a
+    direct reference, so a module that calls `logging.basicConfig()` at import
+    time — which is how most production code is written — writes straight past
+    the proxy and its output never reaches the run log.
+
+    Handlers created *after* this point need no help: they resolve `sys.stderr`
+    while the proxy is installed. Nothing is added to the root logger, because a
+    root handler would make a later `logging.basicConfig()` silently do nothing.
+    """
+    old_stdout, old_stderr = replaced
+    new_stdout, new_stderr = proxies
+    for handler in _existing_stream_handlers():
+        stream = getattr(handler, "stream", None)
+        if stream is old_stderr:
+            _retargeted_handlers.append((handler, handler.setStream(new_stderr)))
+        elif stream is old_stdout:
+            _retargeted_handlers.append((handler, handler.setStream(new_stdout)))
+
+
+def _restore_log_handlers() -> None:
+    """Give every retargeted handler its original stream back."""
+    while _retargeted_handlers:
+        handler, original = _retargeted_handlers.pop()
+        handler.setStream(original)
+
+
+def _acquire_routing() -> None:
+    """Install the routing proxy, if this is the first capture in flight."""
+    global _capture_users, _captured_streams
+
+    with _capture_lock:
+        if _capture_users == 0:
+            # Remember exactly what was replaced. Restoring `sys.__stdout__`
+            # instead would fight pytest and anything else that legitimately
+            # wraps the stream.
+            _captured_streams = (sys.stdout, sys.stderr)
+            proxies = (
+                _ThreadRoutedStream("stdout", sys.stdout),
+                _ThreadRoutedStream("stderr", sys.stderr),
+            )
+            _retarget_log_handlers(_captured_streams, proxies)
+            sys.stdout, sys.stderr = proxies
+        _capture_users += 1
+
+
+def _release_routing() -> None:
+    """Put the real streams back, once the last capture has finished."""
+    global _capture_users, _captured_streams
+
+    with _capture_lock:
+        _capture_users -= 1
+        if _capture_users == 0 and _captured_streams is not None:
+            _restore_log_handlers()
+            sys.stdout, sys.stderr = _captured_streams
+            _captured_streams = None
+
+
+#: Piply's own package root, used to trim its frames off a task traceback.
+_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
+
+
+def _task_traceback(exc: BaseException) -> str:
+    """Format a task's traceback without Piply's own call frames.
+
+    The first frames are always `task_runner` dispatching into the callable.
+    They are noise to someone debugging their own extraction, and they push the
+    line that actually matters off the top of the panel.
+    """
+    frames = exc.__traceback__
+    while frames is not None:
+        filename = frames.tb_frame.f_code.co_filename
+        try:
+            inside_piply = str(Path(filename).resolve()).startswith(_PACKAGE_ROOT)
+        except OSError:  # pragma: no cover - unresolvable path, keep the frame
+            inside_piply = False
+        if not inside_piply:
+            break
+        frames = frames.tb_next
+    # A failure entirely inside Piply keeps its full traceback; trimming it to
+    # nothing would hide a real bug in the runner.
+    return "".join(traceback.format_exception(type(exc), exc, frames or exc.__traceback__)).rstrip()
+
+
+def terminate_process_tree(process, *, force: bool = False) -> None:
+    """Stop a process and everything it started.
+
+    `Popen.terminate()` signals only the direct child. CLI tasks run through a
+    shell by default, so terminating it leaves the real work running — and the
+    orphan keeps the stdout pipe open, so the runner waits for output that never
+    ends and the run never leaves `running`. Cancelling then appears to do
+    nothing at all.
+    """
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # Windows has no process groups to signal, and taskkill is always
+        # forceful, so the graceful/forceful distinction does not apply here.
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+        )
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL if force else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        # No process group — fall back to the child alone rather than give up.
+        process.kill() if force else process.terminate()
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """Return a one-line summary that names the exception type.
+
+    Several common exceptions stringify to something meaningless on their own:
+    `KeyError` gives just the key, `IndexError` gives just the index. Prefixing
+    the class name is the difference between `'pre-flight'` and
+    `KeyError: 'pre-flight'`.
+    """
+    detail = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {detail}" if detail else name
+
+
+class _StreamingLogSink:
+    """Emits each complete line as the task prints it, rather than at the end.
+
+    A long extraction that buffered its output until the task finished looked
+    identical to one that had hung: nothing to watch, no way to tell progress
+    from a stall. Subprocess tasks have always streamed line by line; this gives
+    Python callables the same behaviour.
+    """
+
+    def __init__(self, on_line: Callable[[str], None]) -> None:
+        self._on_line = on_line
+        self._pending = ""
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        with self._lock:
+            if self._closed:
+                return len(text)
+            self._pending += text
+            lines = self._pending.split("\n")
+            self._pending = lines.pop()
+        for line in lines:
+            self._on_line(line.rstrip("\r"))
+        return len(text)
+
+    def writelines(self, lines) -> None:
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        """No-op: lines are emitted as they complete, not on flush."""
+
+    def writable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        """Emit any trailing line that never ended in a newline, and stop.
+
+        Closing matters for a timed-out task: the thread cannot be killed, so
+        without this it would keep writing log lines against a task that has
+        already been reported as finished.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            trailing, self._pending = self._pending, ""
+        if trailing:
+            self._on_line(trailing.rstrip("\r"))
+
+
+class _OutputCapture:
+    """One task's claim on `print` output, released exactly once.
+
+    Used as a context manager on the thread running the task. A timed-out task
+    is abandoned on a daemon thread that cannot be killed, so `release` may also
+    be called from the waiting thread to stop that thread holding the process's
+    streams hostage; whichever happens second does nothing.
+    """
+
+    def __init__(self, stdout_buffer, stderr_buffer) -> None:
+        self._buffers = (stdout_buffer, stderr_buffer)
+        self._lock = threading.Lock()
+        self._holding = False
+
+    def __enter__(self) -> _OutputCapture:
+        _acquire_routing()
+        with self._lock:
+            self._holding = True
+        _capture_bindings.stdout, _capture_bindings.stderr = self._buffers
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        # Only the running thread can clear its own bindings. An abandoned
+        # thread keeps writing into a buffer nobody reads, which is what we want.
+        _capture_bindings.stdout = None
+        _capture_bindings.stderr = None
+        self.release()
+
+    def release(self) -> None:
+        """Give up this task's claim. Safe to call twice, or from any thread."""
+        with self._lock:
+            if not self._holding:
+                return
+            self._holding = False
+        _release_routing()
 
 
 @dataclass(slots=True)
@@ -161,6 +442,8 @@ class TaskRunner:
                 text=True,
                 bufsize=1,
                 shell=shell,
+                # Its own session on POSIX, so the whole tree can be signalled.
+                start_new_session=os.name != "nt",
             )
             if self.register_process is not None:
                 self.register_process(process)
@@ -196,18 +479,21 @@ class TaskRunner:
                         output_size += len(stripped_line.encode("utf-8")) + 1
                     self.emit(stripped_line, task_id=task_id)
 
+            cancelling = False
             while True:
                 _drain_queue()
 
                 if self.is_cancelled and self.is_cancelled() and process.poll() is None:
-                    process.terminate()
+                    self.emit("Cancelling: stopping the task process tree.", task_id=task_id)
+                    terminate_process_tree(process)
+                    cancelling = True
                 if deadline is not None and time.monotonic() >= deadline and process.poll() is None:
                     timed_out = True
                     self.emit(
                         f"Task timed out after {timeout_seconds} seconds; terminating process.",
                         task_id=task_id,
                     )
-                    process.terminate()
+                    terminate_process_tree(process)
                     try:
                         process.wait(timeout=kill_grace_period_seconds)
                     except subprocess.TimeoutExpired:
@@ -215,9 +501,9 @@ class TaskRunner:
                             f"Task did not stop within the {kill_grace_period_seconds}s kill grace period; killing it.",
                             task_id=task_id,
                         )
-                        process.kill()
+                        terminate_process_tree(process, force=True)
                     break
-                if process.poll() is not None and reader_done.is_set() and line_queue.empty():
+                if process.poll() is not None and ((reader_done.is_set() and line_queue.empty()) or cancelling):
                     break
                 time.sleep(0.02)
 
@@ -329,20 +615,27 @@ class TaskRunner:
             callable_object = getattr(callable_object, attribute_name)
         return callable_object
 
-    def _call_with_timeout(self, callable_object, task: TaskDefinition):
+    def _call_with_timeout(self, callable_object, task: TaskDefinition, stdout_buffer, stderr_buffer):
         """Invoke a callable, raising TimeoutError when the task timeout elapses.
 
         Python threads cannot be force-killed, so an over-running callable is
         abandoned on a daemon thread while the task itself is marked timed out.
+
+        Output capture is bound here rather than by the caller because it is
+        thread-scoped: with a timeout the callable runs on a worker thread, and a
+        binding made on the calling thread would not reach it.
         """
+        capture = _OutputCapture(stdout_buffer, stderr_buffer)
         if task.timeout_seconds is None:
-            return self._invoke_callable(callable_object, task)
+            with capture:
+                return self._invoke_callable(callable_object, task)
 
         box: dict[str, object] = {}
 
         def _invoke() -> None:
             try:
-                box["value"] = self._invoke_callable(callable_object, task)
+                with capture:
+                    box["value"] = self._invoke_callable(callable_object, task)
             except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
                 box["error"] = exc
 
@@ -350,6 +643,9 @@ class TaskRunner:
         worker.start()
         worker.join(timeout=task.timeout_seconds)
         if worker.is_alive():
+            # The thread cannot be killed, so drop its claim on the process
+            # streams rather than let a runaway task hold them indefinitely.
+            capture.release()
             raise TimeoutError(f"Task timed out after {task.timeout_seconds} seconds.")
         error = box.get("error")
         if isinstance(error, BaseException):
@@ -357,41 +653,40 @@ class TaskRunner:
         return box.get("value")
 
     def _run_python_call_task(self, task: TaskDefinition) -> TaskExecutionResult:
-        """Run one imported Python callable and capture its printed output."""
-        stdout_buffer = io.StringIO()
-        stderr_buffer = io.StringIO()
+        """Run one imported Python callable, streaming its printed output."""
+
+        def _emit(line: str) -> None:
+            self.emit(line, task_id=task.task_id)
+
+        # Both streams emit through the same sink, so stdout and stderr appear
+        # interleaved in the order the task actually produced them.
+        stdout_sink = _StreamingLogSink(_emit)
+        stderr_sink = _StreamingLogSink(_emit)
 
         try:
             callable_object = self._load_callable(task)
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                result = self._call_with_timeout(callable_object, task)
+            result = self._call_with_timeout(callable_object, task, stdout_sink, stderr_sink)
         except TimeoutError as exc:
-            for output in [stdout_buffer.getvalue().rstrip(), stderr_buffer.getvalue().rstrip()]:
-                for line in output.splitlines():
-                    self.emit(line, task_id=task.task_id)
+            stdout_sink.close()
+            stderr_sink.close()
             message = str(exc)
             self.emit(message, task_id=task.task_id)
             return TaskExecutionResult(status="timed_out", exit_code=None, error=message)
         except Exception as exc:
-            stdio_output = [
-                stdout_buffer.getvalue().rstrip(),
-                stderr_buffer.getvalue().rstrip(),
-            ]
-            for output in stdio_output:
-                if output:
-                    for line in output.splitlines():
-                        self.emit(line, task_id=task.task_id)
-            message = str(exc) or exc.__class__.__name__
-            self.emit(message, task_id=task.task_id)
+            stdout_sink.close()
+            stderr_sink.close()
+            # `str(KeyError("pre-flight"))` is just "'pre-flight'" — no type, no
+            # file, no line. On its own that tells you nothing about what broke.
+            #
+            # The traceback is emitted as a *single* entry rather than one line
+            # each: the log is displayed newest-first, so separate lines would
+            # render the traceback upside down.
+            message = _describe_exception(exc)
+            self.emit(_task_traceback(exc), task_id=task.task_id)
             return TaskExecutionResult(status="failed", error=message)
 
-        for output in [
-            stdout_buffer.getvalue().rstrip(),
-            stderr_buffer.getvalue().rstrip(),
-        ]:
-            if output:
-                for line in output.splitlines():
-                    self.emit(line, task_id=task.task_id)
+        stdout_sink.close()
+        stderr_sink.close()
 
         if self.is_cancelled and self.is_cancelled():
             self.emit("Task cancelled.", task_id=task.task_id)
@@ -471,37 +766,34 @@ class TaskRunner:
             return TaskExecutionResult(status="failed", error=message)
 
     def _run_email_task(self, task: TaskDefinition) -> TaskExecutionResult:
-        import smtplib
-        from email.message import EmailMessage
+        """Send one email, using central SMTP settings unless the task overrides them."""
+        from piply.core.mailer import build_message, load_smtp_settings, resolve_for_task, send_message
 
         if not task.email_to:
             message = "No recipients specified for email task."
             self.emit(message, task_id=task.task_id)
             return TaskExecutionResult(status="failed", error=message)
 
-        msg = EmailMessage()
-        msg.set_content(task.email_body or "")
-        msg["Subject"] = task.email_subject or "Piply Notification"
-        msg["From"] = task.smtp_user or "piply@localhost"
-        msg["To"] = ", ".join(task.email_to)
+        settings = resolve_for_task(load_smtp_settings(self.store), task)
+        if not settings.configured:
+            message = "No SMTP server is configured. Set one under Settings, or give this task its own smtp_host."
+            self.emit(message, task_id=task.task_id)
+            return TaskExecutionResult(status="failed", error=message)
 
+        subject = task.email_subject or "Piply Notification"
         try:
-            with smtplib.SMTP(task.smtp_host or "localhost", task.smtp_port) as server:
-                if task.smtp_user and task.smtp_password:
-                    server.starttls()
-                    server.login(task.smtp_user, task.smtp_password)
-                server.send_message(msg)
+            send_message(
+                settings,
+                build_message(settings, to=list(task.email_to), subject=subject, body=task.email_body or ""),
+            )
             if self.is_cancelled and self.is_cancelled():
                 self.emit("Task cancelled.", task_id=task.task_id)
                 return TaskExecutionResult(status="cancelled")
-            self.emit("Email sent successfully.", task_id=task.task_id)
+            self.emit(f"Email sent to {', '.join(task.email_to)} via {settings.host}.", task_id=task.task_id)
             return TaskExecutionResult(
                 status="success",
                 exit_code=0,
-                output={
-                    "to": list(task.email_to),
-                    "subject": task.email_subject or "Piply Notification",
-                },
+                output={"to": list(task.email_to), "subject": subject, "smtp_host": settings.host},
             )
         except Exception as exc:
             message = f"Failed to send email: {exc}"

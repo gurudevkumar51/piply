@@ -110,7 +110,8 @@ class RunStore:
                     parent_pipeline_id TEXT,
                     tenant_id TEXT,
                     owner_pid INTEGER,
-                    run_config TEXT
+                    run_config TEXT,
+                    actor TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS task_runs (
@@ -185,6 +186,33 @@ class RunStore:
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
                     poll_count INTEGER NOT NULL DEFAULT 0,
                     event_count INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                    id {autoincrement_pk},
+                    run_id TEXT,
+                    pipeline_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    destination TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    detail TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    last_login_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS user_permissions (
+                    username TEXT NOT NULL,
+                    pipeline_id TEXT NOT NULL,
+                    actions TEXT NOT NULL,
+                    PRIMARY KEY (username, pipeline_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS pipeline_overrides (
@@ -272,6 +300,10 @@ class RunStore:
                 connection.execute("ALTER TABLE runs ADD COLUMN owner_pid INTEGER")
             if "run_config" not in self._run_columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN run_config TEXT")
+            if "actor" not in self._run_columns:
+                # Who asked for this run. NULL for runs that predate the column
+                # and for anything the scheduler started on its own.
+                connection.execute("ALTER TABLE runs ADD COLUMN actor TEXT")
 
             if "priority" not in self._task_run_columns:
                 connection.execute("ALTER TABLE task_runs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
@@ -301,8 +333,13 @@ class RunStore:
         parent_pipeline_id: str | None = None,
         tenant_id: str | None = None,
         run_config: dict[str, object] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
-        """Insert one new run and its queued task records."""
+        """Insert one new run and its queued task records.
+
+        ``actor`` is the account that asked for the run, or None when the
+        scheduler or a sensor started it on its own.
+        """
         with self._lock, self._connect() as connection:
             run_id = uuid.uuid4().hex[:12]
             created_at = datetime.now(timezone.utc)
@@ -330,6 +367,7 @@ class RunStore:
                 "tenant_id": tenant_id,
                 "owner_pid": os.getpid(),
                 "run_config": None if run_config is None else json.dumps(run_config, default=str, sort_keys=True),
+                "actor": actor,
             }
 
             if "script_path" in self._run_columns:
@@ -668,6 +706,83 @@ class RunStore:
             )
             connection.commit()
 
+    def record_notification_delivery(
+        self,
+        *,
+        run_id: str | None,
+        pipeline_id: str,
+        channel: str,
+        destination: str,
+        outcome: str,
+        detail: str | None = None,
+    ) -> None:
+        """Record one delivery attempt so the UI can show what happened.
+
+        A run log line is not enough on its own: it is buried among task output,
+        and the cases that produce *no* line — nothing configured, the run's
+        status not matching the list — are exactly the ones people need to see.
+        """
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries
+                    (run_id, pipeline_id, channel, destination, outcome, detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    pipeline_id,
+                    channel,
+                    destination,
+                    outcome,
+                    detail,
+                    _to_iso(datetime.now(timezone.utc)),
+                ),
+            )
+            connection.commit()
+
+    def list_notification_deliveries(
+        self,
+        *,
+        run_id: str | None = None,
+        pipeline_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        """Return recent delivery attempts, newest first."""
+        conditions: list[str] = []
+        parameters: list[object] = []
+        if run_id:
+            conditions.append("run_id = ?")
+            parameters.append(run_id)
+        if pipeline_id:
+            conditions.append("pipeline_id = ?")
+            parameters.append(pipeline_id)
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(max(1, int(limit)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT run_id, pipeline_id, channel, destination, outcome, detail, created_at
+                FROM notification_deliveries
+                {where_clause}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "pipeline_id": row["pipeline_id"],
+                "channel": row["channel"],
+                "destination": row["destination"],
+                "outcome": row["outcome"],
+                "detail": row["detail"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     def list_sensor_health(self) -> list[dict[str, object]]:
         """Return the recorded health of every polled sensor."""
         with self._connect() as connection:
@@ -949,19 +1064,32 @@ class RunStore:
         pipeline_id: str | None = None,
         status: str | None = None,
         tenant_id: str | None = None,
+        trigger: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        sort: str = "started_desc",
         limit: int = 50,
     ) -> list[RunRecord]:
-        """List recent runs with optional pipeline and status filters."""
+        """List recent runs with optional filters and an explicit sort order.
+
+        ``status`` and ``trigger`` accept a comma-separated list so the UI can
+        offer multi-select without a second round trip.
+        """
         conditions: list[str] = []
         params: list[object] = []
         if pipeline_id:
             conditions.append("pipeline_id = ?")
             params.append(pipeline_id)
         if status:
-            conditions.append("status = ?")
-            params.append(status)
+            values = [item.strip() for item in str(status).split(",") if item.strip()]
+            if values:
+                conditions.append(f"status IN ({', '.join('?' for _ in values)})")
+                params.extend(values)
+        if trigger:
+            values = [item.strip() for item in str(trigger).split(",") if item.strip()]
+            if values:
+                conditions.append(f'"trigger" IN ({", ".join("?" for _ in values)})')
+                params.extend(values)
         if tenant_id:
             conditions.append("tenant_id = ?")
             params.append(tenant_id)
@@ -983,7 +1111,7 @@ class RunStore:
                 (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id AND task_runs.status = 'skipped') AS skipped_tasks
             FROM runs
             {where_clause}
-            ORDER BY COALESCE(runs.started_at, runs.created_at) DESC
+            ORDER BY {self._run_sort_clause(sort)}
             LIMIT ?
         """
         params.append(limit)
@@ -991,6 +1119,58 @@ class RunStore:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_run(row) for row in rows]
+
+    #: Sort keys the runs page offers, mapped to their ORDER BY clause.
+    RUN_SORTS = {
+        "started_desc": "COALESCE(runs.started_at, runs.created_at) DESC, runs.id DESC",
+        "started_asc": "COALESCE(runs.started_at, runs.created_at) ASC, runs.id ASC",
+        "pipeline": "runs.pipeline_title ASC, COALESCE(runs.started_at, runs.created_at) DESC",
+        "status": "runs.status ASC, COALESCE(runs.started_at, runs.created_at) DESC",
+        "trigger": '"trigger" ASC, COALESCE(runs.started_at, runs.created_at) DESC',
+    }
+
+    def _run_sort_clause(self, sort: str) -> str:
+        """Return a validated ORDER BY clause.
+
+        The value comes from a query string, so it is looked up rather than
+        interpolated, and an unknown key falls back to the default.
+        """
+        if sort in {"duration_desc", "duration_asc"}:
+            direction = "DESC" if sort == "duration_desc" else "ASC"
+            duration = self.dialect.epoch_diff("runs.finished_at", "runs.started_at")
+            # Unfinished runs have no duration; keep them out of the way.
+            return f"CASE WHEN runs.finished_at IS NULL THEN 1 ELSE 0 END, {duration} {direction}"
+        return self.RUN_SORTS.get(sort, self.RUN_SORTS["started_desc"])
+
+    def runs_by_ids(self, run_ids: list[str]) -> dict[str, dict[str, object]]:
+        """Return compact run records by id, for building lineage chains."""
+        if not run_ids:
+            return {}
+        unique = list(dict.fromkeys(run_ids))
+        placeholders = ", ".join("?" for _ in unique)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, pipeline_id, pipeline_title, status, "trigger", parent_run_id,
+                       parent_pipeline_id, started_at, created_at
+                FROM runs
+                WHERE id IN ({placeholders})
+                """,
+                unique,
+            ).fetchall()
+        return {
+            str(row["id"]): {
+                "run_id": row["id"],
+                "pipeline_id": row["pipeline_id"],
+                "pipeline_title": row["pipeline_title"],
+                "status": row["status"],
+                "trigger": row["trigger"],
+                "parent_run_id": row["parent_run_id"],
+                "parent_pipeline_id": row["parent_pipeline_id"],
+                "started_at": row["started_at"] or row["created_at"],
+            }
+            for row in rows
+        }
 
     def list_task_runs(self, run_id: str) -> list[TaskRunRecord]:
         """List task runs for one pipeline run in declared order."""
@@ -1057,10 +1237,16 @@ class RunStore:
         *,
         query: str | None = None,
         pipeline_id: str | None = None,
+        pipeline_ids: set[str] | None = None,
         task_id: str | None = None,
         limit: int = 300,
     ) -> list[LogRecord]:
-        """Search recent logs across runs with lightweight SQLite filters."""
+        """Search recent logs across runs with lightweight SQLite filters.
+
+        ``pipeline_ids`` restricts the search to a set of pipelines, which is
+        how the API limits results to what the caller is allowed to read. An
+        empty set matches nothing rather than everything.
+        """
         conditions: list[str] = []
         params: list[object] = []
         if query:
@@ -1069,6 +1255,12 @@ class RunStore:
         if pipeline_id:
             conditions.append("runs.pipeline_id = ?")
             params.append(pipeline_id)
+        if pipeline_ids is not None:
+            if not pipeline_ids:
+                return []
+            ordered = sorted(pipeline_ids)
+            conditions.append(f"runs.pipeline_id IN ({', '.join('?' for _ in ordered)})")
+            params.extend(ordered)
         if task_id:
             conditions.append("logs.task_id = ?")
             params.append(task_id)
@@ -1251,11 +1443,6 @@ class RunStore:
             row = connection.execute("SELECT COALESCE(MAX(id), 0) AS cursor FROM logs").fetchone()
         return int(row["cursor"] or 0)
 
-    def get_latest_run_for_pipeline(self, pipeline_id: str) -> RunRecord | None:
-        """Return the most recent run for one pipeline."""
-        runs = self.list_runs(pipeline_id=pipeline_id, limit=1)
-        return runs[0] if runs else None
-
     def latest_runs_by_pipeline(self) -> dict[str, RunRecord]:
         """Return the newest run for every pipeline using a single scan."""
         with self._connect() as connection:
@@ -1279,6 +1466,41 @@ class RunStore:
                 """
             ).fetchall()
         return {str(row["pipeline_id"]): self._row_to_run(row) for row in rows}
+
+    def recent_runs_by_pipeline(self, limit: int = 5) -> dict[str, list[RunRecord]]:
+        """Return the newest ``limit`` runs for every pipeline, newest first.
+
+        One windowed query rather than one per pipeline, so the listing page
+        cost does not grow with the number of pipelines.
+        """
+        capped = max(1, limit)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT
+                        runs.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY runs.pipeline_id
+                            ORDER BY COALESCE(runs.started_at, runs.created_at) DESC, runs.id DESC
+                        ) AS recency,
+                        (SELECT COUNT(*) FROM logs WHERE logs.run_id = runs.id) AS log_count,
+                        (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id) AS task_count,
+                        (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id AND task_runs.status = 'success') AS successful_tasks,
+                        (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id AND task_runs.status IN ('failed', 'timed_out')) AS failed_tasks,
+                        (SELECT COUNT(*) FROM task_runs WHERE task_runs.run_id = runs.id AND task_runs.status = 'skipped') AS skipped_tasks
+                    FROM runs
+                ) AS ranked
+                WHERE ranked.recency <= ?
+                ORDER BY ranked.pipeline_id ASC, ranked.recency ASC
+                """,
+                (capped,),
+            ).fetchall()
+
+        grouped: dict[str, list[RunRecord]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["pipeline_id"]), []).append(self._row_to_run(row))
+        return grouped
 
     def task_states_for_runs(self, run_ids: list[str]) -> dict[str, dict[str, str]]:
         """Return {run_id: {task_id: status}} for the supplied runs in one query."""
@@ -1327,13 +1549,6 @@ class RunStore:
                 (pipeline_id, _to_iso(scheduled_for)),
             ).fetchone()
         return self._row_to_run(row) if row else None
-
-    def get_latest_task_states_for_pipeline(self, pipeline_id: str) -> dict[str, str]:
-        """Return the latest known task status map for one pipeline."""
-        latest_run = self.get_latest_run_for_pipeline(pipeline_id)
-        if latest_run is None:
-            return {}
-        return {task.task_id: task.status for task in self.list_task_runs(latest_run.run_id)}
 
     def count_running_runs(self, pipeline_id: str | None = None) -> int:
         """Count active pipeline runs globally or per pipeline."""
@@ -1554,6 +1769,93 @@ class RunStore:
             source.raw.backup(destination_connection)
         return target
 
+    #: Every table the runtime owns, in an order that satisfies the foreign keys
+    #: on ``runs(id)``. Used when copying a store to another backend.
+    MIGRATION_TABLES = (
+        "runs",
+        "task_runs",
+        "logs",
+        "task_outputs",
+        "task_artifacts",
+        "sensor_health",
+        "users",
+        "user_permissions",
+        "pipeline_overrides",
+        "meta",
+        "trigger_queue",
+        "sensor_state",
+        "notification_deliveries",
+    )
+
+    #: Tables whose primary key is generated by the backend.
+    _IDENTITY_TABLES = ("task_runs", "logs", "task_artifacts", "trigger_queue", "notification_deliveries")
+
+    def copy_into(self, target: RunStore, *, batch_size: int = 500) -> dict[str, int]:
+        """Copy every table into another store, returning rows written per table.
+
+        Used by ``piply migrate-db`` to move a SQLite runtime onto PostgreSQL.
+        Rows keep their original ids so run history, retry chains, and parent
+        links all survive; the target's identity sequences are realigned
+        afterwards so the next insert does not collide.
+
+        The target must be empty. Merging two histories would have to invent a
+        conflict-resolution policy for duplicate run ids, and silently picking
+        one is worse than refusing.
+        """
+        if target.dialect.name == self.dialect.name and target.location == self.location:
+            raise ValueError("The source and target databases are the same.")
+
+        existing = target.row_counts()
+        occupied = {table: count for table, count in existing.items() if count}
+        if occupied:
+            summary = ", ".join(f"{table}={count}" for table, count in sorted(occupied.items()))
+            raise ValueError(
+                f"The target database already contains data ({summary}). "
+                "Migrate into an empty database, or drop the existing Piply tables first."
+            )
+
+        copied: dict[str, int] = {}
+        for table in self.MIGRATION_TABLES:
+            with self._connect() as source:
+                rows = source.execute(f"SELECT * FROM {self._quote(table)}").fetchall()  # noqa: S608 - fixed table list
+            if not rows:
+                copied[table] = 0
+                continue
+
+            columns = list(rows[0].keys())
+            quoted = ", ".join(self._quote(column) for column in columns)
+            placeholders = ", ".join("?" for _ in columns)
+            statement = f"INSERT INTO {self._quote(table)} ({quoted}) VALUES ({placeholders})"  # noqa: S608
+
+            written = 0
+            with target._lock, target._connect() as destination:
+                for start in range(0, len(rows), batch_size):
+                    for row in rows[start : start + batch_size]:
+                        destination.execute(statement, [row[column] for column in columns])
+                    written += len(rows[start : start + batch_size])
+                destination.commit()
+            copied[table] = written
+
+        with target._lock, target._connect() as destination:
+            for table in self._IDENTITY_TABLES:
+                target.dialect.resync_identity(destination, table)
+            destination.commit()
+        return copied
+
+    @staticmethod
+    def _quote(identifier: str) -> str:
+        """Quote an identifier so reserved words such as `trigger` stay usable."""
+        return f'"{identifier}"'
+
+    def row_counts(self) -> dict[str, int]:
+        """Return the number of rows in each runtime table."""
+        counts: dict[str, int] = {}
+        with self._connect() as connection:
+            for table in self.MIGRATION_TABLES:
+                row = connection.execute(f"SELECT COUNT(*) AS count FROM {self._quote(table)}").fetchone()  # noqa: S608
+                counts[table] = int(row["count"] or 0)
+        return counts
+
     def database_size_bytes(self) -> int:
         """Return the on-disk size of the runtime database.
 
@@ -1688,6 +1990,41 @@ class RunStore:
             )
             connection.commit()
         return cursor.rowcount > 0
+
+    def pending_queue_item(self, pipeline_id: str) -> TriggerQueueRecord | None:
+        """Return the oldest still-queued trigger for a pipeline, if any.
+
+        Used by the run page to say why a downstream pipeline has not started:
+        a queued item carries the reason it was passed over.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM trigger_queue
+                WHERE pipeline_id = ? AND status = 'queued'
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (pipeline_id,),
+            ).fetchone()
+        return None if row is None else self._row_to_queue_record(row)
+
+    def record_queue_skip(self, queue_id: int, reason: str) -> bool:
+        """Record why a queued trigger was passed over, leaving it queued.
+
+        Returns whether the reason changed. A blocked pipeline is re-evaluated
+        on every scheduler tick, so callers use this to log the reason once per
+        change instead of once every ten seconds.
+        """
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT error FROM trigger_queue WHERE id = ?", (queue_id,)).fetchone()
+            if row is None:
+                return False
+            if (row["error"] or "") == reason:
+                return False
+            connection.execute("UPDATE trigger_queue SET error = ? WHERE id = ?", (reason, queue_id))
+            connection.commit()
+        return True
 
     def mark_queue_failed(self, queue_id: int, error: str) -> None:
         """Mark one trigger event as failed after an unrecoverable dispatch error."""
@@ -1949,6 +2286,142 @@ class RunStore:
             rows = connection.execute("SELECT pipeline_id FROM pipeline_overrides WHERE paused = 1").fetchall()
         return {row["pipeline_id"] for row in rows}
 
+    # --- Users and permissions ---------------------------------------------
+
+    def count_users(self) -> int:
+        """Return how many accounts exist."""
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+        return int(row["count"] or 0)
+
+    def upsert_user(
+        self,
+        username: str,
+        *,
+        password_hash: str | None = None,
+        role: str | None = None,
+        is_active: bool | None = None,
+    ) -> None:
+        """Create or update one account, leaving omitted fields untouched."""
+        now = _to_iso(datetime.now(timezone.utc))
+        with self._lock, self._connect() as connection:
+            existing = connection.execute("SELECT username FROM users WHERE username = ?", (username,)).fetchone()
+            if existing is None:
+                if password_hash is None:
+                    raise ValueError("A new user needs a password.")
+                connection.execute(
+                    """
+                    INSERT INTO users (username, password_hash, role, is_active, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (username, password_hash, role or "user", 1 if is_active is None else int(is_active), now),
+                )
+            else:
+                assignments: list[str] = []
+                params: list[object] = []
+                if password_hash is not None:
+                    assignments.append("password_hash = ?")
+                    params.append(password_hash)
+                if role is not None:
+                    assignments.append("role = ?")
+                    params.append(role)
+                if is_active is not None:
+                    assignments.append("is_active = ?")
+                    params.append(int(is_active))
+                if assignments:
+                    params.append(username)
+                    connection.execute(
+                        f"UPDATE users SET {', '.join(assignments)} WHERE username = ?",
+                        params,
+                    )
+            connection.commit()
+
+    def get_user_record(self, username: str) -> dict[str, object] | None:
+        """Return one account row including its password hash."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT username, password_hash, role, is_active, created_at, last_login_at "
+                "FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+            if row is None:
+                return None
+            grants = connection.execute(
+                "SELECT pipeline_id, actions FROM user_permissions WHERE username = ?",
+                (username,),
+            ).fetchall()
+        return {
+            "username": row["username"],
+            "password_hash": row["password_hash"],
+            "role": row["role"],
+            "is_active": bool(row["is_active"]),
+            "created_at": row["created_at"],
+            "last_login_at": row["last_login_at"],
+            "permissions": {str(grant["pipeline_id"]): frozenset(str(grant["actions"]).split(",")) for grant in grants},
+        }
+
+    def list_user_records(self) -> list[dict[str, object]]:
+        """Return every account with its grants, without password hashes."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT username, role, is_active, created_at, last_login_at FROM users ORDER BY username ASC"
+            ).fetchall()
+            grants = connection.execute("SELECT username, pipeline_id, actions FROM user_permissions").fetchall()
+
+        by_user: dict[str, dict[str, frozenset[str]]] = {}
+        for grant in grants:
+            by_user.setdefault(str(grant["username"]), {})[str(grant["pipeline_id"])] = frozenset(
+                str(grant["actions"]).split(",")
+            )
+        return [
+            {
+                "username": row["username"],
+                "role": row["role"],
+                "is_active": bool(row["is_active"]),
+                "created_at": row["created_at"],
+                "last_login_at": row["last_login_at"],
+                "permissions": by_user.get(str(row["username"]), {}),
+            }
+            for row in rows
+        ]
+
+    def delete_user(self, username: str) -> bool:
+        """Remove one account and every grant it held."""
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM user_permissions WHERE username = ?", (username,))
+            cursor = connection.execute("DELETE FROM users WHERE username = ?", (username,))
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def touch_user_login(self, username: str) -> None:
+        """Record a successful sign-in."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_login_at = ? WHERE username = ?",
+                (_to_iso(datetime.now(timezone.utc)), username),
+            )
+            connection.commit()
+
+    def set_user_permission(self, username: str, pipeline_id: str, actions: frozenset[str]) -> None:
+        """Grant or clear one pipeline permission for a user."""
+        with self._lock, self._connect() as connection:
+            if not actions:
+                connection.execute(
+                    "DELETE FROM user_permissions WHERE username = ? AND pipeline_id = ?",
+                    (username, pipeline_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO user_permissions (username, pipeline_id, actions)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(username, pipeline_id)
+                    DO UPDATE SET actions = excluded.actions
+                    """,
+                    (username, pipeline_id, ",".join(sorted(actions))),
+                )
+            connection.commit()
+
     def set_meta(self, key: str, value: str) -> None:
         """Persist one metadata key used by the scheduler."""
         with self._lock, self._connect() as connection:
@@ -2019,6 +2492,7 @@ class RunStore:
             parent_run_id=row["parent_run_id"] if "parent_run_id" in row.keys() else None,
             parent_pipeline_id=row["parent_pipeline_id"] if "parent_pipeline_id" in row.keys() else None,
             tenant_id=row["tenant_id"] if "tenant_id" in row.keys() else None,
+            actor=row["actor"] if "actor" in row.keys() else None,
         )
 
     def _row_to_task_run(self, row: sqlite3.Row) -> TaskRunRecord:

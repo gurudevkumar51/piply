@@ -77,9 +77,12 @@ def test_every_ui_page_renders(tmp_path: Path) -> None:
             assert "text/html" in response.headers["content-type"], page
 
 
-def test_pipelines_page_groups_deployments_of_one_template(tmp_path: Path) -> None:
+def test_pipelines_page_groups_deployments_of_one_template(tmp_path: Path, monkeypatch) -> None:
     """Deployments of a shared template are grouped rather than listed alphabetically."""
     config_path = _project(tmp_path)
+    # A configured database, as any install has after first-run setup; without
+    # one an empty install is redirected to the setup page instead.
+    monkeypatch.setenv("PIPLY_DATABASE", str(tmp_path / "piply.db"))
     PipelineService(config_path=config_path)
 
     with TestClient(create_app(str(config_path))) as client:
@@ -155,3 +158,281 @@ def test_preview_endpoint_backs_the_execution_preview_ui(tmp_path: Path) -> None
     assert payload["stages"] == [["ingest"]]
     assert payload["tasks"][0]["priority"] == 1
     assert "ingest acme" in payload["tasks"][0]["command"]
+
+
+RUN_HISTORY_CONFIG = "\n".join(
+    [
+        'version: "1"',
+        "title: Run History Test",
+        "workspace: workspace",
+        "pipelines:",
+        "  ok_flow:",
+        "    tasks:",
+        "      main: {type: cli, command: python -c \"print('ok')\"}",
+        "  failing_flow:",
+        "    tasks:",
+        '      main: {type: cli, command: python -c "import sys; sys.exit(3)"}',
+        "  never_run:",
+        "    tasks:",
+        "      main: {type: cli, command: echo hi}",
+    ]
+)
+
+
+def test_recent_runs_are_capped_and_newest_first(tmp_path: Path) -> None:
+    """Each pipeline carries its last N runs, newest first, in one query."""
+    config_path = _project(tmp_path, RUN_HISTORY_CONFIG)
+    service = PipelineService(config_path=config_path)
+
+    created = [service.trigger_pipeline("ok_flow", wait=True).run_id for _ in range(7)]
+    service.trigger_pipeline("failing_flow", wait=True)
+
+    summaries = {item.pipeline_id: item for item in service.list_pipelines()}
+
+    # Capped at the configured history count, newest first.
+    history = summaries["ok_flow"].recent_runs
+    assert len(history) == service.settings.pipeline_run_history_count == 5
+    assert [run.run_id for run in history] == list(reversed(created))[:5]
+
+    # The newest of those is also the summary's last_run, from the same query.
+    assert summaries["ok_flow"].last_run is not None
+    assert summaries["ok_flow"].last_run.run_id == history[0].run_id
+
+    # Status travels with each dot, so colour comes from real data.
+    assert {run.status for run in history} == {"success"}
+    assert summaries["failing_flow"].recent_runs[0].status == "failed"
+
+    # A pipeline that has never run gets an empty history rather than an error.
+    assert summaries["never_run"].recent_runs == ()
+    assert summaries["never_run"].last_run is None
+
+
+def test_run_history_does_not_add_queries_per_pipeline(tmp_path: Path) -> None:
+    """The listing query count stays constant as pipelines are added.
+
+    The dots come from the same windowed query that supplies the latest run, so
+    showing five runs each must not reintroduce an N+1.
+    """
+    import threading
+    from contextlib import contextmanager
+
+    import piply.core.store as store_mod
+
+    def count_queries(pipeline_count: int) -> int:
+        body = ['version: "1"', "title: Scaling Test", "workspace: workspace", "pipelines:"]
+        for index in range(pipeline_count):
+            body += [f"  flow_{index}:", "    tasks:", "      main: {type: cli, command: echo hi}"]
+        project = tmp_path / f"p{pipeline_count}"
+        project.mkdir()
+        (project / "workspace").mkdir()
+        config_path = project / "piply.yaml"
+        config_path.write_text("\n".join(body), encoding="utf-8")
+
+        service = PipelineService(config_path=config_path)
+        for index in range(pipeline_count):
+            service.trigger_pipeline(f"flow_{index}", wait=True)
+
+        statements: list[str] = []
+        original = store_mod.RunStore._connect
+        # `_connect` is patched on the class, so every RunStore in the process is
+        # counted — including a scheduler thread left running by another test.
+        # Only this thread's queries are the ones under measurement.
+        counting_thread = threading.get_ident()
+
+        @contextmanager
+        def counting(self):
+            with original(self) as connection:
+                real = connection.execute
+
+                def wrapped(sql, parameters=()):
+                    if threading.get_ident() == counting_thread:
+                        statements.append(sql)
+                    return real(sql, parameters)
+
+                connection.execute = wrapped  # type: ignore[method-assign]
+                yield connection
+
+        store_mod.RunStore._connect = counting
+        try:
+            summaries = service.list_pipelines()
+        finally:
+            store_mod.RunStore._connect = original
+
+        assert len(summaries) == pipeline_count
+        assert all(item.recent_runs for item in summaries)
+        return len(statements)
+
+    small = count_queries(2)
+    large = count_queries(10)
+
+    # Five times the pipelines, the same number of queries.
+    assert small == large, f"{small} queries for 2 pipelines, {large} for 10"
+
+
+def test_pipelines_page_renders_clickable_run_dots(tmp_path: Path) -> None:
+    """Every dot is a link to its own run page."""
+    config_path = _project(tmp_path, RUN_HISTORY_CONFIG)
+    service = PipelineService(config_path=config_path)
+    passing = [service.trigger_pipeline("ok_flow", wait=True).run_id for _ in range(2)]
+    failing = service.trigger_pipeline("failing_flow", wait=True).run_id
+
+    with TestClient(create_app(str(config_path))) as client:
+        body = client.get("/pipelines").text
+        payload = client.get("/api/pipelines").json()
+
+    # The template ships the run history and the renderer that draws it.
+    assert "renderRunHistory" in body
+    assert 'class="run-dot' in body
+    assert "/runs/${escapeHtml(run.run_id)}" in body
+    for run_id in [*passing, failing]:
+        assert run_id in body, f"{run_id} missing from the page payload"
+
+    # The API exposes the same history, with the status each dot is coloured by.
+    by_id = {item["pipeline_id"]: item for item in payload}
+    assert [item["id"] for item in by_id["ok_flow"]["recent_runs"]] == list(reversed(passing))
+    assert by_id["failing_flow"]["recent_runs"][0]["status"] == "failed"
+    assert by_id["never_run"]["recent_runs"] == []
+
+
+def test_pipeline_groups_are_collapsible(tmp_path: Path, monkeypatch) -> None:
+    """Template groups can be collapsed, and the choice survives a re-render.
+
+    With one template deployed per tenant a group holds a row per tenant, so the
+    page becomes a wall of near-identical entries. The page ships the pieces that
+    make collapsing work: a per-group toggle, bulk controls, persisted state, and
+    a summary that stays readable once the rows are hidden.
+    """
+    config_path = _project(tmp_path)
+    monkeypatch.setenv("PIPLY_DATABASE", str(tmp_path / "piply.db"))
+    PipelineService(config_path=config_path)
+
+    with TestClient(create_app(str(config_path))) as client:
+        body = client.get("/pipelines").text
+
+    # Each group renders a real button, so it is keyboard reachable.
+    assert "togglePipelineGroup(" in body
+    assert 'class="collapse-toggle"' in body
+    assert 'data-group-id="' in body
+    assert "collapsible-body" in body
+
+    # Bulk controls, and the storage key that makes the choice persist.
+    assert "setAllPipelineGroups(true)" in body
+    assert "setAllPipelineGroups(false)" in body
+    assert "piply.collapsedPipelineGroups" in body
+
+    # A collapsed group still reports what is inside it.
+    assert "groupSummary(" in body
+    assert "group-stat" in body
+
+    # Searching must force groups open, or a match hides behind a collapsed header.
+    assert "!needle && collapsedPipelineGroups.has(groupId)" in body
+
+
+def test_dag_labels_are_measured_and_shortened(tmp_path: Path) -> None:
+    """Long entity task names must not spill outside their node box.
+
+    SVG text neither wraps nor clips, so `payer_claim_status_dashboard / Extract`
+    used to paint straight across the node border and over the edges. The fix has
+    three parts and all three matter, so all three are pinned here.
+    """
+    config_path = _project(tmp_path)
+    PipelineService(config_path=config_path)
+
+    with TestClient(create_app(str(config_path))) as client:
+        script = client.get("/static/dag.js").text
+
+    # 1. Labels are measured and shortened to the node's width.
+    assert "function shortenLabel" in script
+    assert "getComputedTextLength" in script
+
+    # 2. Measuring before the web font loads produces labels that fit the
+    #    fallback metrics and overflow once IBM Plex Mono arrives.
+    assert "document.fonts.ready.then(fitAll)" in script
+
+    # 3. Identifiers differ at both ends, so the middle is dropped and the full
+    #    value stays reachable on hover.
+    assert '"middle"' in script
+    assert 'createElementNS("http://www.w3.org/2000/svg", "title")' in script
+
+    # An entity task's id restates its title, so it is dropped rather than
+    # shown twice in shortened form.
+    assert "titleRestatesId" in script
+
+
+def test_runs_page_offers_logs_from_the_status_and_a_rerun_action(tmp_path: Path) -> None:
+    """Answering "why did that fail?" should not cost you the list you were on.
+
+    The status opens the run's logs in place, and a finished run can be started
+    again without first navigating into it.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Runs Page",
+                "workspace: .",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # No explicit database: the shared fixture points both this service and the
+    # app at the same one, so the run is visible to the page.
+    service = PipelineService(config_path=config_path)
+    run = service.trigger_pipeline("flow", wait=True)
+
+    with TestClient(create_app(str(config_path))) as client:
+        page = client.get("/runs")
+        assert page.status_code == 200
+        # The status is a control, not just a label.
+        assert f"openRunLogs('{run.run_id}'" in page.text
+        # A finished run can be started again from the list.
+        assert f"rerunRun('{run.run_id}'" in page.text
+        assert 'id="run-logs-drawer"' in page.text
+
+        # The endpoints those controls call actually work.
+        logs = client.get(f"/api/runs/{run.run_id}/logs")
+        assert logs.status_code == 200
+
+        again = client.post(f"/api/runs/{run.run_id}/retry", json={"mode": "startover"})
+        assert again.status_code == 200
+        assert again.json()["id"] != run.run_id
+
+
+def test_the_task_focus_panel_can_be_closed(tmp_path: Path) -> None:
+    """Opening the panel from a node click needs a way back to a full-width graph."""
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Focus",
+                "workspace: .",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      extract: {type: cli, command: echo hi}",
+                "      load: {type: cli, command: echo bye, depends_on: [extract]}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path)
+    run = service.trigger_pipeline("flow", wait=True)
+
+    with TestClient(create_app(str(config_path))) as client:
+        run_page = client.get(f"/runs/{run.run_id}").text
+        pipeline_page = client.get("/pipelines/flow").text
+
+    for page, closer in ((run_page, "closeTaskFocus"), (pipeline_page, "closePipelineFocus")):
+        # A visible control on the panel itself, not only in the toolbar.
+        assert f'onclick="{closer}()"' in page
+        assert f"function {closer}()" in page
+        # Escape closes it, but only once any drawer on top has been dismissed.
+        assert 'if (event.key !== "Escape")' in page

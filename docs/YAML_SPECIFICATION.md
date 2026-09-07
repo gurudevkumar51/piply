@@ -55,9 +55,155 @@ missing variable is visible in the command preview and reported by `piply plan`.
 `run_if` is the one exception: its `{name}` placeholders are resolved at
 execution time, not load time, so values are substituted as quoted literals.
 
+### Conditional values
+
+A `variables` value may choose between two options. This is the same tiny
+evaluator that powers `run_if` — not an expression language.
+
+```yaml
+variables:
+  stage: dev
+
+  # Inline ternary
+  active_browser: true if stage == "dev" else false
+  headless: false if stage == "dev" else true
+
+  # Explicit mapping. Preferred for anything non-trivial: it cannot be
+  # confused with prose, and it reads better in review.
+  workers:
+    if: stage == "prod"
+    then: 8
+    else: 2
+```
+
+**What a condition can see**, in order of precedence: variables defined earlier
+in the same block, then pipeline and deployment variables, then `.env` values
+and environment variables. `env` is a built-in that falls back to `PIPLY_ENV`
+when nothing else defines it, so `env == "dev"` works without declaring it.
+
+**Supported**: literals, names, `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`,
+`not in`, `and`, `or`, `not`, list literals, and `A if C else B`.
+
+**Not supported**: function calls, attribute access, arithmetic, comprehensions,
+lambdas, imports. Anything else raises a `ConfigError` at load time rather than
+silently producing a wrong value.
+
+**Type handling.** Config values are strings, so comparisons are
+YAML-friendly: `"true" == true` holds, `"8" > 3` holds, and `true`/`false`/
+`null` may be written in YAML's lower case. The result is stored as a string,
+so `true` becomes `"true"`.
+
+**Prose is safe.** A value is only treated as a condition when it parses as a
+ternary. `message: run if you can else walk` stays a literal string.
+
+**Quoting the inline form.** A ternary whose first operand is a quoted string
+has to be quoted *as a whole*, because YAML otherwise reads the opening quote as
+the start of the value and fails on the rest of the line:
+
+```yaml
+# Wrong — YAML error pointing at the line above, which is confusing
+share: "/mnt/237share/inbound" if env == "prod" else "dev_inbox"
+
+# Right — the whole expression is one string
+share: '"/mnt/237share/inbound" if env == "prod" else "dev_inbox"'
+
+# Better — the mapping form has no quoting trap at all
+share:
+  if: env == "prod"
+  then: /mnt/237share/inbound
+  else: dev_inbox
+```
+
+Ordering matters, exactly as it already does for `{placeholder}` interpolation:
+a condition can only see variables declared above it.
+
 ---
 
 ## 3. Top-Level Keys
+
+### `include`
+
+Splits the config across several files. Only the **root** file may use it.
+
+```yaml
+# piply.yaml — project settings and the deployment inventory stay here
+version: "1"
+title: Claims Platform
+workspace: .
+include:
+  - piply_pipe.yaml
+  - piply_alert.yaml
+  - config/templates/*.yaml       # globs are resolved next to piply.yaml
+```
+
+Purely additive: a config with no `include:` behaves exactly as it always has.
+
+**Merging rules**
+
+| Situation | Result |
+| --- | --- |
+| `pipelines:` in two files | Merged — that is the point |
+| Different *blocks* of one pipeline (tasks here, sensors there) | Merged |
+| The *same block* of one pipeline in two files | **Error**, naming both files |
+| Any top-level key in two files | **Error**, naming both files |
+| A pattern matching no files | **Error** — a silent no-match looks like the pipelines vanished |
+| `include:` inside an included file | **Error** — one level keeps merge order obvious |
+
+There is deliberately no last-wins. Silently preferring one file would mean
+editing a pipeline and watching nothing change.
+
+Blocks whose *members* may be spread across files: `pipelines`, `jobs`,
+`pipeline_templates`, `pipeline_deployments`, `notifications`, `connections`,
+`entities`, `variables`, `defaults`, `secrets`. Anywhere else, the same key in
+two files is a conflict.
+
+Every included file is watched for changes, so editing one takes effect without
+a restart, exactly as editing `piply.yaml` does.
+
+**A suggested layout**
+
+```
+piply.yaml          project settings + all deployments   (stable)
+piply_pipe.yaml     pipeline definitions                 (changes often)
+piply_sensor.yaml   sensors that trigger them            (occasionally)
+piply_alert.yaml    notification destinations            (rarely)
+```
+
+A pipeline's blocks may come from different files, so `piply_sensor.yaml` can
+attach sensors to a pipeline whose tasks live in `piply_pipe.yaml`:
+
+```yaml
+# piply_pipe.yaml
+pipelines:
+  ingest_files:
+    tasks:
+      load: {type: cli, command: python load.py}
+```
+```yaml
+# piply_sensor.yaml
+pipelines:
+  ingest_files:
+    sensors:
+      inbox: {type: file_sensor, path: /mnt/237share/inbound, pattern: "*.csv"}
+```
+
+Edit history decided that split: across 35 commits, `pipelines` was touched
+alone 12 times and deployments only 4. The churn belongs in its own file; the
+stable inventory belongs in the master.
+
+### `notifications`
+
+Declares reusable destinations. See section 13 for the full reference.
+
+```yaml
+notifications:
+  teams:
+    production_alerts:
+      type: channel               # channel | chat
+      webhook: ${TEAMS_PROD_WEBHOOK}
+  groups:
+    critical: [production_alerts]
+```
 
 ### `defaults`
 
@@ -117,6 +263,267 @@ declared as `extract` with `entities: {report: [...]}` produces runtime task ids
 of the form `payment.extract`, `adjustment.extract`, and so on. Set
 `entities: false` on a task to opt it out of expansion.
 
+#### Where to declare them
+
+Declare entities on the **pipeline or template that uses them**, not at project
+level.
+
+A top-level `entities:` block applies to *every* pipeline in the project,
+including ones that never mention the variable. Those pipelines are still
+expanded — so a nightly cleanup job beside one entity-driven pipeline runs its
+prune three times, and a summary email is sent three times. The generated tasks
+are identical apart from their ids, so nothing fails and nobody notices.
+
+```yaml
+# Avoid: applies to everything, including pipelines that do not want it
+entities:
+  practice: [alpha, beta, gamma]
+
+# Prefer: scoped to the pipeline that actually expands
+pipelines:
+  claim_extract:
+    entities:
+      practice: [alpha, beta, gamma]
+
+# Or scoped to a template, so every deployment of it inherits and nothing else does
+pipeline_templates:
+  scrape:
+    entities:
+      report: [payment, adjustment]
+```
+
+`piply validate` warns when a project-level entity expands a pipeline whose
+tasks never use it:
+
+```
+! Pipeline 'nightly_cleanup' is expanded 3x by the project-level entity
+  'practice', but no task uses {practice}. That runs identical tasks 3 times.
+```
+
+A top-level block is only appropriate when **every** pipeline in the project
+genuinely expands over that dimension. If even one does not, scope it down or
+set `entities: false` on the exception.
+
+#### Two or more entity sets
+
+Declaring two entities expands the **cross product** — one runtime task per
+combination:
+
+```yaml
+entities:
+  practice: [alpha, beta]
+  report: [payment, adjustment, refund]
+```
+
+```
+alpha.payment.extract     beta.payment.extract
+alpha.adjustment.extract  beta.adjustment.extract
+alpha.refund.extract      beta.refund.extract
+```
+
+The runtime id is the entity values in declaration order, then the task id. Both
+values are available to the task as `{practice}` and `{report}`.
+
+**Dependencies pair up per combination.** This is the part worth knowing:
+
+| Dependency | Behaviour |
+| --- | --- |
+| Expanded → expanded | Pairs **within the same combination**. `alpha.payment.transform` waits only for `alpha.payment.extract` |
+| `entities: false` → expanded | **Fans in**. One `summarise` waits for *every* generated task |
+
+So each practice/report lane is independent. One failing does not stall the
+others:
+
+```
+alpha.payment.extract      failed
+alpha.payment.transform    skipped     <- only this lane
+alpha.refund.extract       success
+beta.payment.extract       success
+beta.refund.extract        success
+summarise                  skipped     <- fan-in: one lane failed
+```
+
+A fan-in task is skipped when any dependency did not succeed. If the summary
+should still run, opt out of that rule:
+
+```yaml
+      summarise:
+        entities: false
+        on_upstream_failure: continue   # runs even when a lane failed
+        depends_on: [transform]
+```
+
+The run is still reported as `failed`, which is correct — something did fail.
+
+**Watch the multiplication.** Two sets multiply, they do not add: 29 practices
+× 8 reports × 2 tasks is 464 runtime tasks in a single run. That loads in about
+a tenth of a second and the DAG page handles it, but it is one run that fails as
+a unit. If practices genuinely need to succeed or fail independently, prefer one
+pipeline per practice — [templates and
+deployments](#8-templates-and-deployments) exist for exactly that — and keep
+entity expansion for the dimension that belongs inside one run.
+
+#### Entities per deployment
+
+A deployment may declare its own `entities:`, which is how one template serves
+tenants that do not all process the same things:
+
+```yaml
+pipeline_templates:
+  scrape:
+    entities:
+      report: [payment, adjustment]    # scoped to this template's deployments
+    tasks:
+      extract: {type: cli, command: "scrape --tenant {tenant} --report {report}"}
+
+pipeline_deployments:
+  alpha_scrape:
+    template: scrape
+    variables: {tenant: alpha}         # inherits payment + adjustment
+
+  beta_scrape:
+    template: scrape
+    variables: {tenant: beta}
+    entities:
+      report: [refund]                 # replaces: beta only does refunds
+
+  gamma_scrape:
+    template: scrape
+    variables: {tenant: gamma}
+    entities:
+      region: [eu, us]                 # adds a dimension: report x region
+```
+
+This follows the ordinary [deployment merge rules](#8-templates-and-deployments)
+— **mappings merge, lists replace** — applied per dimension:
+
+| Deployment declares | Result |
+| --- | --- |
+| Nothing | Inherits the project entities |
+| The **same** dimension | That list **replaces** the inherited one |
+| A **different** dimension | **Added**, so the two multiply |
+
+The example above produces:
+
+```
+alpha_scrape   payment.extract, adjustment.extract
+beta_scrape    refund.extract
+gamma_scrape   payment.eu.extract, payment.us.extract,
+               adjustment.eu.extract, adjustment.us.extract
+```
+
+Because each deployment is its own pipeline, this is also the answer when
+practices must succeed or fail independently: one deployment per practice, with
+entity expansion handling only the dimensions that belong inside a single run.
+
+#### Expanding over only some dimensions
+
+A task can expand over *fewer* dimensions than the tasks depending on it. Declare
+every dimension once, then **list the names** a task should use — a list selects
+dimensions, where a mapping declares new ones:
+
+```yaml
+entities:
+  practice: [alpha, beta]
+  report: [payment, adjustment]    # declared once, for the whole pipeline
+
+pipelines:
+  flow:
+    tasks:
+      login:
+        type: cli
+        entities: [practice]       # narrowed: one login per practice
+        command: playwright-login --practice {practice}
+      extract:
+        type: cli                  # no entities key -> practice x report
+        command: scrape --practice {practice} --report {report}
+        depends_on: [login]
+      load:
+        type: cli                  # nothing to declare here either
+        command: load --practice {practice} --report {report}
+        depends_on: [extract]
+```
+
+Annotating the **exception** rather than the rule is what makes this scale:
+adding a fourth task to the chain needs no entity declaration at all. Selecting
+a name that was never declared is an error, so a typo cannot quietly produce an
+unexpanded task.
+
+The mapping form still works and *adds* a dimension, which is the right choice
+when the extra values belong to one task rather than the pipeline:
+
+```yaml
+      extract:
+        entities:
+          report: [payment, adjustment]   # merged: practice x report
+```
+
+```
+alpha.login -> alpha.payment.extract      beta.login -> beta.payment.extract
+            -> alpha.adjustment.extract               -> beta.adjustment.extract
+```
+
+Each extract waits **only for its own practice's login**. Dependencies are
+matched on entity *values*, so a task depends on the one instance whose entity
+values it shares — regardless of which order the dimensions were declared in.
+
+That matters for isolation. `alpha.login` failing skips alpha's two extracts and
+leaves beta running:
+
+```
+alpha.login                failed
+alpha.payment.extract      skipped
+alpha.adjustment.extract   skipped
+beta.login                 success
+beta.payment.extract       success
+beta.adjustment.extract    success
+```
+
+This is the natural shape for a per-tenant browser session, an authentication
+step, or any setup that is shared by several reports within one practice but
+must not be shared *across* practices.
+
+Narrowing applies in one direction only. A task with **more** dimensions than
+its dependency picks the matching instance; a task with fewer — or with
+`entities: false` — still fans in and waits for all of them. If a dependency
+could match more than one instance, Piply falls back to fanning in rather than
+guessing.
+
+#### Entity priority
+
+A trailing `*` run on an entity value raises the priority of every task
+generated for it. More stars means sooner.
+
+```yaml
+entities:
+  report:
+    - payment*        # priority 1
+    - adjustment**    # priority 2 -> runs first
+    - refund          # priority 0
+```
+
+The stars are stripped from the value, so the task still receives
+`report=payment` and the runtime id is still `payment.extract`. The entity
+priority is *added* to whatever the task template declares, so
+`extract**` with `adjustment**` gives that task priority 4.
+
+Stars on two different entity sets add together too: `beta**` with `payment*`
+gives `beta.payment.extract` priority 3.
+
+Dependency order still wins: a high-priority entity task waits for its
+dependencies like any other. Equal priorities may run in any order.
+
+To use a value that genuinely ends in an asterisk, use the mapping form, which
+never strips:
+
+```yaml
+entities:
+  code:
+    - {id: wildcard, value: "SELECT *"}
+```
+
+Priority ordering is visible in `piply plan` and on the DAG nodes.
+
 ---
 
 ## 4. Pipeline Keys
@@ -126,12 +533,17 @@ pipelines:
   extract_flow:
     title: Extract Flow                  # display name
     description: Loads and validates.    # shown in the UI
-    enabled: true                        # false hides it from the scheduler
+    enabled: true                        # false hides it from the scheduler;
+                                         # accepts a conditional, see section 3
     tags: [ingest, tier1]
     timezone: UTC                        # overrides the project timezone
 
     schedule:                            # see section 5
       every: 15m
+
+    notifications:                       # Teams alerts, see section 13
+      on_failure: [production_alerts]
+      on_success: [data_engineering]
 
     variables:                           # merged over project variables
       batch_id: nightly
@@ -154,6 +566,10 @@ pipelines:
 
     triggers_on_success:
       - report_flow
+
+    notify:                              # email on run outcome, see Notifications below
+      on_failure: [oncall@example.com]
+      on_success: [team@example.com]
 
     entities: {}                         # pipeline-scoped entity expansion
     sensors: {}                          # see section 7
@@ -394,7 +810,79 @@ rather than hang.
 
 ---
 
+### Notifications
+
+`notify` emails the listed addresses when a run finishes. Delivery uses the
+**central SMTP settings**, so a pipeline only says *who* to tell, never *how* to
+reach a mail server.
+
+```yaml
+# Shorthand: a bare list means "on failure", which is what people want.
+notify: [oncall@example.com]
+
+# Explicit
+notify:
+  on_failure: [oncall@example.com, sre@example.com]
+  on_success: [team@example.com]
+```
+
+A delivery failure is written to the run log and never changes the run's status.
+If no SMTP server is configured, the run log says so and the run still succeeds.
+
+See [Notifications](NOTIFICATIONS.md) for the Teams channel and for what
+happens when delivery fails.
+
+Configure the server once under **Settings → Email (SMTP)**, or with
+environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `PIPLY_SMTP_HOST` | server hostname; setting it is what enables sending |
+| `PIPLY_SMTP_PORT` | default `587` |
+| `PIPLY_SMTP_USERNAME` | login user |
+| `PIPLY_SMTP_PASSWORD` | login password |
+| `PIPLY_SMTP_FROM_ADDRESS` | From header; defaults to the username |
+| `PIPLY_SMTP_USE_TLS` | STARTTLS, default `true` |
+| `PIPLY_SMTP_USE_SSL` | implicit SSL, default `false` |
+| `PIPLY_SMTP_TIMEOUT_SECONDS` | default `30` |
+
+Environment variables take precedence over the stored settings, so the password
+never has to be written to the database. The stored password is write-only: it
+is never returned by the API nor rendered in the UI.
+
+The same configuration backs `type: email` tasks. A task that sets its own
+`smtp_host` still uses that instead, so existing per-pipeline SMTP blocks keep
+working:
+
+```yaml
+tasks:
+  # Uses the central settings.
+  notify_ops:
+    type: email
+    to: [ops@example.com]
+    subject: "Batch {batch_id} finished"
+    body: All good.
+
+  # Overrides them for this task only.
+  notify_vendor:
+    type: email
+    smtp_host: vendor-relay.example.com
+    smtp_port: 25
+    to: [vendor@example.com]
+    subject: Handoff complete
+```
+
+> **Behaviour change:** `smtp_host` previously defaulted to `localhost`. It now
+> defaults to unset so the central settings apply. A task that genuinely wants a
+> local mail server should say `smtp_host: localhost` explicitly.
+
+---
+
 ## 7. Sensors
+
+This section is the key reference. For how polling, cursors, and dedupe
+actually behave — and the one thing sensors deliberately do not do — see the
+[Sensors guide](SENSORS.md).
 
 Sensors poll external state and enqueue a pipeline trigger when it changes.
 
@@ -470,17 +958,105 @@ pipeline_deployments:
     environment: staging
 ```
 
-Rules:
+### Which keys go where
 
-- A deployment is deep-merged over its template; deployment keys win.
-- `tenant` / `tenant_id` populate the `{tenant}` and `{tenant_id}` variables.
-- `environment` populates `{environment}`.
-- Everything else — variables, env, schedule, retry, timeout, execution,
-  concurrency, sensors, triggers — is inherited from the template unless the
-  deployment overrides it.
+**Every key from [§4 Pipeline Keys](#4-pipeline-keys) is valid in both places.**
+A template is a pipeline definition; a deployment is the same definition with
+overrides. There is no key that only a template may set.
+
+So the question is not *whether* `max_parallel_tasks` works in a deployment —
+it does — but where it belongs:
+
+| Put it on the **template** | Put it on the **deployment** |
+| --- | --- |
+| The same for every tenant | Different per tenant |
+| `tasks`, `entities`, `retry`, `timeout` | `variables` (the tenant's values) |
+| `max_parallel_tasks`, `execution` | `schedule` (staggering tenants apart) |
+| `env` shared by all tenants | `tenant` / `environment` |
+| `triggers_on_success` | Any of the left column, when one tenant differs |
+
+```yaml
+pipeline_templates:
+  tenant_ingest:
+    max_parallel_tasks: 2          # every tenant gets 2 workers...
+    timeout: 1h
+    tasks: {...}
+
+pipeline_deployments:
+  acme_ingest:
+    template: tenant_ingest
+    variables: {tenant: acme}
+
+  bigcorp_ingest:
+    template: tenant_ingest
+    variables: {tenant: bigcorp}
+    max_parallel_tasks: 8          # ...except this one, which is much larger
+    timeout: 4h
+```
+
+Set a value on the template when it is a property of *the work*, and on the
+deployment when it is a property of *this tenant*. When both set it, the
+deployment wins.
+
+### How the merge works
+
+A deployment is **deep-merged** over its template. That matters, because
+mappings and lists behave differently:
+
+| Key shape | Behaviour | Example |
+| --- | --- | --- |
+| Scalar (`timeout`, `max_parallel_tasks`, `description`) | Deployment replaces | `8` replaces `2` |
+| Mapping (`variables`, `env`, `retry`, `notify`) | **Merged key by key** | Deployment adds or replaces individual entries; the rest survive |
+| List (`tags`, `triggers_on_success`) | **Replaced wholesale** | `tags: [gamma]` discards the template's tags — it does not append |
+
+Verified behaviour, given a template with
+`variables: {practice: DEFAULT, shared: from_template}` and a deployment with
+`variables: {practice: TENANT_B}`:
+
+```
+practice = TENANT_B        # deployment wins
+shared   = from_template   # survives the merge
+```
+
+The same applies to `retry`: a deployment setting only `attempts: 5` keeps the
+template's `mode` and `delay_seconds`.
+
+> ⚠️ **A `schedule` mapping merges, and `cron` always wins over `every`.**
+> If the template uses `cron:` and a deployment sets `every: 5m`, the merged
+> mapping holds *both* keys and the parser picks `cron` — so the deployment
+> runs on the template's cron and the `every` is silently ignored. Going the
+> other way works: `every:` on the template, `cron:` on the deployment.
+>
+> To switch a deployment from cron to an interval, change the template or give
+> that deployment its own entry under `pipelines:`.
+
+### Deployment-only keys
+
+Four keys mean something only on a deployment:
+
+| Key | Effect |
+| --- | --- |
+| `template` | **Required.** Names the template to expand. Aliased as `pipeline_template` |
+| `tenant` / `tenant_id` | Populates both the `{tenant}` and `{tenant_id}` variables |
+| `environment` | Populates `{environment}` |
+
+`tenant: ACME` is shorthand — it produces
+`variables: {tenant: ACME, tenant_id: ACME}`. Use it when your tasks interpolate
+`{tenant}`; use an explicit `variables:` block when they interpolate something
+else, such as `{practice}`.
+
+### Other rules
+
 - Deployment ids become ordinary pipeline ids everywhere: CLI, API, UI, and DAG.
 - Entity expansion still applies inside a deployed template.
-- A deployment id may not collide with a `pipelines:` id.
+- A deployment id may not collide with a `pipelines:` id — that is an error, not
+  an override.
+- A template with no deployment is never runnable. Templates do not appear in
+  the pipeline list on their own.
+
+Run `piply plan` after any change here. It prints each deployment's resolved
+variables and fully interpolated commands, which is the fastest way to confirm a
+merge did what you expected.
 
 See [MIGRATION.md](MIGRATION.md) for moving an existing config onto templates.
 
@@ -488,18 +1064,61 @@ See [MIGRATION.md](MIGRATION.md) for moving an existing config onto templates.
 
 ## 9. Downstream Inheritance
 
-When a pipeline lists `triggers_on_success`, the downstream run receives:
+When a pipeline lists `triggers_on_success`, the child run inherits **data**
+from the parent but keeps **its own execution settings**. The distinction is the
+thing to remember:
 
-- the upstream pipeline's resolved **variables**,
-- the upstream pipeline's shared **env** values,
+| | Inherited from the parent | Kept from the child's own definition |
+| --- | --- | --- |
+| **Data** | `variables`, `env`, task outputs, `tenant_id`, `parent` | — |
+| **Execution** | — | `max_parallel_tasks`, `execution`, `timeout`, `retry`, `max_concurrent_runs`, `schedule`, `notify`, `sensors`, `tasks` |
+
+### What the child receives
+
+- the parent's resolved **variables** — including any the parent's *deployment*
+  supplied, and any it inherited from *its* own parent,
+- the parent pipeline's shared **env** values,
 - every JSON-serialisable upstream task **output**, under both the task id and
   the `upstream` key,
 - the upstream `tenant_id`,
 - a `parent` entry with the upstream run and pipeline id.
 
-All of it is stored on the downstream run as a configuration snapshot, so that
-run can later be retried or replayed on its own — the upstream pipeline does not
-need to run again.
+Parent variables **override** the child's own defaults for that run. A child
+declaring `practice: CHILD_DEFAULT`, triggered by a deployment with
+`practice: BENNETT`, runs with `BENNETT`. Child variables the parent does not
+define survive untouched.
+
+### What the child does *not* inherit
+
+Execution settings are **not** inherited. A child with `max_parallel_tasks: 1`
+triggered by a parent with `max_parallel_tasks: 8` still runs one task at a
+time; the same applies to `timeout` and `retry`.
+
+This is deliberate: those settings describe how *that* pipeline should run, and
+a shared downstream pipeline triggered by eight different tenants would
+otherwise behave differently depending on which tenant happened to fire it.
+
+To make a downstream stage behave differently per tenant, give it its own
+deployment rather than relying on inheritance — see
+[Roadmap §0.4.1](ROADMAP.md) on concurrency pools for the related bottleneck.
+
+### It propagates through the whole chain
+
+`Deployment → A → B → C` passes variables the whole way down. `C` sees the
+deployment's values even though it is two hops away.
+
+### A manual run has no parent
+
+Running a child directly uses its own variables and top-level defaults instead.
+When that leaves a `{placeholder}` unresolved, Piply asks for the values rather
+than running the command literally — see
+[UI Guide](UI_GUIDE.md#missing-runtime-values) and `piply run --var`.
+
+### Everything is snapshotted
+
+All of the above is stored on the child run as a configuration snapshot, so that
+run can later be retried, resumed, or backfilled on its own — the upstream
+pipeline does not need to run again.
 
 ---
 
@@ -520,16 +1139,46 @@ the config.
 | `PIPLY_QUEUE_DISPATCH_BATCH_SIZE` | `100` | trigger queue batch size |
 | `PIPLY_QUEUE_DISPATCH_STALE_SECONDS` | `300` | requeue abandoned dispatches after |
 | `PIPLY_UPCOMING_RUN_PREVIEW_COUNT` | `8` | upcoming slots shown in the UI |
+| `PIPLY_PIPELINE_RUN_HISTORY_COUNT` | `5` | run-history dots per pipeline row, max 20 |
 | `PIPLY_RETENTION_RUN_DAYS` | `30` | `piply prune` run age limit |
 | `PIPLY_RETENTION_LOG_DAYS` | `14` | `piply prune` log age limit |
 | `PIPLY_RETENTION_MAX_RUNS_PER_PIPELINE` | `200` | `piply prune` per-pipeline cap |
 | `PIPLY_ARTIFACTS_DIR` | unset | extra allowed root for artifact downloads |
 | `PIPLY_METRICS_ENABLED` | `true` | serve `GET /metrics` |
+| `PIPLY_SMTP_*` | unset | central SMTP, see Notifications above |
+| `PIPLY_ADMIN_USERNAME` | `admin` | bootstrapped admin username |
+| `PIPLY_ADMIN_PASSWORD` | generated | bootstrapped admin password |
+| `PIPLY_SCHEDULER_ENABLED` | `true` | `false` serves the UI and manual runs but fires no schedule or sensor |
+| `PIPLY_SESSION_SECRET` | generated | session cookie signing key |
+| `PIPLY_BASE_URL` | unset | public URL, used to link Teams alerts back to the run page |
 | `PIPLY_AUTH_ENABLED` | `false` | require authentication |
 | `PIPLY_AUTH_USERNAME` / `PIPLY_AUTH_PASSWORD` | unset | UI basic auth |
 | `PIPLY_API_TOKEN` | unset | API and `/metrics` bearer token |
 
 Setting a username/password pair or an API token enables auth implicitly.
+
+`PIPLY_AUTH_PASSWORD`, `PIPLY_API_TOKEN`, and `PIPLY_ADMIN_PASSWORD` each also
+accept a `_FILE` variant that reads the value from a mounted file, which is the
+better choice on a server. The file wins when both are set.
+
+### Task environment precedence
+
+The environment a task receives is layered. **Later wins:**
+
+1. `defaults.env` — project-wide
+2. pipeline `env:`
+3. pipeline `env_file:` / `env_files:`
+4. task `env:`
+5. the process environment, for any name not set above
+
+Two consequences worth knowing:
+
+- **`env_file` overrides inline pipeline `env:`.** To make an inline value win,
+  set it on the *task* rather than the pipeline.
+- **`env_file` paths resolve against `workspace:`, not the config file.** A file
+  that does not resolve loads nothing rather than raising, because an absent env
+  file is legitimate in some environments. `piply validate` and `piply plan`
+  warn and name the path they looked at.
 
 ---
 
@@ -537,6 +1186,10 @@ Setting a username/password pair or an API token enables auth implicitly.
 
 Two different things get called "the database". They are unrelated: the store
 Piply keeps its *own* state in, and the databases *your* pipelines read from.
+
+> This section covers the configuration keys. For the full picture — choosing a
+> backend, migrating an existing install, the Docker volume setup, and a
+> column-by-column schema reference — see [Metadata Store](DATABASE.md).
 
 ### Piply's own runtime store
 
@@ -842,7 +1495,69 @@ sensors:
 
 ---
 
-## 13. Status Values
+## 13. Notifications
+
+Two independent channels. **Email** uses `notify:` with the central SMTP
+settings; **Microsoft Teams** uses `notifications:` with webhooks. Neither can
+change a run's status.
+
+Full guide, including how to get a webhook URL and what happens when delivery
+fails: **[Notifications](NOTIFICATIONS.md)**.
+
+### `notifications` (project level)
+
+```yaml
+notifications:
+  teams:
+    production_alerts:
+      type: channel                     # channel | chat, default channel
+      webhook: ${TEAMS_PROD_WEBHOOK}    # required, must resolve to https://
+      timeout_seconds: 10               # optional, default 10, must be > 0
+  groups:
+    critical: [production_alerts]       # reusable bundles of destinations
+```
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `teams.<name>.type` | `channel` | `channel` or `chat` |
+| `teams.<name>.webhook` | *required* | Incoming webhook URL |
+| `teams.<name>.timeout_seconds` | `10` | Per-request timeout |
+| `teams.<name>.format` | guessed | `adaptive` (Power Automate) or `messagecard` (legacy connector) |
+| `groups.<name>` | — | List of destination names |
+
+An unresolved `${VAR}` is a **warning**, not an error, and the destination is
+skipped at send time. A webhook URL is a credential — keep it in the
+environment or a `secrets:` file, never in YAML.
+
+### `notifications` (pipeline level)
+
+```yaml
+pipelines:
+  claim_pipeline:
+    notifications:
+      on_failure: [production_alerts, data_engineering]
+      on_success: [data_engineering]
+```
+
+A bare list means **on failure**: `notifications: [critical]`. Group names work
+anywhere a destination name does, and a destination named twice is notified
+once.
+
+### `notify` (pipeline level, email)
+
+```yaml
+notify: [oncall@example.com]            # bare list means on failure
+
+notify:
+  on_failure: [oncall@example.com]
+  on_success: [team@example.com]
+```
+
+Delivery uses the central SMTP settings, so a pipeline only lists *who* to tell.
+
+---
+
+## 14. Status Values
 
 | Run status | Meaning |
 | --- | --- |

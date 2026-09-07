@@ -10,20 +10,24 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
 from pathlib import Path
 
 import typer
 import uvicorn
 
+from piply.core.auth import AuthError, generate_password
+from piply.core.dialects import is_postgres_dsn
 from piply.core.loader import ConfigError, discover_config, load_project
 from piply.core.service import PipelineService
+from piply.core.store import RunStore
 from piply.settings import load_settings
+from piply.version import get_version
 
 app = typer.Typer(help="Piply: lightweight orchestration for task-based Python workflows.")
 tasks_app = typer.Typer(help="Inspect pipeline tasks.")
 app.add_typer(tasks_app, name="tasks")
+users_app = typer.Typer(help="Manage accounts and pipeline permissions.")
+app.add_typer(users_app, name="users")
 RUN_PARAM_OPTION = typer.Option(
     None,
     "--param",
@@ -39,8 +43,36 @@ PLAN_PARAM_OPTION = typer.Option(
     "--param",
     help="Preview parameter as KEY=VALUE. Repeat for multiple params; JSON values are accepted.",
 )
+RUN_VAR_OPTION = typer.Option(
+    None,
+    "--var",
+    help="Value for a {placeholder} the config leaves to run time, as NAME=VALUE. Repeat for more.",
+)
+RUN_PROMPT_OPTION = typer.Option(
+    False,
+    "--prompt",
+    help="Ask for any {placeholder} values still missing instead of running without them.",
+)
 BACKFILL_START_OPTION = typer.Option(None, "--from", help="Start of the schedule window to backfill.")
 BACKFILL_END_OPTION = typer.Option(None, "--to", help="End of the schedule window to backfill.")
+USER_GRANT_OPTION = typer.Option(
+    None,
+    "--grant",
+    help="Grant as PIPELINE=actions, for example reports=view,run. Repeat for more pipelines.",
+)
+
+
+def _echo_permissions(user) -> None:
+    """Print one account's pipeline grants."""
+    if user.is_admin:
+        typer.echo("  permissions: administrator (every pipeline, every action)")
+        return
+    if not user.permissions:
+        typer.echo("  permissions: none yet")
+        return
+    for pipeline_id, actions in sorted(user.permissions.items()):
+        label = "every pipeline" if pipeline_id == "*" else pipeline_id
+        typer.echo(f"  {label}: {', '.join(sorted(actions))}")
 
 
 def _describe_database(config_path: Path, settings) -> str:
@@ -88,11 +120,7 @@ def _show_version(value: bool) -> None:
     """Print the installed Piply version for the top-level CLI option."""
     if not value:
         return
-    try:
-        current_version = package_version("mr-piply")
-    except PackageNotFoundError:
-        current_version = "0.1.6"
-    typer.echo(current_version)
+    typer.echo(get_version())
     raise typer.Exit()
 
 
@@ -173,6 +201,68 @@ def _format_log_line(line: dict[str, object], use_color: bool) -> str:
         f"{_ANSI['pipeline']}[{pipeline_label}]{_ANSI['reset']} "
         f"{color}[{task_label}]{_ANSI['reset']} {message}"
     )
+
+
+def _parse_vars(var_items: list[str] | None) -> dict[str, str]:
+    """Parse repeated NAME=VALUE runtime variables from the command line."""
+    parsed: dict[str, str] = {}
+    for item in var_items or []:
+        if "=" not in item:
+            raise typer.BadParameter("--var must use NAME=VALUE.")
+        name, value = item.split("=", 1)
+        parsed[name.strip()] = value
+    return parsed
+
+
+def _resolve_runtime_inputs(
+    service: PipelineService,
+    pipeline_id: str,
+    supplied: dict[str, str],
+    *,
+    task_id: str | None = None,
+    prompt: bool = False,
+) -> dict[str, str]:
+    """Collect any runtime values this run still needs.
+
+    Prompting is opt-in rather than inferred from the terminal. `isatty()` is
+    not trustworthy for this: on Windows it reports true for NUL, so a job
+    redirecting stdin from /dev/null would be asked a question nobody can
+    answer. Being explicit also means CI can never hang waiting for input.
+
+    Without `--prompt`, missing values are reported and the run proceeds, which
+    is what it did before this existed.
+    """
+    details = service.runtime_inputs(pipeline_id, provided=supplied, task_id=task_id)
+    if details["ready"]:
+        return supplied
+
+    missing = [str(item["name"]) for item in details["required"]]  # type: ignore[index]
+    upstreams = [str(item) for item in (details.get("triggered_by") or [])]  # type: ignore[union-attr]
+
+    typer.echo("Missing runtime values:")
+    if upstreams:
+        typer.echo(f"  normally supplied by {', '.join(upstreams)} when it triggers this pipeline")
+
+    if not prompt:
+        for name in missing:
+            typer.echo(f"  {{{name}}}")
+        typer.echo("Supply them with --var NAME=VALUE, or add --prompt to be asked.")
+        typer.echo("Continuing; these placeholders will appear literally in the command.")
+        return supplied
+
+    collected = dict(supplied)
+    for name in missing:
+        try:
+            value = typer.prompt(f"  {name}").strip()
+        except (EOFError, typer.Abort) as exc:
+            typer.echo("")
+            typer.echo("Aborted. No run was created.")
+            raise typer.Exit(code=1) from exc
+        if not value:
+            typer.echo(f"No value given for '{name}'. Aborted; no run was created.")
+            raise typer.Exit(code=1)
+        collected[name] = value
+    return collected
 
 
 def _parse_params(param_items: list[str] | None) -> dict[str, object]:
@@ -534,6 +624,12 @@ def validate(
             f"  - {pipeline.pipeline_id}: {pipeline.task_count} tasks | triggers {list(pipeline.triggers_on_success) or ['none']}"
         )
 
+    if project.warnings:
+        typer.echo("")
+        typer.echo(f"{len(project.warnings)} warning(s):")
+        for warning in project.warnings:
+            typer.echo(f"  ! {warning}")
+
 
 @app.command("list")
 def list_pipelines(
@@ -568,6 +664,8 @@ def run(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
     tenant: str | None = typer.Option(None, "--tenant", help="Tenant id to attach to this run."),
     param: list[str] | None = RUN_PARAM_OPTION,
+    var: list[str] | None = RUN_VAR_OPTION,
+    prompt: bool = RUN_PROMPT_OPTION,
     wait: bool = typer.Option(
         True,
         "--wait/--detach",
@@ -578,6 +676,7 @@ def run(
     try:
         params = _parse_params(param)
         initial_context = {"params": params} if params else {}
+        variables = _resolve_runtime_inputs(service, pipeline_id, _parse_vars(var), prompt=prompt)
         run_record = service.trigger_pipeline(
             pipeline_id,
             trigger="manual",
@@ -585,6 +684,7 @@ def run(
             on_log=typer.echo if wait else None,
             tenant_id=tenant,
             initial_context=initial_context,
+            inherited_variables=variables or None,
         )
     except KeyError as exc:
         typer.echo(str(exc))
@@ -812,6 +912,11 @@ def plan(
         for warning in preview.warnings:
             typer.echo(f"  warning: {warning}")
 
+    # Project-level problems apply to every pipeline, so they are printed once
+    # after the per-pipeline output rather than repeated inside each block.
+    for warning in service.project.warnings:
+        typer.echo(f"warning: {warning}")
+
 
 @app.command()
 def prune(
@@ -996,6 +1101,74 @@ def restore(
     typer.echo(f"Restored {source_path} -> {target}")
 
 
+@app.command("migrate-db")
+def migrate_db(
+    to: str = typer.Option(..., "--to", help="Target database, for example postgresql://user:pass@host:5432/piply"),
+    source: str | None = typer.Option(None, "--from", help="Source database. Defaults to the configured one."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Copy the runtime database to another backend, usually SQLite to PostgreSQL.
+
+    Run history, logs, artifacts, accounts, and schedules all move across with
+    their original ids, so retry chains and downstream links stay intact. The
+    target must be empty.
+
+    Stop the server first. Migrating while runs are executing would copy a
+    moving target and leave the new database inconsistent.
+    """
+    settings = load_settings(_resolve_config(config))
+    if source is not None:
+        origin: str | Path = source if is_postgres_dsn(source) else Path(source).resolve()
+    elif settings.database_dsn is not None:
+        origin = settings.database_dsn
+    else:
+        origin = settings.database_path or (_resolve_config(config).parent / ".piply" / "piply.db")
+
+    if isinstance(origin, Path) and not origin.is_file():
+        typer.echo(f"Source database not found: {origin}")
+        raise typer.Exit(code=1)
+
+    try:
+        source_store = RunStore(origin)
+        target_store = RunStore(to if is_postgres_dsn(to) else Path(to).resolve())
+    except (ImportError, RuntimeError, ValueError) as exc:
+        typer.echo(f"Could not open the databases: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    counts = source_store.row_counts()
+    total = sum(counts.values())
+    typer.echo(f"Source: {source_store.location} ({source_store.dialect.name}, {total} rows)")
+    typer.echo(f"Target: {target_store.location} ({target_store.dialect.name})")
+
+    if total == 0:
+        typer.echo("The source database is empty. Nothing to migrate.")
+        return
+    if not yes:
+        typer.echo("Stop the Piply server before migrating.")
+        if not typer.confirm("Copy this data to the target database?"):
+            typer.echo("Aborted. Nothing was changed.")
+            raise typer.Exit(code=1)
+
+    try:
+        copied = source_store.copy_into(target_store)
+    except ValueError as exc:
+        typer.echo(f"Migration refused: {exc}")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator verbatim
+        typer.echo(f"Migration failed: {exc}")
+        typer.echo("The target database may be partially written. Empty it before retrying.")
+        raise typer.Exit(code=1) from exc
+
+    for table, written in copied.items():
+        if written:
+            typer.echo(f"  {table:<20} {written}")
+    typer.echo(f"Copied {sum(copied.values())} rows.")
+    typer.echo("")
+    typer.echo("Point Piply at the new database and restart:")
+    typer.echo(f'  PIPLY_DATABASE="{to}"')
+
+
 @app.command()
 def diagnostics(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
@@ -1037,6 +1210,144 @@ def diagnostics(
     size = int(database.get("size_bytes") or 0)
     size_label = f" ({_format_bytes(size)})" if size else ""
     typer.echo(f"Database    : {database['path']} [{database.get('backend', 'sqlite')}]{size_label}")
+
+
+@users_app.command("create")
+def users_create(
+    username: str = typer.Argument(..., help="Username to create."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    password: str | None = typer.Option(None, "--password", help="Password. Generated when omitted."),
+    role: str = typer.Option("user", "--role", help="admin or user."),
+    grant: list[str] | None = USER_GRANT_OPTION,
+) -> None:
+    """Create an account, optionally granting pipeline permissions.
+
+    Creating the first account switches authentication on for the install.
+    """
+    service = PipelineService(config_path=_resolve_config(config))
+    secret = password or generate_password()
+    permissions: dict[str, object] = {}
+    for item in grant or []:
+        if "=" not in item:
+            raise typer.BadParameter("--grant must use PIPELINE=actions, for example reports=view,run")
+        pipeline_id, actions = item.split("=", 1)
+        permissions[pipeline_id.strip()] = actions
+
+    try:
+        user = service.create_user(username, secret, role=role, permissions=permissions)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Created {user.role} '{user.username}'.")
+    if password is None:
+        typer.echo(f"Password: {secret}")
+        typer.echo("Store it now. It is hashed and cannot be shown again.")
+    _echo_permissions(user)
+
+
+@users_app.command("list")
+def users_list(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """List accounts and their pipeline permissions."""
+    service = PipelineService(config_path=_resolve_config(config))
+    users = service.list_users()
+    if not users:
+        typer.echo("No accounts exist. Authentication is off unless PIPLY_AUTH_ENABLED is set.")
+        return
+    for user in users:
+        state = "active" if user.is_active else "disabled"
+        typer.echo(f"{user.username}  [{user.role}, {state}]  last login: {user.last_login_at or 'never'}")
+        _echo_permissions(user)
+
+
+@users_app.command("passwd")
+def users_passwd(
+    username: str = typer.Argument(..., help="Account to update."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    password: str | None = typer.Option(None, "--password", help="New password. Generated when omitted."),
+) -> None:
+    """Set a new password for an account."""
+    service = PipelineService(config_path=_resolve_config(config))
+    secret = password or generate_password()
+    try:
+        service.update_user(username, password=secret)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Password updated for '{username}'.")
+    if password is None:
+        typer.echo(f"Password: {secret}")
+
+
+@users_app.command("grant")
+def users_grant(
+    username: str = typer.Argument(..., help="Account to grant."),
+    pipeline_id: str = typer.Argument(..., help="Pipeline id, or '*' for every pipeline."),
+    actions: str = typer.Argument(..., help="Comma-separated: view, edit, run, or all."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Grant pipeline permissions to an account."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        user = service.grant_permission(username, pipeline_id, actions)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Updated permissions for '{username}'.")
+    _echo_permissions(user)
+
+
+@users_app.command("revoke")
+def users_revoke(
+    username: str = typer.Argument(..., help="Account to change."),
+    pipeline_id: str = typer.Argument(..., help="Pipeline id, or '*'."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Remove every permission an account holds on one pipeline."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        user = service.revoke_permission(username, pipeline_id)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Revoked '{pipeline_id}' for '{username}'.")
+    _echo_permissions(user)
+
+
+@users_app.command("disable")
+def users_disable(
+    username: str = typer.Argument(..., help="Account to disable."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Disable an account without deleting it."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.update_user(username, is_active=False)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Disabled '{username}'.")
+
+
+@users_app.command("delete")
+def users_delete(
+    username: str = typer.Argument(..., help="Account to delete."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Delete an account and every permission it held."""
+    service = PipelineService(config_path=_resolve_config(config))
+    if not yes and not typer.confirm(f"Delete account '{username}'?"):
+        typer.echo("Aborted.")
+        raise typer.Exit(code=1)
+    try:
+        service.delete_user(username)
+    except AuthError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Deleted '{username}'.")
 
 
 @app.command()

@@ -5,6 +5,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from piply.api.app import create_app
+from piply.core.loader import load_project
 from piply.core.models import PipelineDefinition, RunRecord
 from piply.core.scheduler import PipelineScheduler
 from piply.core.service import PipelineService
@@ -257,3 +261,87 @@ def test_scheduler_marks_itself_crashed_when_tick_raises(tmp_path: Path) -> None
     assert snapshot["running"] is False
     assert snapshot["state"] == "crashed"
     assert snapshot["last_error"] == "scheduler boom"
+
+
+def test_the_scheduler_can_be_turned_off_without_stopping_the_server(tmp_path: Path, monkeypatch) -> None:
+    """Opening a project on a laptop should not start last night's pipelines.
+
+    The UI, the API, and manual runs all keep working; only schedules and
+    sensors are held back.
+    """
+    monkeypatch.setenv("PIPLY_SCHEDULER_ENABLED", "false")
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Dev",
+                "workspace: .",
+                "pipelines:",
+                "  frequent:",
+                "    schedule: {every: 5s}",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(str(config_path))) as client:
+        assert client.app.state.scheduler.is_running is False
+        time.sleep(8)
+        service = client.app.state.service
+        assert service.list_runs(limit=5) == []
+
+        # A manual trigger is unaffected.
+        assert client.post("/api/pipelines/frequent/run", json={}).status_code == 200
+        deadline = time.monotonic() + 15
+        while not service.list_runs(limit=5) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert len(service.list_runs(limit=5)) == 1
+
+
+def test_a_pipeline_can_disable_its_schedule_per_environment(tmp_path: Path, monkeypatch) -> None:
+    """`enabled:` accepts a conditional, and a false one actually disables.
+
+    It used to be read with `bool(...)` and without evaluating the condition, so
+    both a mapping and the string "false" came out true and the pipeline stayed
+    scheduled everywhere.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Per Env",
+                "workspace: .",
+                "pipelines:",
+                "  nightly:",
+                "    enabled:",
+                '      if: env == "dev"',
+                "      then: false",
+                "      else: true",
+                "    schedule: {every: 15m}",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("PIPLY_ENV", "dev")
+    assert load_project(config_path).pipelines["nightly"].enabled is False
+
+    monkeypatch.setenv("PIPLY_ENV", "prod")
+    assert load_project(config_path).pipelines["nightly"].enabled is True
+
+    # The inline ternary and a bare string behave the same way.
+    monkeypatch.setenv("PIPLY_ENV", "dev")
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            '    enabled:\n      if: env == "dev"\n      then: false\n      else: true\n',
+            "    enabled: 'false if env == \"dev\" else true'\n",
+        ),
+        encoding="utf-8",
+    )
+    assert load_project(config_path).pipelines["nightly"].enabled is False

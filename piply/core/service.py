@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -18,11 +20,24 @@ import yaml
 
 from piply.engine.base import BaseEngine
 from piply.engine.local_engine import LocalEngine
-from piply.settings import PiplySettings, load_settings
+from piply.settings import PiplySettings, load_settings, read_secret
 
+from .auth import (
+    ALL_PIPELINES,
+    ROLES,
+    AuthError,
+    LoginThrottle,
+    User,
+    generate_password,
+    hash_password,
+    normalize_permissions,
+    normalize_username,
+    verify_password,
+)
 from .dialects import is_postgres_dsn
 from .graph import upstream_closure
 from .loader import discover_config, load_project
+from .mailer import build_message, load_smtp_settings, save_smtp_settings, send_message
 from .models import (
     PipelineDefinition,
     PipelineSummary,
@@ -32,10 +47,11 @@ from .models import (
     RunRecord,
     TaskDefinition,
 )
-from .preview import PipelinePreview, build_pipeline_preview
+from .notifications import NotificationError, build_alert, send_alert
+from .preview import PipelinePreview, build_pipeline_preview, unresolved_placeholders
 from .processes import is_process_alive
 from .retry import build_retry_plan
-from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor
+from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor, sensor_run_variables
 from .store import RunStore
 
 _RUNTIME_VARIABLE_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -86,6 +102,13 @@ def _format_relative_time(delta_seconds: float) -> str:
     return f"in {hours} hour{suffix}"
 
 
+#: A runtime input has to be a valid placeholder name or it can never match one.
+_RUNTIME_INPUT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: Scheduler activity goes to the server log, where uvicorn already writes.
+_LOGGER = logging.getLogger("piply.scheduler")
+
+
 class PipelineService:
     """PipelineService coordinates config loading, execution, retries, and UI summaries."""
 
@@ -129,6 +152,11 @@ class PipelineService:
         self._accept_new_work = True
         self._shutdown_reason: str | None = None
         self._last_reconcile_monotonic = 0.0
+        #: Failed sign-in tracking, kept in memory alongside the single process.
+        self.login_throttle = LoginThrottle()
+        #: Hashed once so an unknown username costs the same as a wrong password
+        #: without paying for a second key derivation on every failed attempt.
+        self._timing_decoy_hash = hash_password(secrets.token_hex(16))
         self.recover_interrupted_executions()
         self.reload_project(force=True)
 
@@ -154,7 +182,7 @@ class PipelineService:
     def reload_project(self, *, force: bool = False) -> ProjectDefinition:
         """Reload the config when it changes on disk."""
         with self._lock:
-            current_mtime = self.config_path.stat().st_mtime
+            current_mtime = self._config_fingerprint()
             if not force and self._project is not None and self._config_mtime == current_mtime:
                 return self._project
 
@@ -162,8 +190,29 @@ class PipelineService:
                 self.config_path,
                 default_max_parallel_tasks=self.settings.default_max_parallel_tasks,
             )
-            self._config_mtime = current_mtime
+            # Recomputed now that the project knows every file it was built from,
+            # so the next call compares like with like instead of reloading once more.
+            self._config_mtime = self._config_fingerprint()
             return self._project
+
+    def _config_fingerprint(self) -> float:
+        """Return a value that changes when any config file changes.
+
+        With `include:` the project spans several files, so watching only the
+        root one would mean edits to an included file never took effect.
+        """
+        total = self.config_path.stat().st_mtime
+        project = self._project
+        if project is not None:
+            for source in project.config_sources:
+                if source == self.config_path:
+                    continue
+                try:
+                    total += source.stat().st_mtime
+                except OSError:
+                    # A removed include shows up as a change, then as a load error.
+                    total += 1
+        return total
 
     def validate(self) -> ProjectDefinition:
         """Validate and return the current project config."""
@@ -284,7 +333,10 @@ class PipelineService:
         self.reconcile_runtime_health()
         project = self.project
         paused_ids = self.store.list_paused_pipeline_ids()
-        latest_runs = self.store.latest_runs_by_pipeline()
+        # One windowed query supplies both the run-history dots and the latest
+        # run, so this stays at three queries regardless of pipeline count.
+        recent_runs = self.store.recent_runs_by_pipeline(self.settings.pipeline_run_history_count)
+        latest_runs = {pipeline_id: runs[0] for pipeline_id, runs in recent_runs.items() if runs}
         active_counts = self.store.active_run_counts_by_pipeline()
         task_states = self.store.task_states_for_runs([run.run_id for run in latest_runs.values()])
         upstream_map = self.upstream_pipeline_map()
@@ -317,6 +369,7 @@ class PipelineService:
                         {} if last_run is None else task_states.get(last_run.run_id, {})  # type: ignore[arg-type]
                     ),
                     last_run=last_run,
+                    recent_runs=tuple(recent_runs.get(pipeline.pipeline_id, ())),
                     active_runs=active_counts.get(pipeline.pipeline_id, 0),
                     retry_summary=pipeline.retry_policy.summary,
                     template_id=pipeline.template_id,
@@ -532,6 +585,16 @@ class PipelineService:
                     enqueued += 1
         return enqueued
 
+    def _note_trigger_skipped(self, item, reason: str) -> None:
+        """Log and record why a queued trigger was passed over this tick.
+
+        The reason is stored on the queue row so it is visible without reading
+        the server log, and logged only when it changes: a paused pipeline is
+        re-evaluated every tick and would otherwise print the same line forever.
+        """
+        if self.store.record_queue_skip(item.queue_id, reason):
+            _LOGGER.info("Skipping trigger for '%s': %s", item.pipeline_id, reason)
+
     def drain_trigger_queue(
         self,
         *,
@@ -558,14 +621,25 @@ class PipelineService:
                 self.store.mark_queue_failed(item.queue_id, str(exc))
                 continue
 
-            if not pipeline.enabled or self.store.is_pipeline_paused(item.pipeline_id):
-                blocked_pipelines.add(item.pipeline_id)
-                continue
-            if self.store.count_running_runs(item.pipeline_id) > 0:
+            # A trigger that cannot run yet stays queued and is retried on the
+            # next tick. Recording why turns "nothing happened" into something
+            # you can actually diagnose.
+            skip_reason: str | None = None
+            if not pipeline.enabled:
+                skip_reason = "pipeline is disabled in the config"
+            elif self.store.is_pipeline_paused(item.pipeline_id):
+                skip_reason = "pipeline is paused"
+            elif self.store.count_running_runs(item.pipeline_id) > 0:
+                skip_reason = "a run is already in progress"
+
+            if skip_reason is not None:
+                self._note_trigger_skipped(item, skip_reason)
                 blocked_pipelines.add(item.pipeline_id)
                 continue
 
             if not self.store.claim_queue_item(item.queue_id):
+                # Another worker took it between listing and claiming.
+                self._note_trigger_skipped(item, "the trigger was claimed by another dispatcher")
                 blocked_pipelines.add(item.pipeline_id)
                 continue
 
@@ -616,6 +690,12 @@ class PipelineService:
                         if isinstance(payload.get("env"), dict)
                         else {}
                     )
+                    if item.trigger == "sensor":
+                        # Without this a sensor can start a pipeline but cannot
+                        # tell it *what* changed, so every task has to re-scan
+                        # the directory and guess which file it was woken for.
+                        inherited_variables.update(sensor_run_variables(payload))
+                        initial_context.setdefault("sensor", dict(payload))
                     if parent_run_id is not None:
                         initial_context.setdefault(
                             "parent",
@@ -688,18 +768,22 @@ class PipelineService:
         pipeline_id: str | None = None,
         status: str | None = None,
         tenant_id: str | None = None,
+        trigger: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        sort: str = "started_desc",
         limit: int = 50,
     ) -> list[RunRecord]:
-        """Return recent runs with optional filters."""
+        """Return recent runs with optional filters and sort order."""
         self.reconcile_runtime_health()
         return self.store.list_runs(
             pipeline_id=pipeline_id,
             status=status,
             tenant_id=tenant_id,
+            trigger=trigger,
             created_after=created_after,
             created_before=created_before,
+            sort=sort,
             limit=limit,
         )
 
@@ -727,6 +811,34 @@ class PipelineService:
             "has_run_config": self.store.get_run_config(run_id) is not None,
         }
 
+    def _downstream_pending_state(self, run: RunRecord, target: str) -> tuple[str, str]:
+        """Explain why a downstream pipeline has not produced a run yet.
+
+        Reporting everything as "pending" hides the cases that will never
+        resolve on their own — a paused or disabled target waits forever, and
+        that is exactly when someone opens this page to find out why.
+        """
+        if run.status in {"queued", "running"}:
+            return "waiting", "Waiting for this run to finish."
+        if run.status != "success":
+            return "skipped", f"Not triggered because this run ended as {run.status}."
+
+        try:
+            target_pipeline = self.get_pipeline(target)
+        except KeyError:
+            return "unknown", f"'{target}' is no longer defined in the config."
+
+        if not target_pipeline.enabled:
+            return "disabled", "Will not run: the pipeline is disabled in the config."
+        if self.store.is_pipeline_paused(target):
+            return "paused", "Will not run until the pipeline is resumed."
+
+        queued = self.store.pending_queue_item(target)
+        if queued is not None:
+            # `error` on a queued row holds the reason it was last passed over.
+            return "queued", queued.error or "Queued, waiting for the scheduler."
+        return "pending", "Trigger has not been queued yet."
+
     def downstream_run_links(self, run: RunRecord) -> list[dict[str, object]]:
         """Return every downstream pipeline this run triggers, with its run status.
 
@@ -747,12 +859,16 @@ class PipelineService:
                 target_title = self.get_pipeline(target).title
             except KeyError:
                 pass
+            state, reason = ("", "")
+            if child is None:
+                state, reason = self._downstream_pending_state(run, target)
             links.append(
                 {
                     "pipeline_id": target,
                     "pipeline_title": target_title,
                     "run_id": None if child is None else child.run_id,
-                    "status": child.status if child is not None else ("pending" if run.status == "success" else "-"),
+                    "status": child.status if child is not None else state,
+                    "reason": None if child is not None else reason,
                     "started_at": None if child is None or child.started_at is None else child.started_at.isoformat(),
                     "duration_seconds": None if child is None else child.duration_seconds,
                     "successful_tasks": 0 if child is None else child.successful_tasks,
@@ -769,6 +885,7 @@ class PipelineService:
                     "pipeline_title": child.pipeline_title,
                     "run_id": child.run_id,
                     "status": child.status,
+                    "reason": None,
                     "started_at": None if child.started_at is None else child.started_at.isoformat(),
                     "duration_seconds": child.duration_seconds,
                     "successful_tasks": child.successful_tasks,
@@ -777,6 +894,63 @@ class PipelineService:
                 }
             )
         return links
+
+    #: How far up a trigger chain to walk before giving up. Chains are short in
+    #: practice; the cap only guards against a cycle in corrupted data.
+    MAX_LINEAGE_DEPTH = 12
+
+    def lineage_for_runs(self, runs: list[RunRecord]) -> dict[str, list[dict[str, object]]]:
+        """Return the full ancestor chain for each run, root first.
+
+        Walks one generation at a time across every run at once, so the cost is
+        one query per level of depth rather than one per run.
+        """
+        parents_by_run: dict[str, str] = {
+            run.run_id: run.parent_run_id for run in runs if run.parent_run_id is not None
+        }
+        known: dict[str, dict[str, object]] = {}
+
+        frontier = list(dict.fromkeys(parents_by_run.values()))
+        for _ in range(self.MAX_LINEAGE_DEPTH):
+            missing = [run_id for run_id in frontier if run_id not in known]
+            if not missing:
+                break
+            fetched = self.store.runs_by_ids(missing)
+            known.update(fetched)
+            frontier = [
+                str(item["parent_run_id"])
+                for item in fetched.values()
+                if item.get("parent_run_id") and str(item["parent_run_id"]) not in known
+            ]
+            if not frontier:
+                break
+
+        lineage: dict[str, list[dict[str, object]]] = {}
+        for run in runs:
+            chain: list[dict[str, object]] = []
+            cursor = run.parent_run_id
+            seen: set[str] = set()
+            while cursor and cursor not in seen and len(chain) < self.MAX_LINEAGE_DEPTH:
+                seen.add(cursor)
+                ancestor = known.get(cursor)
+                if ancestor is None:
+                    # The parent was pruned; record the reference so the chain
+                    # is honest about being incomplete rather than silently short.
+                    chain.append(
+                        {
+                            "run_id": cursor,
+                            "pipeline_id": run.parent_pipeline_id,
+                            "pipeline_title": run.parent_pipeline_id or cursor,
+                            "status": "deleted",
+                            "trigger": None,
+                            "available": False,
+                        }
+                    )
+                    break
+                chain.append({**ancestor, "available": True})
+                cursor = ancestor.get("parent_run_id")  # type: ignore[assignment]
+            lineage[run.run_id] = list(reversed(chain))
+        return lineage
 
     def upstream_run_link(self, run: RunRecord) -> dict[str, object] | None:
         """Return the parent run that triggered this one, when there is one."""
@@ -1045,8 +1219,13 @@ class PipelineService:
         initial_context: dict[str, object] | None = None,
         inherited_variables: dict[str, str] | None = None,
         inherited_env: dict[str, str] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
-        """Create and dispatch one new run for a pipeline."""
+        """Create and dispatch one new run for a pipeline.
+
+        ``actor`` records which account asked for the run, so history shows who
+        did what rather than only what happened.
+        """
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         pipeline = self._clone_pipeline_with_command_overrides(
@@ -1085,7 +1264,10 @@ class PipelineService:
                     parent_run_id=parent_run_id,
                     parent_pipeline_id=parent_pipeline_id,
                 ),
+                actor=actor,
             )
+            if actor:
+                _LOGGER.info("Pipeline '%s' run %s by %s", pipeline.pipeline_id, trigger, actor)
             dispatch_context = dict(initial_context or {})
             if pipeline.variables:
                 dispatch_context.setdefault("variables", dict(pipeline.variables))
@@ -1122,17 +1304,23 @@ class PipelineService:
         tenant_id: str | None = None,
         initial_context: dict[str, object] | None = None,
         source_run_id: str | None = None,
+        inherited_variables: dict[str, str] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
         """Create and dispatch one run scoped to a selected task and its dependencies.
 
         ``source_run_id`` replays the configuration of an earlier run so a single
         failed task can be repaired with the variables and environment it was
-        originally given.
+        originally given. ``inherited_variables`` supplies values directly, which
+        is how a manual run answers placeholders an upstream would normally fill.
         """
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         replay = self._replay_arguments(source_run_id) if source_run_id else {}
-        inherited_variables = replay.get("inherited_variables") or None
+        # Explicit values win over a replay: the caller just typed them in.
+        merged_variables = dict(replay.get("inherited_variables") or {})
+        merged_variables.update(inherited_variables or {})
+        inherited_variables = merged_variables or None
         inherited_env = replay.get("inherited_env") or None
         effective_overrides = command_overrides or replay.get("command_overrides") or None
         pipeline = self._clone_pipeline_for_task(
@@ -1168,7 +1356,10 @@ class PipelineService:
                 initial_context=dispatch_context,
                 task_id=task_id,
             ),
+            actor=actor,
         )
+        if actor:
+            _LOGGER.info("Pipeline '%s' task '%s' run by %s", pipeline_id, task_id, actor)
         if tenant_id is not None:
             dispatch_context.setdefault("tenant_id", tenant_id)
         self._dispatch_engine(
@@ -1367,8 +1558,150 @@ class PipelineService:
                 queued.append(slot)
         return queued
 
+    def notify_run_outcome(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Tell everyone configured about a finished run.
+
+        Email and Teams are independent: one failing never stops the other, and
+        neither changes the run's status. A pipeline lists *who* to tell; how to
+        reach them lives in central settings or the `notifications:` block.
+        """
+        self._send_teams_alert(pipeline, run)
+        self._send_email_notification(pipeline, run)
+
+    def _record_delivery(
+        self,
+        run: RunRecord,
+        pipeline: PipelineDefinition,
+        destination: str,
+        outcome: str,
+        detail: str | None = None,
+    ) -> None:
+        """Persist one delivery outcome, ignoring storage failures."""
+        try:
+            self.store.record_notification_delivery(
+                run_id=run.run_id,
+                pipeline_id=pipeline.pipeline_id,
+                channel="teams",
+                destination=destination,
+                outcome=outcome,
+                detail=detail,
+            )
+        except Exception:  # noqa: BLE001 - recording must never fail a run
+            pass
+
+    def _send_teams_alert(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Post the standard alert card to this pipeline's Teams destinations."""
+        names = pipeline.alert_on_success if run.status == "success" else pipeline.alert_on_failure
+        if not names:
+            # Recorded rather than ignored: "nothing was configured for this
+            # outcome" is the single most confusing case to debug, because it
+            # looks identical to a notification that silently failed.
+            if pipeline.alert_on_success or pipeline.alert_on_failure:
+                which = "on_success" if run.status == "success" else "on_failure"
+                self._record_delivery(
+                    run,
+                    pipeline,
+                    "-",
+                    "not_configured",
+                    f"This pipeline has no '{which}' destinations, so nothing was sent for a {run.status} run.",
+                )
+            return
+
+        settings = getattr(self.project, "notifications", None)
+        if settings is None or not settings.configured:
+            message = "Teams notification skipped: no 'notifications:' destinations are declared."
+            self.store.append_log(run.run_id, message, stream="stderr")
+            self._record_delivery(run, pipeline, ", ".join(names), "failed", message)
+            return
+
+        try:
+            destinations = settings.resolve(names)
+        except NotificationError as exc:
+            # A typo in a destination name is reported against the run rather
+            # than blocking the whole project from loading.
+            self.store.append_log(run.run_id, f"Teams notification failed: {exc}", stream="stderr")
+            self._record_delivery(run, pipeline, ", ".join(names), "failed", str(exc))
+            return
+
+        def _log(message: str, is_error: bool) -> None:
+            self.store.append_log(run.run_id, message, stream="stderr" if is_error else "stdout")
+
+        for skipped in (item for item in destinations if not item.configured):
+            self._record_delivery(run, pipeline, skipped.name, "skipped", "Its webhook did not resolve to a URL.")
+
+        results = send_alert(
+            destinations,
+            lambda destination: build_alert(
+                title=pipeline.title,
+                pipeline_id=pipeline.pipeline_id,
+                status=run.status,
+                run_id=run.run_id,
+                trigger=run.trigger,
+                tasks=f"{run.successful_tasks}/{run.task_count} succeeded",
+                duration="unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s",
+                error=run.error,
+                run_url=self._run_url(run.run_id),
+                card_format=destination.card_format,
+            ),
+            on_log=_log,
+        )
+        for name, delivered, detail in results:
+            self._record_delivery(run, pipeline, name, "sent" if delivered else "failed", detail or None)
+
+    def _run_url(self, run_id: str) -> str | None:
+        """Return a link back to the run, when a public base URL is configured."""
+        base = (os.environ.get("PIPLY_BASE_URL") or "").strip().rstrip("/")
+        return f"{base}/runs/{run_id}" if base else None
+
+    def _send_email_notification(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Email the configured recipients about a finished run.
+
+        Delivery uses the central SMTP settings, so a pipeline only lists who to
+        tell, never how to reach the mail server. A delivery failure is logged
+        against the run and never changes its status.
+        """
+        recipients = pipeline.notify_on_success if run.status == "success" else pipeline.notify_on_failure
+        if not recipients:
+            return
+
+        settings = load_smtp_settings(self.store)
+        if not settings.configured:
+            self.store.append_log(
+                run.run_id,
+                "Run notification skipped: no SMTP server is configured under Settings.",
+                stream="stderr",
+            )
+            return
+
+        duration = "unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s"
+        body = "\n".join(
+            [
+                f"Pipeline : {pipeline.title} ({pipeline.pipeline_id})",
+                f"Run      : {run.run_id}",
+                f"Status   : {run.status}",
+                f"Trigger  : {run.trigger}",
+                f"Tasks    : {run.successful_tasks}/{run.task_count} succeeded",
+                f"Duration : {duration}",
+                *([f"Error    : {run.error}"] if run.error else []),
+            ]
+        )
+        try:
+            send_message(
+                settings,
+                build_message(
+                    settings,
+                    to=list(recipients),
+                    subject=f"[Piply] {pipeline.title} {run.status}",
+                    body=body,
+                ),
+            )
+            self.store.append_log(run.run_id, f"Run notification sent to {', '.join(recipients)}.")
+        except Exception as exc:  # noqa: BLE001 - a mail failure must not fail the run
+            self.store.append_log(run.run_id, f"Run notification failed: {exc}", stream="stderr")
+
     def _handle_pipeline_success(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Trigger downstream pipelines after a successful run completes."""
+        self.notify_run_outcome(pipeline, run)
         wait_for_pipeline_triggers = self._should_wait_for_pipeline_triggers()
         if not pipeline.triggers_on_success:
             self.drain_trigger_queue(
@@ -1417,6 +1750,7 @@ class PipelineService:
 
     def _handle_pipeline_failure(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
         """Schedule an automatic retry when the pipeline retry policy allows it."""
+        self.notify_run_outcome(pipeline, run)
         retry_policy = pipeline.retry_policy
         if not retry_policy.enabled or run.status != "failed":
             self.drain_trigger_queue(limit=20)
@@ -1455,10 +1789,16 @@ class PipelineService:
             return
         self.drain_trigger_queue(limit=20)
 
-    def set_pipeline_paused(self, pipeline_id: str, paused: bool) -> PipelineSummary:
-        """Pause or resume a pipeline schedule."""
+    def set_pipeline_paused(self, pipeline_id: str, paused: bool, *, actor: str | None = None) -> PipelineSummary:
+        """Pause or resume a pipeline schedule, recording who asked."""
         self.get_pipeline(pipeline_id)
         self.store.set_pipeline_paused(pipeline_id, paused)
+        _LOGGER.info(
+            "Pipeline '%s' %s by %s",
+            pipeline_id,
+            "paused" if paused else "resumed",
+            actor or "an unauthenticated caller",
+        )
         if not paused:
             self.drain_trigger_queue(limit=20)
         return self.get_pipeline_summary(pipeline_id)
@@ -1473,10 +1813,45 @@ class PipelineService:
             raise ValueError("Only queued or running runs can be cancelled.")
 
         self.store.append_log(run_id, "Cancellation requested by user.", stream="stderr")
+        self._warn_about_uninterruptible_tasks(run)
         cancelled = self.engine.cancel(run_id)
         if run.status == "queued" or not cancelled:
             self.store.cancel_run(run_id)
         return self.store.get_run(run_id) or run
+
+    def _warn_about_uninterruptible_tasks(self, run: RunRecord) -> None:
+        """Say so when an in-flight task cannot actually be stopped.
+
+        A subprocess is killed with its whole tree, but Python offers no safe way
+        to interrupt a thread, so a `type: python` task using `function:` runs to
+        completion. Leaving that unsaid is why cancelling looks broken: the node
+        keeps its running dot and nothing explains why.
+        """
+        try:
+            pipeline = self.project.pipelines.get(run.pipeline_id)
+            if pipeline is None:
+                return
+            _, task_runs, _ = self.get_run(run.run_id)
+        except Exception:  # noqa: BLE001 - a warning must never break cancelling
+            return
+
+        stuck = [
+            item.task_id
+            for item in task_runs
+            if item.status == "running" and getattr(pipeline.tasks.get(item.task_id), "call", None)
+        ]
+        if not stuck:
+            return
+        self.store.append_log(
+            run.run_id,
+            (
+                f"{', '.join(stuck)} cannot be interrupted: a Python 'function:' task runs in a "
+                "thread, and Python has no safe way to stop one. It will finish first, and the run "
+                "stays 'running' until it does. Use 'type: cli' or a script path to make a task "
+                "cancellable."
+            ),
+            stream="stderr",
+        )
 
     def delete_run(self, run_id: str) -> None:
         """Delete one finished run from the runtime store."""
@@ -1619,6 +1994,77 @@ class PipelineService:
         """Build dry-run previews for every configured pipeline."""
         return [build_pipeline_preview(pipeline) for pipeline in self.project.pipelines.values()]
 
+    def runtime_inputs(
+        self,
+        pipeline_id: str,
+        *,
+        provided: dict[str, str] | None = None,
+        task_id: str | None = None,
+        source_run_id: str | None = None,
+    ) -> dict[str, object]:
+        """Describe the values a manual run of this pipeline still needs.
+
+        A pipeline that normally receives its variables from an upstream trigger
+        has nothing to fill them in when it is started by hand. Rather than
+        running a command containing a literal ``{practice}``, this reports what
+        is missing so the caller can ask for it.
+
+        ``provided`` is applied first, so a caller can re-check after collecting
+        answers and confirm nothing is left.
+        """
+        pipeline = self.get_pipeline(pipeline_id)
+        replay = self._replay_arguments(source_run_id) if source_run_id else {}
+
+        merged: dict[str, str] = {}
+        merged.update(replay.get("inherited_variables") or {})  # type: ignore[arg-type]
+        merged.update(provided or {})
+
+        resolved = self._clone_pipeline_with_inherited_variables(
+            pipeline,
+            merged or None,
+            replay.get("inherited_env"),  # type: ignore[arg-type]
+        )
+        if task_id is not None:
+            resolved = self._clone_pipeline_for_task(resolved, task_id)
+
+        missing = unresolved_placeholders(resolved)
+        # A pipeline that something else triggers has an obvious source for these
+        # values, which is worth saying in the prompt: it tells the user this is
+        # a normal manual run of a downstream pipeline, not a broken config.
+        upstreams = sorted(
+            other.pipeline_id for other in self.project.pipelines.values() if pipeline_id in other.triggers_on_success
+        )
+        return {
+            "pipeline_id": pipeline_id,
+            "pipeline_title": pipeline.title,
+            "ready": not missing,
+            "triggered_by": upstreams,
+            "required": [{"name": name, "tasks": list(task_ids)} for name, task_ids in missing.items()],
+            "provided": dict(merged),
+        }
+
+    @staticmethod
+    def validate_runtime_inputs(values: dict[str, object] | None) -> dict[str, str]:
+        """Normalise and check user-supplied runtime values.
+
+        Names have to look like placeholders or they could never match one, and
+        a blank value is rejected because substituting an empty string silently
+        produces a different broken command rather than an obvious one.
+        """
+        cleaned: dict[str, str] = {}
+        for raw_name, raw_value in (values or {}).items():
+            name = str(raw_name).strip()
+            if not _RUNTIME_INPUT_NAME.fullmatch(name):
+                raise ValueError(
+                    f"'{name}' is not a usable variable name. Use letters, digits, and underscores, "
+                    "starting with a letter or underscore."
+                )
+            value = "" if raw_value is None else str(raw_value).strip()
+            if not value:
+                raise ValueError(f"'{name}' needs a value.")
+            cleaned[name] = value
+        return cleaned
+
     def list_run_artifacts(self, run_id: str, task_id: str | None = None) -> list[dict[str, object]]:
         """Return artifacts recorded for one run, refreshing size and mtime from disk."""
         if self.store.get_run(run_id) is None:
@@ -1688,6 +2134,303 @@ class PipelineService:
                 results.append(entry)
         return sorted(results, key=lambda item: (item["status"] != "failing", str(item["sensor_key"])))
 
+    def notification_overview(self, *, limit: int = 50) -> dict[str, object]:
+        """Describe every declared destination and what was recently delivered.
+
+        Webhook URLs are never included — the URL is the credential. Only
+        whether it resolved is reported.
+        """
+        settings = getattr(self.project, "notifications", None)
+        destinations: list[dict[str, object]] = []
+        if settings is not None:
+            for name, destination in sorted(settings.destinations.items()):
+                destinations.append(
+                    {
+                        "name": name,
+                        "type": destination.destination_type,
+                        "configured": destination.configured,
+                        "timeout_seconds": destination.timeout_seconds,
+                    }
+                )
+
+        used_by: dict[str, list[str]] = {}
+        for pipeline in self.project.pipelines.values():
+            for which, names in (
+                ("on_failure", pipeline.alert_on_failure),
+                ("on_success", pipeline.alert_on_success),
+            ):
+                if not names:
+                    continue
+                # Resolved through groups, or a destination reached only via a
+                # group would read as "not used by any pipeline" — the most
+                # misleading thing this panel could say.
+                try:
+                    reached = [item.name for item in settings.resolve(names)] if settings else []
+                except NotificationError:
+                    reached = list(names)
+                for name in reached:
+                    label = f"{pipeline.pipeline_id} ({which})"
+                    if label not in used_by.setdefault(name, []):
+                        used_by[name].append(label)
+
+        return {
+            "configured": bool(destinations),
+            "destinations": destinations,
+            "groups": {name: list(members) for name, members in (settings.groups.items() if settings else [])},
+            "used_by": used_by,
+            "deliveries": self.store.list_notification_deliveries(limit=limit),
+            "warnings": [w for w in self.project.warnings if "notifications." in w],
+        }
+
+    def send_test_notification(self, destination_name: str) -> str:
+        """Post a test card to one destination and report what happened."""
+        settings = getattr(self.project, "notifications", None)
+        if settings is None or not settings.configured:
+            raise ValueError("No 'notifications:' destinations are declared in the config.")
+        targets = settings.resolve([destination_name])
+        if not targets:
+            raise ValueError(f"'{destination_name}' resolved to no destinations.")
+
+        results = send_alert(
+            targets,
+            lambda destination: build_alert(
+                title="Piply test",
+                pipeline_id="-",
+                status="success",
+                run_id="test",
+                trigger="manual",
+                tasks="0/0 succeeded",
+                duration="0.0s",
+                error=None,
+                run_url=self._run_url("test"),
+                card_format=destination.card_format,
+            ),
+        )
+        for name, delivered, detail in results:
+            try:
+                self.store.record_notification_delivery(
+                    run_id=None,
+                    pipeline_id="-",
+                    channel="teams",
+                    destination=name,
+                    outcome="sent" if delivered else "failed",
+                    detail=detail or "Test message",
+                )
+            except Exception:  # noqa: BLE001 - recording must not mask the result
+                pass
+        failures = [f"{name}: {detail}" for name, delivered, detail in results if not delivered]
+        if failures:
+            raise RuntimeError("; ".join(failures))
+        return f"Test card delivered to {', '.join(name for name, _, _ in results)}."
+
+    def get_smtp_settings(self) -> dict[str, object]:
+        """Return the central SMTP configuration, without the password."""
+        return load_smtp_settings(self.store).public_dict()
+
+    def save_smtp_settings(self, values: dict[str, object]) -> dict[str, object]:
+        """Persist central SMTP configuration and return the safe view of it."""
+        return save_smtp_settings(self.store, values).public_dict()
+
+    def send_test_email(self, recipient: str) -> str:
+        """Send one test message so an admin can confirm the settings work."""
+        settings = load_smtp_settings(self.store)
+        if not settings.configured:
+            raise ValueError("No SMTP server is configured.")
+        send_message(
+            settings,
+            build_message(
+                settings,
+                to=[recipient],
+                subject="[Piply] SMTP test message",
+                body=f"This is a test message from Piply ({self.project.title}).",
+            ),
+        )
+        return f"Test message sent to {recipient} via {settings.host}."
+
+    # --- Users and permissions ---------------------------------------------
+
+    def bootstrap_admin(self) -> tuple[str, str | None] | None:
+        """Create the initial admin account when none exists.
+
+        This is how a server install gets its first account without shell
+        access. Only runs when authentication has been switched on: an existing
+        install that never enabled auth keeps working with no accounts and no
+        login page, which is what backward compatibility requires here.
+
+        Returns ``(username, password)`` exactly once, on the run that creates
+        the account. ``password`` is None when the operator supplied one, so
+        the caller knows not to echo a secret it was given into the logs. A
+        generated password is returned so it can be shown once; it is never
+        stored in clear text and cannot be retrieved again.
+        """
+        if not self.settings.auth_enabled or self.store.count_users() > 0:
+            return None
+        if self.settings.auth_username and self.settings.auth_password:
+            # PIPLY_AUTH_USERNAME/PASSWORD already define an administrator, so
+            # generating a second one would be surprising and unnecessary.
+            return None
+
+        username = normalize_username(os.environ.get("PIPLY_ADMIN_USERNAME") or "admin")
+        supplied = read_secret(os.environ, "PIPLY_ADMIN_PASSWORD")
+        password = supplied or generate_password()
+        self.store.upsert_user(username, password_hash=hash_password(password), role="admin", is_active=True)
+        self.store.set_meta("admin_bootstrapped_at", datetime.now(timezone.utc).isoformat())
+        return username, (None if supplied else password)
+
+    def get_user(self, username: str) -> User | None:
+        """Return one account, or None."""
+        record = self.store.get_user_record(normalize_username(username))
+        if record is None:
+            return None
+        return User(
+            username=str(record["username"]),
+            role=str(record["role"]),
+            is_active=bool(record["is_active"]),
+            created_at=record["created_at"],  # type: ignore[arg-type]
+            last_login_at=record["last_login_at"],  # type: ignore[arg-type]
+            permissions=dict(record["permissions"]),  # type: ignore[arg-type]
+        )
+
+    def list_users(self) -> list[User]:
+        """Return every account."""
+        return [
+            User(
+                username=str(item["username"]),
+                role=str(item["role"]),
+                is_active=bool(item["is_active"]),
+                created_at=item["created_at"],  # type: ignore[arg-type]
+                last_login_at=item["last_login_at"],  # type: ignore[arg-type]
+                permissions=dict(item["permissions"]),  # type: ignore[arg-type]
+            )
+            for item in self.store.list_user_records()
+        ]
+
+    def authenticate(self, username: str, password: str) -> User | None:
+        """Return the account when the credentials are valid and active.
+
+        Repeated failures lock the username out for a few minutes. Verification
+        is intentionally slow, so an unthrottled endpoint would be both a
+        guessing risk and a way to exhaust CPU.
+        """
+        try:
+            normalized = normalize_username(username)
+        except AuthError:
+            return None
+        if self.login_throttle.retry_after(normalized):
+            return None
+
+        record = self.store.get_user_record(normalized)
+        if record is None or not record["is_active"]:
+            # Still hash, so a missing user and a wrong password take the same
+            # time and cannot be told apart by an attacker.
+            verify_password(password, self._timing_decoy_hash)
+            self.login_throttle.record_failure(normalized)
+            return None
+        if not verify_password(password, str(record["password_hash"])):
+            self.login_throttle.record_failure(normalized)
+            return None
+
+        self.login_throttle.record_success(normalized)
+        self.store.touch_user_login(normalized)
+        return self.get_user(normalized)
+
+    def login_retry_after(self, username: str) -> int:
+        """Return the remaining lockout in seconds for a username, else 0."""
+        try:
+            return self.login_throttle.retry_after(normalize_username(username))
+        except AuthError:
+            return 0
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        role: str = "user",
+        permissions: dict[str, object] | None = None,
+    ) -> User:
+        """Create one account with optional initial grants."""
+        normalized = normalize_username(username)
+        if role not in ROLES:
+            raise AuthError(f"Role must be one of: {', '.join(ROLES)}.")
+        if self.store.get_user_record(normalized) is not None:
+            raise AuthError(f"User '{normalized}' already exists.")
+        self.store.upsert_user(normalized, password_hash=hash_password(password), role=role, is_active=True)
+        for pipeline_id, actions in (permissions or {}).items():
+            self.grant_permission(normalized, str(pipeline_id), actions)
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def update_user(
+        self,
+        username: str,
+        *,
+        password: str | None = None,
+        role: str | None = None,
+        is_active: bool | None = None,
+    ) -> User:
+        """Update one account's password, role, or active flag."""
+        normalized = normalize_username(username)
+        if self.store.get_user_record(normalized) is None:
+            raise AuthError(f"Unknown user '{normalized}'.")
+        if role is not None and role not in ROLES:
+            raise AuthError(f"Role must be one of: {', '.join(ROLES)}.")
+        if (role and role != "admin") or is_active is False:
+            self._ensure_another_admin_remains(normalized)
+        self.store.upsert_user(
+            normalized,
+            password_hash=hash_password(password) if password else None,
+            role=role,
+            is_active=is_active,
+        )
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def delete_user(self, username: str) -> None:
+        """Delete one account, refusing to remove the last active admin."""
+        normalized = normalize_username(username)
+        self._ensure_another_admin_remains(normalized)
+        if not self.store.delete_user(normalized):
+            raise AuthError(f"Unknown user '{normalized}'.")
+
+    def _ensure_another_admin_remains(self, username: str) -> None:
+        """Refuse a change that would leave the install with no way in."""
+        current = self.get_user(username)
+        if current is None or not current.is_admin or not current.is_active:
+            return
+        other_admins = [
+            item for item in self.list_users() if item.is_admin and item.is_active and item.username != username
+        ]
+        if not other_admins:
+            raise AuthError("This is the only active admin. Promote another admin first.")
+
+    def grant_permission(self, username: str, pipeline_id: str, actions: object) -> User:
+        """Grant pipeline actions to a user. Use '*' for every pipeline."""
+        normalized = normalize_username(username)
+        if self.store.get_user_record(normalized) is None:
+            raise AuthError(f"Unknown user '{normalized}'.")
+        if pipeline_id != ALL_PIPELINES and pipeline_id not in self.project.pipelines:
+            raise AuthError(f"Unknown pipeline '{pipeline_id}'.")
+        self.store.set_user_permission(normalized, pipeline_id, normalize_permissions(actions))
+        user = self.get_user(normalized)
+        assert user is not None
+        return user
+
+    def revoke_permission(self, username: str, pipeline_id: str) -> User:
+        """Remove every grant a user holds on one pipeline."""
+        return self.grant_permission(username, pipeline_id, frozenset())
+
+    @property
+    def auth_required(self) -> bool:
+        """Return whether requests must be authenticated.
+
+        Accounts existing in the database is itself enough to switch auth on,
+        so creating the first user secures the install without a second step.
+        """
+        return bool(self.settings.auth_enabled) or self.store.count_users() > 0
+
     def diagnostics(self) -> dict[str, object]:
         """Return the full runtime diagnostics payload used by the API and UI."""
         scheduler = self.scheduler_snapshot()
@@ -1756,14 +2499,19 @@ class PipelineService:
         *,
         query: str | None = None,
         pipeline_id: str | None = None,
+        pipeline_ids: set[str] | None = None,
         task_id: str | None = None,
         limit: int = 300,
     ):
-        """Search recent log messages across runs."""
+        """Search recent log messages across runs.
+
+        ``pipeline_ids`` narrows the search to a permitted set of pipelines.
+        """
         self.reconcile_runtime_health()
         return self.store.search_logs(
             query=query,
             pipeline_id=pipeline_id,
+            pipeline_ids=pipeline_ids,
             task_id=task_id,
             limit=limit,
         )

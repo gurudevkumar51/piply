@@ -238,7 +238,7 @@ reducing unnecessary database scans during dashboard/API requests.
 
 ## 14. The biggest problem, if any task of downstream pipeline fails in between, I have to rerun all upstream pipline again to rerun that task. because downstream pipelines uses, upstream variables.
 
-## 15. I experience one problem, Downstream pipeline doesn't carry upstream pipeline environment variables. 
+## 15. I experience one problem, Downstream pipeline doesn't carry upstream pipeline environment variables.
 
 ## 16. UI: In pipeline page, show the pipelines in group, like if a pipeline template deployed for multiple tenate then show those pipelines together. As of now by default it shorts by alphabetical order.
 

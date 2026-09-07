@@ -26,8 +26,24 @@
         </div>
     </section>
 
-    <!-- One merged metadata strip instead of a hero block plus a detail grid. -->
-    <section class="panel tight-panel">
+    <!-- One merged metadata strip, collapsible so the DAG can take the space. -->
+    <section class="panel tight-panel collapsible" id="metadata-panel">
+        <div class="collapsible-header">
+            <button type="button" class="collapse-toggle" id="metadata-toggle"
+                    aria-expanded="true" aria-controls="metadata-body"
+                    onclick="toggleMetadataPanel()">
+                <span class="collapse-caret" aria-hidden="true">&#9662;</span>
+                <span class="small-kicker">Pipeline metadata</span>
+            </button>
+            <!-- Stays visible when collapsed, so the essentials are never hidden. -->
+            <div class="collapsed-summary">
+                <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
+                <span class="meta-pill">{{ pipeline.schedule_text }}</span>
+                <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+                <span class="meta-pill">{{ pipeline.execution_summary }}</span>
+            </div>
+        </div>
+        <div class="collapsible-body" id="metadata-body">
         <div class="hero-meta">
             <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
             <span class="meta-pill">{{ pipeline.schedule_text }}</span>
@@ -63,6 +79,7 @@
             {% endfor %}
         </div>
         {% endif %}
+        </div>
     </section>
 
     <section class="panel">
@@ -78,14 +95,18 @@
                 <span class="status-badge timed_out">timed out</span>
                 <span class="status-badge interrupted">interrupted</span>
                 <span class="status-badge skipped">skipped</span>
+                <button class="toolbar-button" id="pipeline-focus-toggle" type="button" onclick="togglePipelineFocusPanel()">Hide task focus</button>
             </div>
         </div>
-        <div class="dag-operator-grid">
+        <div class="dag-operator-grid" id="pipeline-dag-grid">
             <div class="dag-shell">
                 <div class="dag-stage" id="dag-stage"></div>
             </div>
             <aside class="task-inspector" id="pipeline-task-inspector">
-                <div class="detail-label">Task focus</div>
+                <div class="inspector-header">
+                    <div class="detail-label">Task focus</div>
+                    <button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closePipelineFocus()">Close</button>
+                </div>
                 <div class="empty-state">Select a task node to inspect it.</div>
             </aside>
         </div>
@@ -248,7 +269,7 @@ function renderPipelineInspector(taskId) {
     const inspector = document.getElementById("pipeline-task-inspector");
     const task = pipelineDagTasks.find((item) => item.task_id === taskId);
     if (!task) {
-        inspector.innerHTML = '<div class="detail-label">Task focus</div><div class="empty-state">Select a task node to inspect it.</div>';
+        inspector.innerHTML = '<div class="inspector-header"><div class="detail-label">Task focus</div><button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closePipelineFocus()">Close</button></div><div class="empty-state">Select a task node to inspect it.</div>';
         return;
     }
     const latest = taskRunMap(currentLatestTaskRuns)[task.task_id];
@@ -265,7 +286,10 @@ function renderPipelineInspector(taskId) {
         ? `<a class="button secondary" href="/pipelines/${task.task_id.replace("trigger_", "")}">Open downstream pipeline</a>`
         : `<button class="button primary" onclick="triggerTask('${pipelineId}', '${task.task_id}', { scope: document.getElementById('command-override-panel') || document })">Run this task</button>`;
     inspector.innerHTML = `
-        <div class="detail-label">Task focus</div>
+        <div class="inspector-header">
+            <div class="detail-label">Task focus</div>
+            <button class="button ghost tiny-button" type="button" title="Close task focus (Esc)" aria-label="Close task focus" onclick="closePipelineFocus()">Close</button>
+        </div>
         <h3 class="panel-title" style="margin-top:10px;">${escapeHtml(task.title)}</h3>
         <div class="task-stats" style="margin-top:12px;">
             <span class="task-type-badge">${escapeHtml(task.task_type)}</span>
@@ -303,7 +327,15 @@ function renderPipelineDag() {
             selectedNodeId: selectedPipelineTaskId,
             clickableStatuses: ["queued", "running", "success", "failed", "interrupted", "skipped", "cancelled"],
             onNodeClick: (node) => {
+                // Clicking the node you are already inspecting closes the panel.
+                const grid = document.getElementById("pipeline-dag-grid");
+                const open = grid && !grid.classList.contains("inspector-collapsed");
+                if (open && selectedPipelineTaskId === node.task_id) {
+                    closePipelineFocus();
+                    return;
+                }
                 focusPipelineTask(node.task_id, false, false);
+                openPipelineFocusForNode();
             },
             defaultLayout: "flow",
         },
@@ -382,6 +414,57 @@ async function refreshPipelineDetail() {
     } catch (error) {
         pipelinePageActive = false;
     }
+}
+
+// Collapsing metadata and the task focus panel hands the space to the DAG,
+// which is the reason to be on this page. Both choices persist per browser.
+const METADATA_KEY = "piply.pipelineMetadataOpen";
+const FOCUS_KEY = "piply.pipelineFocusOpen";
+
+function applyMetadataState(open, { persist = true } = {}) {
+    const panel = document.getElementById("metadata-panel");
+    const toggle = document.getElementById("metadata-toggle");
+    if (!panel || !toggle) return;
+    panel.classList.toggle("collapsed", !open);
+    toggle.setAttribute("aria-expanded", String(open));
+    if (persist) window.localStorage.setItem(METADATA_KEY, open ? "true" : "false");
+}
+
+function toggleMetadataPanel() {
+    const panel = document.getElementById("metadata-panel");
+    applyMetadataState(panel.classList.contains("collapsed"));
+}
+
+function applyPipelineFocusState(open, { persist = true, rerender = true } = {}) {
+    const grid = document.getElementById("pipeline-dag-grid");
+    const button = document.getElementById("pipeline-focus-toggle");
+    if (!grid || !button) return;
+    grid.classList.toggle("inspector-collapsed", !open);
+    button.textContent = open ? "Hide task focus" : "Show task focus";
+    button.classList.toggle("active", !open);
+    if (persist) window.localStorage.setItem(FOCUS_KEY, open ? "true" : "false");
+    // The SVG is laid out to its container, so it has to be redrawn.
+    if (rerender) renderPipelineDag();
+}
+
+function closePipelineFocus() {
+    // Clearing the selection too, so the highlighted node and the panel never
+    // disagree about what is being inspected.
+    selectedPipelineTaskId = null;
+    applyPipelineFocusState(false);
+}
+
+function openPipelineFocusForNode() {
+    // Reveal the inspector on click, but never toggle it shut from here.
+    const grid = document.getElementById("pipeline-dag-grid");
+    if (grid && grid.classList.contains("inspector-collapsed")) {
+        applyPipelineFocusState(true);
+    }
+}
+
+function togglePipelineFocusPanel() {
+    const grid = document.getElementById("pipeline-dag-grid");
+    applyPipelineFocusState(grid.classList.contains("inspector-collapsed"));
 }
 
 function renderPreview(preview) {
@@ -470,6 +553,11 @@ function runFromPreview() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    // Metadata starts collapsed so the graph leads; the focus panel starts open.
+    applyMetadataState(window.localStorage.getItem(METADATA_KEY) === "true", { persist: false });
+    // Full width by default: the graph is the point of the page, and the
+    // inspector opens itself the moment a node is clicked.
+    applyPipelineFocusState(window.localStorage.getItem(FOCUS_KEY) === "true", { persist: false, rerender: false });
     syncPipelineDagTasks(latestTaskRunPayloads);
     focusPipelineTask(selectedPipelineTaskId, false);
     if (pipelinePageActive) {
@@ -482,8 +570,18 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
+    if (event.key !== "Escape") {
+        return;
+    }
+    // The preview drawer sits on top, so it wins the first Escape.
+    const drawer = document.getElementById("preview-drawer");
+    if (drawer && drawer.classList.contains("open")) {
         closePreview();
+        return;
+    }
+    const grid = document.getElementById("pipeline-dag-grid");
+    if (grid && !grid.classList.contains("inspector-collapsed")) {
+        closePipelineFocus();
     }
 });
 </script>

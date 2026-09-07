@@ -1,0 +1,348 @@
+# Notifications
+
+How Piply tells you a run finished, and what happens when it cannot.
+
+Two channels, configured independently:
+
+| Channel | Pipeline key | Where delivery is configured |
+| --- | --- | --- |
+| **Email** | `notify:` | Central SMTP, under Settings or environment variables |
+| **Microsoft Teams** | `notifications:` | A `notifications:` block of webhook destinations |
+
+They are separate on purpose. Email suits an on-call rota and an audit trail;
+Teams suits the channel a team already watches all day. Most projects use one,
+some use both, and a failure in one never affects the other — or the run.
+
+Sending a notification is **not** part of executing a pipeline. A run that
+succeeded succeeded, whether or not the alert was delivered.
+
+---
+
+## 1. Which one do I want?
+
+Use **Teams** if your team lives in Teams and you want failures visible where
+people already are. It is the lower-friction option: one webhook per channel, no
+mail server.
+
+Use **email** if you need alerts to reach people outside the workspace, want
+them in an inbox for record-keeping, or already run SMTP.
+
+Use **both** for pipelines where a missed failure is expensive: Teams for
+immediacy, email for the paper trail.
+
+---
+
+## 2. Email
+
+### Configure delivery once
+
+Under **Settings → Email (SMTP)**, or with environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `PIPLY_SMTP_HOST` | Server hostname |
+| `PIPLY_SMTP_PORT` | Port, usually 587 |
+| `PIPLY_SMTP_USER` | Username |
+| `PIPLY_SMTP_PASSWORD` | Password. `PIPLY_SMTP_PASSWORD_FILE` reads it from a mounted file |
+| `PIPLY_SMTP_FROM` | From address |
+
+The password is **write-only**: it is never returned by the API or shown in the
+UI. Leave the field blank when saving to keep the stored value.
+
+### Say who to tell
+
+```yaml
+# Shorthand: a bare list means "on failure", which is what people want.
+notify: [oncall@example.com]
+
+# Explicit
+notify:
+  on_failure: [oncall@example.com, sre@example.com]
+  on_success: [team@example.com]
+```
+
+A pipeline lists *who* to tell, never *how* to reach the mail server. If no SMTP
+server is configured the run log says so and the run still succeeds.
+
+---
+
+## 3. Microsoft Teams
+
+### Declare destinations once
+
+Usually in their own file — see [splitting the config](YAML_SPECIFICATION.md#include):
+
+```yaml
+# piply_alert.yaml
+notifications:
+  teams:
+    production_alerts:
+      type: channel                     # channel | chat
+      webhook: ${TEAMS_PROD_WEBHOOK}
+    data_engineering:
+      type: chat
+      webhook: ${TEAMS_DATA_CHAT_WEBHOOK}
+      timeout_seconds: 15               # optional, default 10
+
+  groups:                               # reusable bundles
+    critical:
+      - production_alerts
+      - data_engineering
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `type` | no | `channel` for a channel connector, `chat` for a group chat. Default `channel`. |
+| `webhook` | **yes** | Incoming webhook URL. Must resolve to `https://`. |
+| `timeout_seconds` | no | Per-request timeout. Default `10`, must be greater than zero. |
+| `format` | no | `adaptive` or `messagecard`. Guessed from the URL when omitted. |
+
+### Two wire formats, and why it matters
+
+Microsoft **retired Office 365 connectors**. New webhooks are created through
+Power Automate ("Workflows"), and the two accept different payloads:
+
+| `format` | For | Shape |
+| --- | --- | --- |
+| `adaptive` *(default)* | Power Automate Workflows | Adaptive Card inside `{"type": "message", "attachments": [...]}` |
+| `messagecard` | Legacy connector URLs | The older `MessageCard` |
+
+**They are not interchangeable** — a Workflows endpoint rejects a MessageCard.
+Piply guesses from the host: a URL on `webhook.office.com` gets `messagecard`,
+anything else gets `adaptive`. Set `format:` explicitly to override the guess.
+
+If a curl like this works but Piply's alert does not, the format is the reason:
+
+```bash
+curl -H "Content-Type: application/json"   -d '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"type":"AdaptiveCard","body":[{"type":"TextBlock","text":"hello"}],"version":"1.4"}}]}'   "$WEBHOOK_URL"
+```
+
+That is the `adaptive` shape, and it is what Piply now sends by default.
+
+### Getting a webhook URL
+
+**Channel** — in Teams, open the channel, **⋯ → Connectors → Incoming Webhook**,
+name it, and copy the URL. Some tenants have connectors disabled by policy; if
+the option is missing, that is why.
+
+**Group chat** — chats do not expose connectors directly. Use a Power Automate
+*"When a Teams webhook request is received"* flow that posts into the chat, and
+give Piply that flow's HTTP URL. It behaves the same from Piply's side.
+
+### Wire it to a pipeline
+
+```yaml
+# piply_pipe.yaml
+pipelines:
+  claim_pipeline:
+    notifications:
+      on_failure:
+        - production_alerts
+        - data_engineering
+      on_success:
+        - data_engineering
+    tasks:
+      extract: {type: python, path: extract.py, function: run}
+```
+
+A bare list means **on failure**, matching `notify:`:
+
+```yaml
+    notifications: [critical]     # same as on_failure: [critical]
+```
+
+A group name works anywhere a destination name does. Naming both a group and one
+of its members notifies that member **once**, not twice.
+
+### Which level should it go on?
+
+`notifications:` is accepted on a pipeline, a template, and a deployment. Pick
+the *widest* level where the answer is the same for everything under it.
+
+| Level | Use it when | Behaviour |
+| --- | --- | --- |
+| **Template** | Every deployment should alert the same people | Inherited by all of them — write it once |
+| **Deployment** | One tenant needs different destinations | **Replaces** the template's list for that deployment |
+| **Pipeline** | A standalone pipeline, not built from a template | Applies to that pipeline only |
+
+```yaml
+pipeline_templates:
+  scrape:
+    notifications:
+      on_failure: [ops]            # every deployment inherits this
+    tasks: { ... }
+
+pipeline_deployments:
+  alpha_scrape:
+    template: scrape               # -> alerts ops
+  beta_scrape:
+    template: scrape
+    notifications:
+      on_failure: [data_team]      # -> alerts data_team INSTEAD of ops
+```
+
+The deployment **replaces** rather than adds, following the ordinary
+[list-replaces rule](YAML_SPECIFICATION.md#8-templates-and-deployments). To
+alert both, list both: `on_failure: [ops, data_team]`, or use a group.
+
+**Start at the template.** With one deployment per tenant, putting it on each
+deployment means editing 29 places when the on-call channel changes.
+
+---
+
+## 4. Never put a webhook in YAML
+
+A Teams webhook URL **is** the credential. Anyone holding it can post to the
+channel as your integration.
+
+- Write `webhook: ${TEAMS_PROD_WEBHOOK}` and set the variable in the
+  environment, `.env`, or a [`secrets:`](YAML_SPECIFICATION.md#secrets) file.
+- Piply never writes a webhook URL to a log, an error message, or an API
+  response. A delivery failure names the **destination**, never the URL.
+- A literal `https://...` in YAML is accepted — Piply cannot tell it apart from
+  a resolved value — but it will be committed to git. Do not do it.
+- Rotate by deleting the connector in Teams and issuing a new one; the old URL
+  stops working immediately.
+
+An unresolved variable is a **warning**, not a load error, so a developer
+without the production secret can still run pipelines locally:
+
+```
+$ piply validate
+2 warning(s):
+  ! notifications.teams.production_alerts: webhook '${TEAMS_PROD_WEBHOOK}' did not
+    resolve to a value, so this destination will be skipped.
+```
+
+---
+
+## 5. What the alert looks like
+
+One standardised card per run, colour-coded by status — green `success`, red
+`failed`, amber `timed_out`, grey `cancelled` — carrying:
+
+| Field | Example |
+| --- | --- |
+| Pipeline | `Claim Pipeline (claim_pipeline)` |
+| Status | `failed` |
+| Run | `880617da766c` |
+| Trigger | `manual`, `schedule`, `sensor`, `upstream` |
+| Tasks | `0/1 succeeded` |
+| Duration | `12.4s` |
+| Error | present only on failure |
+
+A long error is **truncated rather than dropped**, because Teams rejects an
+oversized card and a shortened alert beats no alert.
+
+Set `PIPLY_BASE_URL` to add an **Open run in Piply** button linking straight to
+the run page:
+
+```
+PIPLY_BASE_URL=https://piply.internal
+```
+
+---
+
+## 6. Seeing what was sent
+
+**Settings → Alerts (Microsoft Teams)**, admin only.
+
+It answers the question a run log cannot: *was anything even attempted?*
+
+- **Every declared destination**, its type, and whether its webhook resolved
+- **Used by** — which pipelines reference it, resolved **through groups**, so a
+  destination reached only via a group is not reported as unused
+- **Send test** — posts a card immediately, so a webhook can be checked without
+  waiting for a run to fail
+- **Recent deliveries** — pipeline, run, destination, outcome, and the reason
+
+Webhook URLs never appear on this page. Destinations are declared in YAML, not
+here, because the URL is a credential and belongs in the environment.
+
+The outcome column includes **`nothing configured`**, which exists because
+silence is the hardest case to debug: a pipeline with only `on_failure` that
+succeeds sends nothing, and without this row that is indistinguishable from a
+delivery that failed silently.
+
+---
+
+## 7. When delivery fails
+
+Nothing happens to the run. Every outcome is recorded in the run log instead:
+
+| Situation | Run status | Logged against the run |
+| --- | --- | --- |
+| Delivered | unchanged | `Teams notification sent to production_alerts.` |
+| Webhook returns 4xx/5xx | unchanged | `Teams notification to 'x' failed: HTTP 500: ...` |
+| Host unreachable or slow | unchanged | `Teams notification to 'x' failed: timed out after 10s` |
+| Destination name is a typo | unchanged | `Unknown notification destination 'x'. Known destinations: ...` |
+| `${VAR}` never resolved | unchanged | `Teams notification skipped for 'x': its webhook is not configured.` |
+| No `notifications:` block at all | unchanged | `Teams notification skipped: no 'notifications:' destinations are declared.` |
+
+A typo in a destination name is deliberately **not** a load error — one mistyped
+name should not stop every pipeline in the project from loading. It is reported
+against the run that tried to use it. A typo inside a `groups:` list *is* caught
+at load time, because that is a static reference Piply can check.
+
+---
+
+## 8. How delivery works
+
+- Destinations are posted **concurrently** with `httpx.AsyncClient`, each with
+  its own timeout, so four destinations cost one timeout rather than four.
+- Delivery happens **after** the run is recorded, never inside task execution.
+- Timeout defaults to 10 seconds. A notification is not worth holding a run's
+  completion path open for.
+- No new dependency: `httpx` is already one of Piply's eight.
+
+---
+
+## 9. Troubleshooting
+
+**The alert never arrives, and there is nothing in the run log.**
+Open **Settings → Alerts** first — it records outcomes a run log does not,
+including `nothing configured`. The usual causes are a pipeline with no
+`notifications:` block at all, or a run whose outcome does not match the list
+you filled in: `on_success` and `on_failure` are separate.
+
+**`its webhook is not configured`.**
+The `${VAR}` did not resolve. `piply validate` warns about this at load time.
+Check the variable is set in the environment Piply actually runs in — a
+`systemd` unit does not inherit your shell.
+
+**`FileNotFoundError: [Errno 2] No such file or directory`.**
+Not a Piply file — a TLS certificate bundle. One of `SSL_CERT_FILE`,
+`SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` is set in the server's
+environment and points at a path that no longer exists, commonly a removed conda
+environment or a path the service account cannot see. The message names the
+variable and its value. Fix or unset it and retry:
+
+```bash
+echo $SSL_CERT_FILE      # then unset it, or point it at a real bundle
+```
+
+**`request failed (ConnectError)`.**
+DNS or the network, not Teams. If a proxy is set in the server's environment the
+message says so — the webhook host has to be reachable from the machine Piply
+runs on, which is often not the machine you are browsing from.
+
+**`HTTP 400` from Teams.**
+Usually a revoked or mistyped connector URL. Recreate the connector.
+
+**`HTTP 429`.**
+Teams is rate-limiting the webhook. Reduce how many pipelines point at one
+destination, or notify only on failure.
+
+**Alerts arrive twice.**
+A pipeline naming both a group and one of its members is de-duplicated, so check
+for two pipelines both alerting — an upstream and its downstream both configured
+with `on_failure` will each send.
+
+---
+
+## Related
+
+- [YAML Specification](YAML_SPECIFICATION.md#13-notifications) — the key reference
+- [Sensors](SENSORS.md) — what triggers the runs you are being alerted about
+- [Security](SECURITY.md) — how Piply handles secrets generally
+- [FAQ](FAQ.md) — short answers to the questions above

@@ -21,6 +21,8 @@ class EntityItem:
     key: str
     value: str
     variables: dict[str, str] = field(default_factory=dict)
+    #: One per trailing '*' on the configured value. Higher runs first.
+    priority: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -30,6 +32,8 @@ class EntitySelection:
     key: str
     values: dict[str, str]
     variables: dict[str, str]
+    #: Sum of the selected items' priorities.
+    priority: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,6 +46,8 @@ class RuntimeTaskTemplate:
     entity_key: str | None = None
     entity_values: dict[str, str] = field(default_factory=dict)
     variables: dict[str, str] = field(default_factory=dict)
+    #: Priority contributed by the entity values, added to the task's own.
+    priority: int = 0
 
 
 EntityMap = dict[str, tuple[EntityItem, ...]]
@@ -55,8 +61,21 @@ def slug_fragment(value: object) -> str:
     return slug or "item"
 
 
+def split_priority_suffix(raw_value: str) -> tuple[str, int]:
+    """Split a trailing ``*`` run of an entity value into value and priority.
+
+    ``payment**`` means the value ``payment`` at priority 2. A value made only
+    of asterisks is left alone, and the mapping form never strips, so a literal
+    trailing asterisk can still be expressed.
+    """
+    stripped = raw_value.rstrip("*")
+    if not stripped:
+        return raw_value, 0
+    return stripped, len(raw_value) - len(stripped)
+
+
 def _entity_item_from_scalar(entity_name: str, raw_value: object) -> EntityItem:
-    value = str(raw_value)
+    value, priority = split_priority_suffix(str(raw_value))
     return EntityItem(
         entity=entity_name,
         key=slug_fragment(value),
@@ -65,6 +84,7 @@ def _entity_item_from_scalar(entity_name: str, raw_value: object) -> EntityItem:
             entity_name: value,
             f"{entity_name}_value": value,
         },
+        priority=priority,
     )
 
 
@@ -82,7 +102,13 @@ def _entity_item_from_mapping(entity_name: str, raw_key: object, raw_value: Any)
         variables.setdefault(f"{entity_name}_value", value)
         return EntityItem(entity=entity_name, key=slug_fragment(raw_key), value=value, variables=variables)
     item = _entity_item_from_scalar(entity_name, raw_value)
-    return EntityItem(entity=entity_name, key=slug_fragment(raw_key), value=item.value, variables=item.variables)
+    return EntityItem(
+        entity=entity_name,
+        key=slug_fragment(raw_key),
+        value=item.value,
+        variables=item.variables,
+        priority=item.priority,
+    )
 
 
 def parse_entity_map(raw_value: Any, label: str) -> EntityMap:
@@ -151,7 +177,14 @@ def entity_selections(entity_map: EntityMap) -> tuple[EntitySelection, ...]:
         for item in selected_items:
             variables.update(item.variables)
         variables["entity_key"] = key
-        selections.append(EntitySelection(key=key, values=values, variables=variables))
+        selections.append(
+            EntitySelection(
+                key=key,
+                values=values,
+                variables=variables,
+                priority=sum(item.priority for item in selected_items),
+            )
+        )
     return tuple(selections)
 
 
@@ -169,9 +202,37 @@ def _task_entity_map(
 ) -> EntityMap:
     if "entities" not in raw_task:
         return pipeline_entities
-    if raw_task.get("entities") in (None, "", False) or raw_task.get("entities") == {}:
+    declared = raw_task.get("entities")
+    if declared in (None, "", False) or declared == {}:
         return {}
+    if isinstance(declared, list):
+        # A list *selects* dimensions rather than adding them, so the exception
+        # is annotated once instead of repeating the shared dimensions on every
+        # other task: `entities: [practice]` on a per-practice login, while the
+        # tasks around it expand over everything declared for the pipeline.
+        return _selected_entity_map(template_id, declared, pipeline_entities)
     return merge_entity_maps(pipeline_entities, task_entities.get(template_id, {}))
+
+
+def _selected_entity_map(
+    template_id: str,
+    declared: list[Any],
+    pipeline_entities: EntityMap,
+) -> EntityMap:
+    """Keep only the named dimensions, in the order the pipeline declared them."""
+    wanted: list[str] = []
+    for item in declared:
+        name = str(item).strip()
+        if not name:
+            continue
+        if name not in pipeline_entities:
+            known = ", ".join(pipeline_entities) or "none"
+            raise ExpansionError(f"Task '{template_id}' selects unknown entity '{name}'. Declared entities: {known}")
+        if name not in wanted:
+            wanted.append(name)
+    # Pipeline order, not the order they were listed, so runtime ids stay
+    # consistent with every other task.
+    return {name: values for name, values in pipeline_entities.items() if name in wanted}
 
 
 def _runtime_title(template_id: str, raw_task: dict[str, Any], selection: EntitySelection | None) -> None:
@@ -179,6 +240,35 @@ def _runtime_title(template_id: str, raw_task: dict[str, Any], selection: Entity
         return
     human_task = template_id.replace("_", " ").replace("-", " ").title()
     raw_task["title"] = f"{selection.key} / {human_task}"
+
+
+def _narrower_dependency(
+    spec: RuntimeTaskTemplate,
+    dependency_map: dict[str, str],
+    values_by_runtime_id: dict[str, dict[str, str]],
+) -> str | None:
+    """Return the one dependency instance this task belongs to, if there is one.
+
+    A task may expand over fewer dimensions than the task depending on it — a
+    per-practice `login` feeding per-practice-per-report `extract` tasks. Without
+    this, `alpha.payment.extract` would depend on *every* login, so one
+    practice's failure would stall every other practice, which is the opposite
+    of what entity expansion is for.
+
+    Matching is on entity *values*, not on the id string, so it does not care
+    which order the dimensions were declared in. Only an unambiguous single
+    match counts; anything else falls back to depending on them all.
+    """
+    if not spec.entity_values:
+        return None
+    matches = [
+        runtime_id
+        for runtime_id in dependency_map.values()
+        if (candidate := values_by_runtime_id.get(runtime_id))
+        and candidate
+        and candidate.items() <= spec.entity_values.items()
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def expand_task_templates(
@@ -212,16 +302,19 @@ def expand_task_templates(
                     entity_key=selection.key,
                     entity_values=selection.values,
                     variables=selection.variables,
+                    priority=selection.priority,
                 )
             )
 
     by_template: dict[str, dict[str, str]] = {}
+    values_by_runtime_id: dict[str, dict[str, str]] = {}
     seen_runtime_ids: set[str] = set()
     for spec in specs:
         if spec.runtime_id in seen_runtime_ids:
             raise ExpansionError(f"Entity expansion produced duplicate runtime task id '{spec.runtime_id}'")
         seen_runtime_ids.add(spec.runtime_id)
         by_template.setdefault(spec.template_id, {})[spec.entity_key or ""] = spec.runtime_id
+        values_by_runtime_id[spec.runtime_id] = spec.entity_values
 
     rewritten: list[RuntimeTaskTemplate] = []
     for spec in specs:
@@ -239,6 +332,8 @@ def expand_task_templates(
                 dependency_ids = [dependency_map[current_key]]
             elif "" in dependency_map:
                 dependency_ids = [dependency_map[""]]
+            elif matched := _narrower_dependency(spec, dependency_map, values_by_runtime_id):
+                dependency_ids = [matched]
             else:
                 dependency_ids = list(dependency_map.values())
             for dependency_id in dependency_ids:
@@ -256,6 +351,7 @@ def expand_task_templates(
                 entity_key=spec.entity_key,
                 entity_values=spec.entity_values,
                 variables=spec.variables,
+                priority=spec.priority,
             )
         )
 

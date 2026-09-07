@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from piply.api.app import create_app
@@ -1044,3 +1045,451 @@ def test_backup_to_an_explicit_file_path(tmp_path: Path) -> None:
 
     assert written == target.resolve()
     assert written.is_file()
+
+
+def test_missing_env_file_warns_instead_of_failing_silently(tmp_path: Path) -> None:
+    """A declared env_file that does not resolve must be visible, not silent.
+
+    `env_file` resolves against `workspace:`, not the config file. When those
+    differ the file loads nothing and the pipeline runs with the variables
+    simply absent, which surfaces much later as "my credentials aren't set".
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    (tmp_path / ".env").write_text("SHARED=from_env_file\n", encoding="utf-8")
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Env File Warning",
+                "workspace: workspace",
+                "pipelines:",
+                "  demo:",
+                "    env_file: .env",
+                "    tasks:",
+                "      main: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+    assert len(project.warnings) == 1
+    warning = project.warnings[0]
+    assert "env_file '.env' was not found" in warning
+    # The message has to name the path it actually looked at, or it does not help.
+    assert str(tmp_path / "workspace") in warning
+    # Loading still succeeds: an absent env file is legitimate in some environments.
+    assert "demo" in project.pipelines
+
+    # Once the file is where the workspace expects it, the warning clears and
+    # the values load.
+    (tmp_path / "workspace" / ".env").write_text("SHARED=from_env_file\n", encoding="utf-8")
+    project = load_project(config_path)
+    assert project.warnings == ()
+    assert project.pipelines["demo"].tasks["main"].env["SHARED"] == "from_env_file"
+
+
+def test_env_file_overrides_inline_pipeline_env(tmp_path: Path) -> None:
+    """Documented precedence: env_file wins over inline `env:` at pipeline level.
+
+    This surprises people, so it is pinned here: if it ever changes, it is a
+    behaviour change that needs a note, not a silent fix.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    (tmp_path / "workspace" / ".env").write_text("SHARED=from_env_file\n", encoding="utf-8")
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Env Precedence",
+                "workspace: workspace",
+                "defaults:",
+                "  env:",
+                "    SHARED: from_defaults",
+                "pipelines:",
+                "  demo:",
+                "    env_file: .env",
+                "    env:",
+                "      SHARED: from_pipeline_env",
+                "    tasks:",
+                "      plain: {type: cli, command: echo hi}",
+                "      overridden:",
+                "        type: cli",
+                "        command: echo hi",
+                "        env:",
+                "          SHARED: from_task_env",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    tasks = load_project(config_path).pipelines["demo"].tasks
+    assert tasks["plain"].env["SHARED"] == "from_env_file"
+    # Task-level env is the last word, which is how you win against an env file.
+    assert tasks["overridden"].env["SHARED"] == "from_task_env"
+
+
+def test_deployment_merge_semantics_match_the_documentation(tmp_path: Path) -> None:
+    """Pin the template/deployment merge rules documented in YAML_SPECIFICATION §8.
+
+    Mappings merge key by key, lists are replaced wholesale, and scalars are
+    replaced. People rely on this to override one tenant without restating a
+    template, so a change here is a breaking change that needs a doc update.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Merge Rules",
+                "workspace: workspace",
+                "pipeline_templates:",
+                "  base:",
+                "    max_parallel_tasks: 2",
+                "    timeout: 1h",
+                "    tags: [alpha, beta]",
+                "    retry: {attempts: 1, mode: resume, delay_seconds: 7}",
+                "    variables: {practice: DEFAULT, shared: from_template}",
+                "    env: {SHARED_ENV: tpl, ONLY_TPL: keep}",
+                "    notify:",
+                "      on_failure: [tpl@example.com]",
+                "      on_success: [ok@example.com]",
+                "    tasks:",
+                "      one: {type: cli, command: echo one, timeout: 5m}",
+                "      two: {type: cli, command: echo two, depends_on: [one]}",
+                "pipeline_deployments:",
+                "  OVERRIDE:",
+                "    template: base",
+                "    max_parallel_tasks: 8",
+                "    timeout: 4h",
+                "    tags: [gamma]",
+                "    retry: {attempts: 5}",
+                "    variables: {practice: TENANT_B}",
+                "    env: {SHARED_ENV: dep}",
+                "    notify:",
+                "      on_failure: [dep@example.com]",
+                "    tasks:",
+                "      two: {timeout: 30m}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    pipeline = load_project(config_path).pipelines["OVERRIDE"]
+
+    # Scalars: the deployment replaces.
+    assert pipeline.max_parallel_tasks == 8
+    assert pipeline.timeout_seconds == 4 * 3600
+
+    # Mappings: merged key by key, so the template's other entries survive.
+    assert pipeline.variables["practice"] == "TENANT_B"
+    assert pipeline.variables["shared"] == "from_template"
+    assert pipeline.tasks["one"].env["SHARED_ENV"] == "dep"
+    assert pipeline.tasks["one"].env["ONLY_TPL"] == "keep"
+    assert pipeline.retry_policy.attempts == 5
+    assert pipeline.retry_policy.mode == "resume"
+    assert pipeline.retry_policy.delay_seconds == 7
+    assert pipeline.notify_on_failure == ("dep@example.com",)
+    assert pipeline.notify_on_success == ("ok@example.com",)
+
+    # Lists: replaced wholesale. Tags do not accumulate.
+    assert pipeline.tags == ("gamma",)
+
+    # Tasks merge per key, so one field changes without restating the task.
+    assert pipeline.tasks["two"].timeout_seconds == 30 * 60
+    assert pipeline.tasks["two"].command == "echo two"
+    assert pipeline.tasks["one"].timeout_seconds == 5 * 60
+
+
+def test_schedule_merge_lets_cron_win_over_every(tmp_path: Path) -> None:
+    """A documented trap: `schedule` merges, so `cron` beats a deployment's `every`.
+
+    The merged mapping holds both keys and the parser prefers `cron`, so the
+    deployment silently keeps the template's schedule. Pinned here because the
+    failure is invisible — the pipeline simply runs on the wrong cadence.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+
+    def build(template_schedule: str, deployment_schedule: str) -> str:
+        return "\n".join(
+            [
+                'version: "1"',
+                "title: Schedule Merge",
+                "workspace: workspace",
+                "pipeline_templates:",
+                "  base:",
+                f"    schedule: {{{template_schedule}}}",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+                "pipeline_deployments:",
+                "  DEP:",
+                "    template: base",
+                f"    schedule: {{{deployment_schedule}}}",
+            ]
+        )
+
+    # Template cron + deployment every: cron wins, the `every` is ignored.
+    config_path.write_text(build('cron: "0 3 * * 0"', "every: 5m"), encoding="utf-8")
+    assert "Cron" in load_project(config_path).pipelines["DEP"].schedule.describe()
+
+    # The other direction works, which is why this is a trap rather than a rule.
+    config_path.write_text(build("every: 15m", 'cron: "0 3 * * 0"'), encoding="utf-8")
+    assert "Cron" in load_project(config_path).pipelines["DEP"].schedule.describe()
+
+
+def test_child_pipeline_keeps_its_own_execution_settings(tmp_path: Path) -> None:
+    """A triggered child inherits data, not execution settings.
+
+    A shared downstream pipeline must behave the same whichever tenant fired it,
+    so `max_parallel_tasks`, `timeout`, and `retry` stay the child's own.
+    """
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Child Inheritance",
+                "workspace: workspace",
+                "pipelines:",
+                "  child:",
+                "    max_parallel_tasks: 1",
+                "    timeout: 10m",
+                "    retry: {attempts: 0}",
+                "    variables: {practice: CHILD_DEFAULT, child_only: mine}",
+                "    tasks:",
+                "      a: {type: cli, command: echo a}",
+                "pipeline_templates:",
+                "  parent_tpl:",
+                "    max_parallel_tasks: 8",
+                "    timeout: 4h",
+                "    retry: {attempts: 3}",
+                "    triggers_on_success: [child]",
+                "    tasks:",
+                "      go: {type: cli, command: echo parent}",
+                "pipeline_deployments:",
+                "  BENNETT_PARENT:",
+                "    template: parent_tpl",
+                "    variables: {practice: BENNETT}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "piply.db")
+    parent = service.trigger_pipeline("BENNETT_PARENT", wait=True)
+
+    children = []
+    for _ in range(80):
+        children = service.store.list_child_runs(parent.run_id)
+        if children:
+            break
+        time.sleep(0.25)
+    assert children, "the downstream pipeline never ran"
+
+    snapshot = service.store.get_run_config(children[0].run_id)
+
+    # Data crosses the boundary; the parent's value wins over the child's default.
+    assert snapshot["inherited_variables"]["practice"] == "BENNETT"
+
+    # Execution settings do not: these are the child's own, not the parent's.
+    assert snapshot["settings"]["max_parallel_tasks"] == 1
+    assert snapshot["settings"]["timeout_seconds"] == 600
+    assert snapshot["settings"]["retry"]["attempts"] == 0
+
+
+def test_a_task_may_expand_over_fewer_entity_dimensions(tmp_path: Path) -> None:
+    """A per-practice login feeding per-practice-per-report extracts.
+
+    Without matching on entity values, every extract would depend on every
+    login, so one practice failing would stall all the others — the opposite of
+    what entity expansion is for.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Partial Expansion",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      login:",
+                "        type: cli",
+                "        command: echo login {practice}",
+                "      extract:",
+                "        type: cli",
+                "        entities:",
+                "          report: [payment, adjustment]",
+                "        command: echo extract {practice} {report}",
+                "        depends_on: [login]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = load_project(config_path).pipelines["flow"]
+
+    assert sorted(pipeline.tasks) == [
+        "alpha.adjustment.extract",
+        "alpha.login",
+        "alpha.payment.extract",
+        "beta.adjustment.extract",
+        "beta.login",
+        "beta.payment.extract",
+    ]
+    # Each extract waits only for its own practice's login.
+    assert list(pipeline.tasks["alpha.payment.extract"].depends_on) == ["alpha.login"]
+    assert list(pipeline.tasks["beta.adjustment.extract"].depends_on) == ["beta.login"]
+
+
+def test_a_task_with_more_dimensions_still_fans_in(tmp_path: Path) -> None:
+    """Narrowing only applies one way; a rollup still waits for everything."""
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Fan In",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta]",
+                "  report: [payment, adjustment]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      extract: {type: cli, command: echo e}",
+                "      rollup:",
+                "        type: cli",
+                "        entities: false",
+                "        command: echo r",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = load_project(config_path).pipelines["flow"]
+
+    assert len(pipeline.tasks["rollup"].depends_on) == 4
+    # And same-dimension tasks still pair up exactly.
+    assert list(pipeline.tasks["alpha.payment.extract"].depends_on) == []
+
+
+def test_entities_list_selects_dimensions_instead_of_adding_them(tmp_path: Path) -> None:
+    """Declare shared dimensions once; annotate only the task that differs.
+
+    Repeating `entities: {report: [...]}` on every downstream task is noise and
+    drifts. Listing dimension *names* narrows instead, so adding a fourth task
+    to the chain needs no entity declaration at all.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Select",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta]",
+                "  report: [payment, adjustment]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      login:",
+                "        type: cli",
+                "        entities: [practice]",
+                "        command: echo login {practice}",
+                "      extract:",
+                "        type: cli",
+                "        command: echo extract {practice} {report}",
+                "        depends_on: [login]",
+                "      load:",
+                "        type: cli",
+                "        command: echo load {practice} {report}",
+                "        depends_on: [extract]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = load_project(config_path).pipelines["flow"]
+
+    # One login per practice, not one per practice/report combination.
+    assert sorted(t for t in pipeline.tasks if t.endswith(".login")) == ["alpha.login", "beta.login"]
+    assert len(pipeline.tasks) == 10
+    # The chain still pairs up per combination, and back to the right login.
+    assert list(pipeline.tasks["alpha.payment.extract"].depends_on) == ["alpha.login"]
+    assert list(pipeline.tasks["alpha.payment.load"].depends_on) == ["alpha.payment.extract"]
+
+
+def test_selecting_an_unknown_entity_is_an_error(tmp_path: Path) -> None:
+    """A typo must not silently produce an unexpanded task."""
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Typo",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha]",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      login:",
+                "        type: cli",
+                "        entities: [praktice]",
+                "        command: echo hi",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="selects unknown entity 'praktice'"):
+        load_project(config_path)
+
+
+def test_a_global_entity_that_no_task_uses_is_warned_about(tmp_path: Path) -> None:
+    """A top-level `entities:` block expands pipelines that never wanted it.
+
+    The generated tasks are identical apart from their ids, so a cleanup job
+    runs three times and a summary email is sent three times without anything
+    failing. The warning is the only thing that makes it visible.
+    """
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Global",
+                "workspace: .",
+                "entities:",
+                "  practice: [alpha, beta, gamma]",
+                "pipelines:",
+                "  claim_extract:",
+                "    tasks:",
+                "      t: {type: cli, command: 'echo extract {practice}'}",
+                "  nightly_cleanup:",
+                "    tasks:",
+                "      t: {type: cli, command: echo pruning}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    project = load_project(config_path)
+
+    warnings = [w for w in project.warnings if "nightly_cleanup" in w]
+    assert len(warnings) == 1
+    assert "expanded 3x" in warnings[0]
+    # The pipeline that legitimately uses it is not warned about.
+    assert not [w for w in project.warnings if "claim_extract" in w]
+    # And the behaviour itself is unchanged, so nothing silently breaks.
+    assert len(project.pipelines["nightly_cleanup"].tasks) == 3

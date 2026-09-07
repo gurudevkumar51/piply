@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def read_secret(env: Mapping[str, str], name: str) -> str | None:
+    """Return a secret from ``NAME``, or from the file named by ``NAME_FILE``.
+
+    The ``_FILE`` form is the Docker and Kubernetes convention for mounted
+    secrets. It is preferred on a server because an environment variable is
+    readable through ``docker inspect``, ``/proc/<pid>/environ``, and most
+    crash reporters, while a mounted file is not.
+    """
+    path_value = env.get(f"{name}_FILE")
+    if path_value:
+        try:
+            content = Path(path_value).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read {name}_FILE at {path_value}: {exc}") from exc
+        if content:
+            return content
+    return env.get(name) or None
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -116,9 +136,14 @@ class PiplySettings:
     stale_run_timeout_seconds: int
     heartbeat_interval_seconds: int
     scheduler_poll_interval_seconds: int
+    #: When false the server still serves the UI and runs manual triggers, but
+    #: no schedule or sensor fires. Set it in a dev `.env` so opening the
+    #: project does not immediately start last night's pipelines.
+    scheduler_enabled: bool
     queue_dispatch_batch_size: int
     queue_dispatch_stale_seconds: int
     upcoming_run_preview_count: int
+    pipeline_run_history_count: int
     reconcile_interval_seconds: int
     retention_run_days: int
     retention_log_days: int
@@ -130,6 +155,17 @@ class PiplySettings:
     auth_password: str | None
     api_token: str | None
     env_values: dict[str, str]
+
+    @property
+    def database_configured(self) -> bool:
+        """Return whether a metadata store was chosen explicitly.
+
+        False means nothing set `PIPLY_DATABASE`, so Piply would silently fall
+        back to a file under the config directory. On a server that default is
+        usually wrong — it is the container path that gets wiped on redeploy —
+        so a fresh install is sent to the setup page to choose deliberately.
+        """
+        return self.database_path is not None or self.database_dsn is not None
 
 
 def _candidate_env_files(config_path: Path | None) -> list[Path]:
@@ -149,7 +185,9 @@ def load_settings(
     environ: dict[str, str] | None = None,
 ) -> PiplySettings:
     """Load settings from .env files and environment variables."""
-    env_source = dict(environ or os.environ)
+    # `is None` rather than a truth test: an explicitly empty mapping means "no
+    # environment", which is how a caller asks for the unconfigured defaults.
+    env_source = dict(os.environ if environ is None else environ)
     resolved_config = Path(config_path).resolve() if config_path else None
 
     merged_env: dict[str, str] = {}
@@ -199,6 +237,10 @@ def load_settings(
         1,
         _parse_int(merged_env.get("PIPLY_UPCOMING_RUN_PREVIEW_COUNT"), 8),
     )
+    pipeline_run_history_count = max(
+        1,
+        min(20, _parse_int(merged_env.get("PIPLY_PIPELINE_RUN_HISTORY_COUNT"), 5)),
+    )
     reconcile_interval_seconds = max(
         0,
         _parse_int(merged_env.get("PIPLY_RECONCILE_INTERVAL_SECONDS"), 15),
@@ -213,8 +255,8 @@ def load_settings(
     metrics_enabled = _parse_bool(merged_env.get("PIPLY_METRICS_ENABLED"), True)
 
     auth_username = merged_env.get("PIPLY_AUTH_USERNAME")
-    auth_password = merged_env.get("PIPLY_AUTH_PASSWORD")
-    api_token = merged_env.get("PIPLY_API_TOKEN")
+    auth_password = read_secret(merged_env, "PIPLY_AUTH_PASSWORD")
+    api_token = read_secret(merged_env, "PIPLY_API_TOKEN")
     auth_enabled = _parse_bool(merged_env.get("PIPLY_AUTH_ENABLED")) or any(
         [auth_username and auth_password, api_token]
     )
@@ -227,9 +269,11 @@ def load_settings(
         stale_run_timeout_seconds=stale_run_timeout_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         scheduler_poll_interval_seconds=scheduler_poll_interval_seconds,
+        scheduler_enabled=_parse_bool(merged_env.get("PIPLY_SCHEDULER_ENABLED"), True),
         queue_dispatch_batch_size=queue_dispatch_batch_size,
         queue_dispatch_stale_seconds=queue_dispatch_stale_seconds,
         upcoming_run_preview_count=upcoming_run_preview_count,
+        pipeline_run_history_count=pipeline_run_history_count,
         reconcile_interval_seconds=reconcile_interval_seconds,
         retention_run_days=retention_run_days,
         retention_log_days=retention_log_days,

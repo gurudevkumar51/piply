@@ -403,3 +403,662 @@ def wait_for_run_completion(client, run_id, timeout=5.0):
         time.sleep(0.1)
 
     raise AssertionError(f"Run {run_id} did not reach a terminal state within {timeout} seconds.")
+
+
+def test_parallel_python_tasks_keep_their_output_separate(tmp_path: Path) -> None:
+    """Two Python tasks running at once must not land in each other's log.
+
+    Capture used to swap the process-global `sys.stdout`, so with
+    `max_parallel_tasks` above one the enter/exit order interleaved: most of one
+    task's output was recorded against the other, and the real stream was never
+    put back.
+    """
+    import sys
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "",
+                "",
+                "def alpha():",
+                "    for index in range(30):",
+                "        print(f'ALPHA-{index}')",
+                "        time.sleep(0.01)",
+                "",
+                "",
+                "def beta():",
+                "    for index in range(30):",
+                "        print(f'BETA-{index}')",
+                "        time.sleep(0.01)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Parallel Capture",
+                "workspace: workspace",
+                "pipelines:",
+                "  race:",
+                "    max_parallel_tasks: 2",
+                "    tasks:",
+                "      a:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: alpha",
+                "      b:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: beta",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    real_stdout, real_stderr = sys.stdout, sys.stderr
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("race", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "success"
+
+    by_task: dict[str, set[str]] = {}
+    for line in logs:
+        marker = line.message.split("-")[0]
+        if marker in {"ALPHA", "BETA"}:
+            by_task.setdefault(line.task_id, set()).add(marker)
+
+    assert by_task == {"a": {"ALPHA"}, "b": {"BETA"}}
+    # Every line is accounted for, so nothing was dropped to fix the mixing.
+    assert sum(1 for line in logs if line.message.startswith("ALPHA")) == 30
+    assert sum(1 for line in logs if line.message.startswith("BETA")) == 30
+
+    # The process keeps the streams it started with.
+    assert sys.stdout is real_stdout
+    assert sys.stderr is real_stderr
+
+
+def test_a_timed_out_python_task_releases_the_process_streams(tmp_path: Path) -> None:
+    """A runaway task cannot be killed, but it must not keep stdout either."""
+    import sys
+
+    from piply.engine import task_runner
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "",
+                "",
+                "def slow():",
+                "    print('SLOW-start')",
+                "    time.sleep(30)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Timeout Capture",
+                "workspace: workspace",
+                "pipelines:",
+                "  slow_flow:",
+                "    tasks:",
+                "      slow:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: slow",
+                "        timeout: 2s",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    real_stdout, real_stderr = sys.stdout, sys.stderr
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("slow_flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "timed_out"
+    # Whatever it printed before the deadline is still recorded.
+    assert any(line.message == "SLOW-start" for line in logs)
+    assert any("timed out" in line.message for line in logs)
+
+    assert sys.stdout is real_stdout
+    assert sys.stderr is real_stderr
+    assert task_runner._capture_users == 0
+
+
+def test_python_callable_output_streams_while_the_task_runs(tmp_path: Path) -> None:
+    """A long task must show progress, not go silent until it finishes.
+
+    Output used to be buffered and flushed only when the callable returned, so a
+    slow extraction looked identical to a hung one. Subprocess tasks always
+    streamed; callables now do too.
+    """
+    import threading
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "",
+                "",
+                "def slow_steps():",
+                "    for index in range(6):",
+                "        print(f'STEP-{index}')",
+                "        time.sleep(0.4)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Streaming",
+                "workspace: workspace",
+                "pipelines:",
+                "  stream:",
+                "    tasks:",
+                "      t:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: slow_steps",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    finished = threading.Event()
+
+    def _run() -> None:
+        service.trigger_pipeline("stream", wait=True)
+        finished.set()
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+
+    # Watch the log grow while the task is still going.
+    seen_midway = 0
+    deadline = time.monotonic() + 20
+    while not finished.is_set() and time.monotonic() < deadline:
+        runs = service.list_runs(pipeline_id="stream", limit=1)
+        if runs:
+            _, _, logs = service.get_run(runs[0].run_id)
+            steps = sum(1 for line in logs if line.message.startswith("STEP-"))
+            if 0 < steps < 6:
+                seen_midway = steps
+                break
+        time.sleep(0.1)
+
+    assert seen_midway > 0, "no output was visible until the task had finished"
+
+    worker.join(timeout=20)
+    assert finished.is_set()
+    _, _, logs = service.get_run(service.list_runs(pipeline_id="stream", limit=1)[0].run_id)
+    # Streaming must not lose or duplicate anything.
+    assert sorted(line.message for line in logs if line.message.startswith("STEP-")) == [
+        f"STEP-{index}" for index in range(6)
+    ]
+
+
+def test_streamed_output_survives_failure_and_keeps_stream_order(tmp_path: Path) -> None:
+    """Partial output before an exception is kept, and stderr interleaves."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(
+            [
+                "import sys",
+                "",
+                "",
+                "def mixed():",
+                "    print('OUT-1')",
+                "    print('ERR-1', file=sys.stderr)",
+                "    sys.stdout.write('NO-NEWLINE-AT-END')",
+                "    raise RuntimeError('kaboom')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Streaming Failure",
+                "workspace: workspace",
+                "pipelines:",
+                "  boom:",
+                "    tasks:",
+                "      t:",
+                "        type: python",
+                "        path: tasks.py",
+                "        function: mixed",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("boom", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+    messages = [line.message for line in logs]
+
+    assert stored_run.status == "failed"
+    assert "OUT-1" in messages
+    assert "ERR-1" in messages
+    # A trailing write with no newline is still flushed, exactly once.
+    assert messages.count("NO-NEWLINE-AT-END") == 1
+    # The failure arrives as a traceback naming the type, not a bare message.
+    assert any(m.startswith("Traceback") and m.rstrip().endswith("RuntimeError: kaboom") for m in messages)
+
+
+def test_logging_output_reaches_the_run_log(tmp_path: Path) -> None:
+    """Real code logs, it does not print.
+
+    A `StreamHandler` binds `sys.stderr` when it is constructed, so a module that
+    calls `logging.basicConfig()` at import time wrote straight past the stream
+    proxy and its output never appeared in the run log at all.
+    """
+    import logging
+    import sys
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(
+            [
+                "import logging",
+                "",
+                "# A handler built at import time binds sys.stderr *now*, which is",
+                "# exactly the case that used to bypass capture entirely.",
+                "handler = logging.StreamHandler()",
+                "handler.setFormatter(logging.Formatter('%(levelname)s %(message)s'))",
+                "log = logging.getLogger('extract')",
+                "log.addHandler(handler)",
+                "log.setLevel(logging.INFO)",
+                "log.propagate = False",
+                "",
+                "",
+                "def job():",
+                "    log.info('ROWS-EXTRACTED')",
+                "    try:",
+                "        1 / 0",
+                "    except ZeroDivisionError:",
+                "        log.exception('CALCULATION-FAILED')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Logging",
+                "workspace: workspace",
+                "pipelines:",
+                "  logged:",
+                "    tasks:",
+                "      t: {type: python, path: tasks.py, function: job}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    real_stderr = sys.stderr
+    root_streams_before = [getattr(h, "stream", None) for h in logging.getLogger().handlers]
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("logged", wait=True)
+    _, _, logs = service.get_run(run.run_id)
+    messages = [line.message for line in logs]
+
+    assert any("ROWS-EXTRACTED" in message for message in messages)
+    assert any("CALCULATION-FAILED" in message for message in messages)
+    # The traceback comes through as its own lines, not one blob.
+    assert any(message.startswith("ZeroDivisionError") for message in messages)
+
+    # Borrowed handlers are handed back exactly as they were found.
+    assert sys.stderr is real_stderr
+    assert [getattr(h, "stream", None) for h in logging.getLogger().handlers] == root_streams_before
+
+
+def test_piply_own_logging_never_lands_in_a_run_log(tmp_path: Path) -> None:
+    """Retargeting handlers is process-wide, so it must stay thread-scoped."""
+    import logging
+    import threading
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tasks.py").write_text(
+        "\n".join(["import time", "", "", "def job():", "    time.sleep(1.5)"]),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: No Leak",
+                "workspace: workspace",
+                "pipelines:",
+                "  quiet:",
+                "    tasks:",
+                "      t: {type: python, path: tasks.py, function: job}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    done = threading.Event()
+
+    def _run() -> None:
+        service.trigger_pipeline("quiet", wait=True)
+        done.set()
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+
+    scheduler_log = logging.getLogger("piply.scheduler")
+    while not done.wait(timeout=0.1):
+        scheduler_log.warning("SCHEDULER-NOISE")
+
+    worker.join(timeout=15)
+    runs = service.list_runs(pipeline_id="quiet", limit=1)
+    _, _, logs = service.get_run(runs[0].run_id)
+
+    assert not [line for line in logs if "SCHEDULER-NOISE" in line.message]
+
+
+def test_a_file_sensor_hands_the_filenames_to_its_tasks(tmp_path: Path) -> None:
+    """A sensor that cannot say *what* changed forces every task to re-scan.
+
+    Worse, re-scanning races the next arrival, so the run can process a file it
+    was not woken for and miss the one it was.
+    """
+    import threading
+    import time as time_module
+
+    from piply.core.scheduler import PipelineScheduler
+
+    workspace = tmp_path / "workspace"
+    (workspace / "inbox").mkdir(parents=True)
+    (workspace / "handle.py").write_text(
+        "\n".join(
+            [
+                "def process(context=None):",
+                "    sensor = (context or {}).get('sensor') or {}",
+                "    print(f\"FILES={sensor.get('new_files')}\")",
+                "    return {'seen': sensor.get('file_count')}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Sensor Vars",
+                "workspace: workspace",
+                "pipelines:",
+                "  ingest:",
+                "    sensors:",
+                "      drop:",
+                "        type: file_sensor",
+                "        path: inbox",
+                "        pattern: '*.csv'",
+                "    tasks:",
+                "      announce:",
+                "        type: cli",
+                "        command: echo GOT {sensor_file_name}",
+                "      handle:",
+                "        type: python",
+                "        path: handle.py",
+                "        function: process",
+                "        depends_on: [announce]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    scheduler = PipelineScheduler(service)
+    scheduler.start()
+    try:
+        deadline = time_module.monotonic() + 20
+        while time_module.monotonic() < deadline and not service.sensor_health():
+            time_module.sleep(0.2)
+        time_module.sleep(1.5)  # let the baseline poll record an empty directory
+        (workspace / "inbox" / "claims_2026.csv").write_text("a,b\n", encoding="utf-8")
+
+        runs: list = []
+        deadline = time_module.monotonic() + 40
+        while time_module.monotonic() < deadline:
+            runs = service.list_runs(pipeline_id="ingest", limit=1)
+            if runs and runs[0].status in {"success", "failed"}:
+                break
+            time_module.sleep(0.5)
+    finally:
+        scheduler.stop()
+
+    assert runs and runs[0].status == "success", "the sensor never produced a finished run"
+    _, _, logs = service.get_run(runs[0].run_id)
+    messages = [line.message for line in logs]
+
+    # The name is available to a shell command...
+    assert any("GOT claims_2026.csv" in message for message in messages)
+    # ...and the whole event to a Python task.
+    assert any("FILES=" in message and "claims_2026.csv" in message for message in messages)
+    assert threading.active_count() >= 1
+
+
+def test_a_failing_python_task_reports_the_type_and_traceback(tmp_path: Path) -> None:
+    """`str(KeyError('x'))` is just "'x'" — useless on its own.
+
+    A run page showing only `'pre-flight'` gives no type, no file, and no line,
+    so there is nothing to act on.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "jobs.py").write_text(
+        "\n".join(
+            [
+                "CONFIG = {'claims': 1}",
+                "",
+                "",
+                "def _lookup(name):",
+                "    return CONFIG[name]",
+                "",
+                "",
+                "def extract(reports):",
+                "    for report in reports:",
+                "        _lookup(report)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Traceback",
+                "workspace: workspace",
+                "pipelines:",
+                "  flow:",
+                "    tasks:",
+                "      extract:",
+                "        type: python",
+                "        path: jobs.py",
+                "        function: extract",
+                "        kwargs:",
+                "          reports: ['pre-flight']",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    run = service.trigger_pipeline("flow", wait=True)
+    stored_run, _, logs = service.get_run(run.run_id)
+
+    assert stored_run.status == "failed"
+    # The type is named, not just the key.
+    assert stored_run.error == "KeyError: 'pre-flight'"
+
+    trace = next(line.message for line in logs if line.message.startswith("Traceback"))
+    # One entry, so a newest-first log does not render it upside down.
+    assert trace.count("Traceback (most recent call last)") == 1
+    assert trace.rstrip().endswith("KeyError: 'pre-flight'")
+    # The user's frames are there...
+    assert "jobs.py" in trace and "_lookup" in trace
+    # ...and Piply's own dispatch frames are not.
+    assert "task_runner.py" not in trace
+
+
+def test_cancelling_stops_a_cli_task_and_everything_it_started(tmp_path: Path) -> None:
+    """`terminate()` only signals the direct child.
+
+    CLI tasks run through a shell by default, so signalling the shell left the
+    real work running — and the orphan held the stdout pipe open, so the runner
+    waited for output that never came and the run never left `running`.
+    """
+    import threading
+    import time as time_module
+
+    # Absolute paths: a CLI task inherits the server's working directory, not
+    # the config directory, so relative paths would resolve somewhere else.
+    progress = tmp_path / "progress.txt"
+    script = tmp_path / "slow.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import pathlib, sys, time",
+                "for index in range(60):",
+                "    pathlib.Path(sys.argv[1]).write_text(str(index))",
+                "    time.sleep(0.2)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Cancel",
+                "workspace: .",
+                "pipelines:",
+                "  slow:",
+                "    tasks:",
+                "      t:",
+                "        type: cli",
+                f'        command: python "{script}" "{progress}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    threading.Thread(target=lambda: service.trigger_pipeline("slow", wait=True), daemon=True).start()
+
+    deadline = time_module.monotonic() + 20
+    while time_module.monotonic() < deadline and not progress.exists():
+        time_module.sleep(0.1)
+    assert progress.exists(), "the task never started"
+
+    run = service.list_runs(pipeline_id="slow", limit=1)[0]
+    service.cancel_run(run.run_id)
+    at_cancel = progress.read_text()
+
+    # The work itself stops, not just the shell wrapping it.
+    time_module.sleep(3)
+    assert progress.read_text() == at_cancel, "the task kept running after cancellation"
+
+    # And the run reaches a terminal state, so the UI stops showing it as active.
+    deadline = time_module.monotonic() + 20
+    while time_module.monotonic() < deadline:
+        stored, task_runs, _ = service.get_run(run.run_id)
+        if stored.status not in {"queued", "running"}:
+            break
+        time_module.sleep(0.2)
+    assert stored.status == "cancelled"
+    assert [item.status for item in task_runs] == ["cancelled"]
+
+
+def test_cancelling_says_why_a_python_callable_cannot_be_stopped(tmp_path: Path) -> None:
+    """Python cannot interrupt a thread, so say so rather than look broken."""
+    import threading
+    import time as time_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "jobs.py").write_text("import time\n\n\ndef slow():\n    time.sleep(8)\n", encoding="utf-8")
+
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Uninterruptible",
+                "workspace: workspace",
+                "pipelines:",
+                "  slow:",
+                "    tasks:",
+                "      t: {type: python, path: jobs.py, function: slow}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = PipelineService(config_path=config_path, database_path=tmp_path / "runs.db")
+    threading.Thread(target=lambda: service.trigger_pipeline("slow", wait=True), daemon=True).start()
+
+    # Wait for the *task* to be running, not just the run. A queued task has
+    # not started, so cancelling it works cleanly and no warning is due — the
+    # warning is only about a callable already executing.
+    deadline = time_module.monotonic() + 45
+    run = None
+    while time_module.monotonic() < deadline:
+        runs = service.list_runs(pipeline_id="slow", limit=1)
+        if runs:
+            _, task_runs, _ = service.get_run(runs[0].run_id)
+            if any(item.status == "running" for item in task_runs):
+                run = runs[0]
+                break
+        time_module.sleep(0.1)
+    assert run is not None, "the task never reached 'running'"
+
+    service.cancel_run(run.run_id)
+    _, _, logs = service.get_run(run.run_id)
+
+    assert any("cannot be interrupted" in line.message for line in logs)

@@ -41,7 +41,12 @@
                 <span data-scheduler-label>{{ scheduler.label or ('scheduler live' if scheduler.running else 'scheduler offline') }}</span>
             </div>
 
+            {% if request.state.user %}
+            <span class="meta-pill tiny" title="Signed in as {{ request.state.user.username }} ({{ request.state.user.role }})">
+                {{ request.state.user.username }}
+            </span>
             <a href="/logout" class="button ghost" style="padding: 6px 12px; font-size: 0.85rem;">Logout</a>
+            {% endif %}
         </nav>
 
         {% block content %}{% endblock %}

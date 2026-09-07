@@ -19,6 +19,15 @@ class PipelineScheduler:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
+    @property
+    def is_running(self) -> bool:
+        """Return whether the scheduler thread is alive.
+
+        A fresh install holds the scheduler back until first-run setup is done,
+        so "started or not" is a state worth being able to ask about.
+        """
+        return bool(self._thread and self._thread.is_alive())
+
     def start(self) -> None:
         """Start the scheduler thread when it is not already running.
 

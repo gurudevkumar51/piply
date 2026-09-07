@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "piply-dots",
+      "runtimeExecutable": "C:/Python314/python",
+      "runtimeArgs": ["-m", "uvicorn", "piply.api.app:create_app", "--factory", "--host", "127.0.0.1", "--port", "8421"],
+      "port": 8421
+    }
+  ]
+}

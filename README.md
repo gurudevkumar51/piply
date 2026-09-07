@@ -16,16 +16,20 @@ It stays small on purpose:
 
 - Multi-task pipelines with `depends_on`
 - Python script, Python callable, CLI, API, webhook, email, and SSH tasks
+- Split the config across files with `include:` — deployments in the master,
+  pipelines and alerts in their own
 - Reusable YAML `variables` with `{name}` interpolation
 - `.env`, environment variables, explicit secrets, and reusable SQL connections
 - Metadata-driven `entities` expansion for reusable task templates
 - Optional `pipeline_templates` and `pipeline_deployments` for tenant reuse
 - Lightweight conditional execution: `run_if: "{report} == 'payment'"`
+- Conditional variable values: `active_browser: true if env == "dev" else false`
 - Declared artifacts: `artifacts: ["out/*.csv"]`
 
 **Execution**
 
 - Task priority, via `priority: high`, `priority: "***"`, or an `extract***:` id
+- Entity priority, via a `payment*` / `adjustment**` suffix on entity values
 - Task and pipeline timeouts with a configurable kill grace period
 - Per-task upstream failure behavior: `skip`, `fail`, or `continue`
 - Task output passing through `context["task_id"]`
@@ -37,13 +41,24 @@ It stays small on purpose:
 
 - Schedules, sensors, retries, cancellation, reruns, and searchable logs
 - Dry-run preview: `piply plan`, plus an in-UI execution preview
+- Manual runs prompt for `{placeholder}` values an upstream would normally supply
 - Live log streaming: `piply logs --follow` with pipeline/run/task filters
 - Retention and cleanup: `piply prune` with automatic SQLite `VACUUM`
 - Backfill a single run or a whole schedule window
 - Graceful shutdown and startup recovery — no orphaned RUNNING records
 - Prometheus metrics at `GET /metrics` and a runtime Diagnostics page
 - Airflow-style pipeline listing with template grouping, sorting, and filtering
-- Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`
+- Last-five-runs status dots on every pipeline row, each linking to its run
+- Guided first-run setup: choose SQLite or PostgreSQL, and create the first
+  admin, before anything is written
+- Optional PostgreSQL metadata store: `PIPLY_DATABASE=postgresql://...`, movable
+  later from Settings with the existing history copied across
+- Accounts, roles, and per-pipeline view/edit/run permissions
+- Runs record who started them; pauses and manual runs are attributed by name
+- Central SMTP configured once, reused by email tasks and run notifications
+- Microsoft Teams alerts to channels and group chats, with reusable destination
+  groups and webhooks kept in the environment rather than YAML
+- Runs page with filters, sorting, and full multi-level trigger lineage
 
 ## Quick Start
 
@@ -204,7 +219,9 @@ Each deployment becomes a normal runnable pipeline id, so the scheduler, UI, CLI
 
 ### Deployment Variables In Downstream Pipelines
 
-Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run; a manual run of the downstream pipeline uses the downstream pipeline's own variables or top-level defaults.
+Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run.
+
+A **manual** run has no parent to inherit from, so it uses the downstream pipeline's own variables or top-level defaults. When that leaves a `{placeholder}` with no value, Piply asks for it rather than running the command literally — see [Missing runtime values](docs/UI_GUIDE.md#missing-runtime-values).
 
 ```yaml
 pipelines:
@@ -244,6 +261,8 @@ piply plan extract_flow --config piply-demo/piply.yaml     # dry run, nothing ex
 # Running
 piply run extract_flow --config piply-demo/piply.yaml --wait
 piply run extract_flow --tenant acme --param batch=2026-05-26
+piply run Bronze_to_Silver --var practice=BENNETT       # fill a {placeholder}
+piply run Bronze_to_Silver --prompt                     # or be asked for them
 piply tasks list extract_flow
 piply tasks run extract_flow validate --tenant acme --param region=west
 piply tasks retry <run_id> <task_id> --mode resume
@@ -262,8 +281,11 @@ piply prune --dry-run
 piply prune --run-days 14 --max-runs 100
 piply backup /backups                                      # safe while running
 piply restore /backups/piply-20260804T074211Z.db           # stop the server first
+piply migrate-db --to postgresql://piply@db:5432/piply     # SQLite -> PostgreSQL
 
 # Serving
+piply users create admin --role admin                       # switches auth on
+piply users grant alice nightly=view,run
 piply pause extract_flow
 piply resume extract_flow
 piply start --config piply-demo/piply.yaml --port 8080
@@ -274,19 +296,25 @@ piply stop --config piply-demo/piply.yaml
 
 **Using Piply**
 
+- [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
 - [YAML Specification](docs/YAML_SPECIFICATION.md): every config key, with defaults
 - [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
+- [Sensors](docs/SENSORS.md): file, SQL, and API triggers, and how polling actually behaves
+- [Notifications](docs/NOTIFICATIONS.md): Microsoft Teams and email alerts, and what happens when delivery fails
 - [UI Guide](docs/UI_GUIDE.md): every page and what it answers
+- [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
+- [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
-- [Usage Guide](wiki/USAGE_GUIDE.md): longer-form walkthrough
+- [HTTP API Reference](docs/API.md): every route, with the permission it requires
+- [Changelog](CHANGELOG.md): what changed per release, and what to check before upgrading
 
 **Understanding Piply**
 
+- [Security](docs/SECURITY.md): trust model, what is protected, deployment checklist
 - [Runtime Lifecycles](docs/LIFECYCLES.md): scheduler, pipeline, task, retry, recovery, retention
 - [Technical Architecture](docs/architecture/technical_architecture.md): maintainer guide to the whole system
+- [Roadmap](docs/ROADMAP.md): what is planned for the next releases
 - [Future Features](docs/FUTURE_FEATURES.md): proposed ideas, ranked by value vs cost
-- [Wiki Overview](wiki/README.md): architecture and feature summary
-- [UI And API Guide](wiki/UI_API_GUIDE.md): screens, actions, and API examples
 
 ## Metadata Store
 
@@ -304,8 +332,16 @@ The schema is created and migrated automatically, and no pipeline configuration
 changes. `piply backup` / `piply restore` remain SQLite-only; use `pg_dump` and
 `pg_restore` for PostgreSQL. Run one Piply instance per database either way.
 
-Full details, including the Docker volume setup for the SQLite default, are in
-[YAML Specification §11](docs/YAML_SPECIFICATION.md#11-runtime-storage-and-external-databases).
+Already running on SQLite and want to keep the history? Stop the server and copy
+it across:
+
+```bash
+piply migrate-db --to "postgresql://piply:secret@db.internal:5432/piply"
+```
+
+Run ids are preserved, so retry chains, downstream lineage, and accounts all
+survive. Full details, the Docker volume setup for the SQLite default, and a
+column-by-column schema reference are in [Metadata Store](docs/DATABASE.md).
 
 ## Monitoring
 

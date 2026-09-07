@@ -206,6 +206,50 @@
     });
   }
 
+  /*
+   * Node labels.
+   *
+   * SVG text neither wraps nor clips, so an entity-expanded name such as
+   * "payer_claim_status_dashboard / Load Bronze" used to spill across the node
+   * border and over the edges. Labels are measured once the SVG is in the DOM
+   * (getComputedTextLength needs a rendered element) and shortened to fit, with
+   * the full value kept in a <title> so hovering still reveals it.
+   */
+  function shortenLabel(element, full, maxWidth, mode) {
+    element.textContent = full;
+    if (element.getComputedTextLength() <= maxWidth) return;
+
+    // Binary search the longest string that still fits.
+    let low = 0;
+    let high = full.length;
+    let best = "…";
+    while (low <= high) {
+      const keep = (low + high) >> 1;
+      let candidate;
+      if (mode === "end") {
+        candidate = full.slice(0, keep) + "…";
+      } else {
+        // Identifiers differ at both ends -- "payer_" vs "patient_" at the
+        // front, the task name at the back -- so drop from the middle.
+        const head = Math.ceil(keep / 2);
+        const tail = keep - head;
+        candidate = full.slice(0, head) + "…" + (tail ? full.slice(full.length - tail) : "");
+      }
+      element.textContent = candidate;
+      if (element.getComputedTextLength() <= maxWidth) {
+        best = candidate;
+        low = keep + 1;
+      } else {
+        high = keep - 1;
+      }
+    }
+    element.textContent = best;
+
+    const tooltip = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    tooltip.textContent = full;
+    element.appendChild(tooltip);
+  }
+
   function renderStageBands(rootGroup, graph, tasks, width) {
     const depths = computeDepths(tasks);
     const groupedNodes = {};
@@ -290,7 +334,9 @@
       graph.setNode(task.task_id, {
         ...task,
         status: taskStateMap[task.task_id] || task.status || "queued",
-        width: 230,
+        // Wide enough that the status/priority/timeout line always fits and
+        // most task names survive intact; the longest are still shortened.
+        width: 280,
         height: 104,
       });
     });
@@ -304,7 +350,7 @@
     window.dagre.layout(graph);
 
     const nodeMetrics = graph.nodes().map((nodeId) => graph.node(nodeId));
-    const width = Math.max(...nodeMetrics.map((node) => node.x + 170), 600);
+    const width = Math.max(...nodeMetrics.map((node) => node.x + 195), 600);
     const height = Math.max(...nodeMetrics.map((node) => node.y + 122), 320);
 
     const viewport = document.createElement("div");
@@ -360,6 +406,7 @@
       }
     });
 
+    const pendingLabels = [];
     graph.nodes().forEach((nodeId) => {
       const node = graph.node(nodeId);
       const palette = dagPalette(node.status);
@@ -400,15 +447,25 @@
       title.setAttribute("x", "16");
       title.setAttribute("y", "28");
       title.setAttribute("class", "dag-label");
-      title.textContent = node.title;
       group.appendChild(title);
+      // Leave room for the status dot in the top-right corner.
+      pendingLabels.push({ element: title, full: node.title, maxWidth: node.width - 46, mode: "middle" });
 
       const subtitle = document.createElementNS("http://www.w3.org/2000/svg", "text");
       subtitle.setAttribute("x", "16");
       subtitle.setAttribute("y", "49");
       subtitle.setAttribute("class", "dag-type");
-      subtitle.textContent = `${node.task_type} | ${node.task_id}`;
       group.appendChild(subtitle);
+      // For an entity task the id restates the title, so it is dropped rather
+      // than truncated: two shortened copies of one name help nobody.
+      const titleRestatesId = node.title.replace(/[^a-z0-9]/gi, "").toLowerCase()
+        === node.task_id.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      pendingLabels.push({
+        element: subtitle,
+        full: titleRestatesId ? node.task_type : `${node.task_type} | ${node.task_id}`,
+        maxWidth: node.width - 32,
+        mode: "middle",
+      });
 
       const stateLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
       stateLabel.setAttribute("x", "16");
@@ -426,8 +483,13 @@
       if (node.run_if) {
         badges.push("conditional");
       }
-      stateLabel.textContent = badges.join(" | ");
       group.appendChild(stateLabel);
+      pendingLabels.push({
+        element: stateLabel,
+        full: badges.join(" | "),
+        maxWidth: node.width - 32,
+        mode: "end",
+      });
 
       const durationText = durationLabel(node.duration_seconds);
       if (durationText) {
@@ -464,6 +526,17 @@
     viewport.appendChild(svg);
     container.innerHTML = "";
     container.appendChild(viewport);
+
+    // Only now is the text measurable. Wait for the web font first: measuring
+    // against the fallback metrics produces labels that fit until IBM Plex Mono
+    // arrives and renders them ~5% wider, back outside the box.
+    const fitAll = () =>
+      pendingLabels.forEach((item) => shortenLabel(item.element, item.full, item.maxWidth, item.mode));
+    if (document.fonts && document.fonts.status !== "loaded") {
+      document.fonts.ready.then(fitAll);
+    } else {
+      fitAll();
+    }
   }
 
   window.PiplyDag = { renderInto };
