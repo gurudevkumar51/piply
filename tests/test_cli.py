@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -129,3 +130,45 @@ def test_tasks_retry_cli_retries_from_selected_failed_task(tmp_path: Path) -> No
 
     assert result.exit_code == 0
     assert "Finished with status: success" in result.stdout
+
+
+def test_scheduler_polling_is_kept_out_of_the_access_log() -> None:
+    """The UI polls the scheduler chip on a timer; those lines bury the real ones.
+
+    An open dashboard files one request every few seconds, so a terminal left
+    running `piply start` scrolls a pipeline failure out of view before anyone
+    reads it. Only successful polls are dropped — a poll that fails is exactly
+    when the log earns its place.
+    """
+    from piply.cli.main import _QuietPollFilter
+
+    poll_filter = _QuietPollFilter()
+
+    def keeps(path: str, status: int) -> bool:
+        record = logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            "",
+            0,
+            '%s - "%s %s HTTP/%s" %d',
+            ("127.0.0.1:1", "GET", path, "1.1", status),
+            None,
+        )
+        return poll_filter.filter(record)
+
+    assert not keeps("/api/dashboard/scheduler", 200)
+    assert not keeps("/api/dashboard/scheduler?since=1", 200)
+    # A broken poll is worth seeing, and so is everything that is not a poll.
+    assert keeps("/api/dashboard/scheduler", 500)
+    assert keeps("/api/runs", 200)
+    assert keeps("/pipelines", 200)
+
+
+def test_the_poll_filter_ignores_records_it_does_not_understand() -> None:
+    """A uvicorn change must not turn logging into an IndexError at startup."""
+    from piply.cli.main import _QuietPollFilter
+
+    poll_filter = _QuietPollFilter()
+    for args in ((), ("just one",), "not a tuple", None):
+        record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "%s", args, None)
+        assert poll_filter.filter(record) is True

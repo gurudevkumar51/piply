@@ -1062,3 +1062,68 @@ def test_cancelling_says_why_a_python_callable_cannot_be_stopped(tmp_path: Path)
     _, _, logs = service.get_run(run.run_id)
 
     assert any("cannot be interrupted" in line.message for line in logs)
+
+
+def _allow_failure_project(tmp_path: Path, *, allow: bool) -> Path:
+    """A pipeline whose first task always fails, optionally tolerated."""
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Best effort",
+                "workspace: workspace",
+                "pipelines:",
+                "  nightly:",
+                "    tasks:",
+                "      optional_sync:",
+                "        type: cli",
+                "        command: exit 4",
+                *([f"        allow_failure: {str(allow).lower()}"] if allow else []),
+                "      main:",
+                "        type: cli",
+                "        command: echo done",
+                "        depends_on: [optional_sync]",
+                "        on_upstream_failure: continue",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_allow_failure_keeps_the_run_green(tmp_path: Path) -> None:
+    """A best-effort task must not fail the nightly run it is attached to.
+
+    Before this, `on_upstream_failure: continue` let *downstream* tasks proceed
+    but the run still ended failed, so there was no way to express "this sync is
+    optional". The task still records its own failure — it is the run's status
+    that stops depending on it.
+    """
+    service = PipelineService(
+        config_path=_allow_failure_project(tmp_path, allow=True),
+        database_path=tmp_path / "runs.db",
+    )
+
+    run = service.trigger_pipeline("nightly", wait=True)
+    _, task_runs, _ = service.get_run(run.run_id)
+    by_id = {item.task_id: item for item in task_runs}
+
+    assert run.status == "success"
+    # The failure is not hidden, only tolerated.
+    assert by_id["optional_sync"].status == "failed"
+    assert by_id["optional_sync"].exit_code == 4
+    assert by_id["main"].status == "success"
+
+
+def test_a_task_without_allow_failure_still_fails_the_run(tmp_path: Path) -> None:
+    """The default must be unchanged: opt-in only, or every existing run changes meaning."""
+    service = PipelineService(
+        config_path=_allow_failure_project(tmp_path, allow=False),
+        database_path=tmp_path / "runs.db",
+    )
+
+    run = service.trigger_pipeline("nightly", wait=True)
+
+    assert run.status == "failed"

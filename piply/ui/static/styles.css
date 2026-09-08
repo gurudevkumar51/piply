@@ -461,6 +461,36 @@ select {
     background: rgba(255, 255, 255, 0.75);
 }
 
+/* The bell carries its meaning in the tooltip, so it stays quiet in the row. */
+.notify-pill {
+    cursor: help;
+    border-color: rgba(232, 155, 44, 0.28);
+    background: rgba(232, 155, 44, 0.1);
+}
+
+/* A tag is a <button> so it is keyboard-reachable, but it has to keep reading as
+   a label rather than an action until you hover it. */
+.tag-pill {
+    cursor: pointer;
+    font: inherit;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.tag-pill:hover,
+.tag-pill:focus-visible {
+    color: var(--accent);
+    background: rgba(57, 117, 255, 0.08);
+    border-color: rgba(57, 117, 255, 0.28);
+}
+
+.tag-pill.active {
+    color: var(--accent);
+    background: rgba(57, 117, 255, 0.12);
+    border-color: rgba(57, 117, 255, 0.38);
+}
+
 .tag,
 .task-type-badge {
     color: var(--accent);

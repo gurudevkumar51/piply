@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from piply.core.dialects import is_postgres_dsn
@@ -281,7 +282,8 @@ async def submit_setup_admin(request: Request):
 
     service = request.app.state.service
     try:
-        user = service.create_user(username, password, role="admin")
+        # Hashing the new password is ~100ms of PBKDF2; keep it off the loop.
+        user = await run_in_threadpool(service.create_user, username, password, role="admin")
     except Exception as exc:  # noqa: BLE001 - shown verbatim on the form
         return _render_admin_page(request, str(exc), form, 400)
 

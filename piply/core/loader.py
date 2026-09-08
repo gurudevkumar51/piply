@@ -67,14 +67,33 @@ def discover_config(start_dir: Path | None = None) -> Path:
     )
 
 
-def _read_yaml_document(path: Path) -> dict[str, Any]:
+def _display_path(candidate: Path, root: Path | None = None) -> str:
+    """How a config file is named in an error message.
+
+    The bare filename is ambiguous the moment two included files share a name in
+    different folders — organising templates as `ecw/piply_template.yaml` and
+    `athena/piply_template.yaml` is a perfectly reasonable layout, and reporting
+    a clash between "'piply_template.yaml' and 'piply_template.yaml'" reads like
+    Piply is rejecting the *name*. Relative to the project keeps it short and
+    still unambiguous; anything outside falls back to the full path.
+    """
+    resolved = candidate.resolve()
+    if root is not None:
+        try:
+            return resolved.relative_to(root.resolve().parent).as_posix()
+        except ValueError:
+            pass
+    return resolved.as_posix()
+
+
+def _read_yaml_document(path: Path, root: Path | None = None) -> dict[str, Any]:
     """Read one YAML config file, naming the file in any error."""
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
-        raise ConfigError(f"Could not parse '{path.name}': {exc}") from exc
+        raise ConfigError(f"Could not parse '{_display_path(path, root)}': {exc}") from exc
     if not isinstance(data, dict):
-        raise ConfigError(f"The root of '{path.name}' must be a mapping")
+        raise ConfigError(f"The root of '{_display_path(path, root)}' must be a mapping")
     return data
 
 
@@ -131,6 +150,28 @@ def _record_origins(value: Any, source: Path, origins: dict[str, Path], dotted: 
             _record_origins(child, source, origins, f"{dotted}.{key}")
 
 
+def _collision_hint(dotted: str) -> str:
+    """Point at the file-scoped alternative, for the keys that have one.
+
+    These two collide for the same reason — the block merges project-wide — but
+    the fix differs, and "it is defined twice" alone leaves you to work out
+    which. Variables have a private form; destination names deliberately do not,
+    because a destination is a real channel and one name meaning two different
+    channels is a trap for whoever reads the settings page later.
+    """
+    if dotted.startswith("variables."):
+        return (
+            ". Top-level 'variables:' are project-wide. For a value that differs per file, "
+            "move it into that file's 'pipeline_defaults.variables', where the name is private."
+        )
+    if dotted.startswith("notifications.teams."):
+        return (
+            ". Destination names are project-wide. Give them distinct names (claims_oncall, "
+            "reports_oncall) and route per file with 'pipeline_defaults.notifications.on_failure'."
+        )
+    return ""
+
+
 def _merge_included_document(
     base: dict[str, Any],
     incoming: dict[str, Any],
@@ -161,7 +202,83 @@ def _merge_included_document(
             continue
         # Absent from `origins` means it came from the root file.
         first = origins.get(dotted, root)
-        raise ConfigError(f"'{dotted}' is defined in more than one config file: '{first.name}' and '{source.name}'")
+        raise ConfigError(
+            f"'{dotted}' is defined in more than one config file: "
+            f"'{_display_path(first, root)}' and '{_display_path(source, root)}'"
+            f"{_collision_hint(dotted)}"
+        )
+
+
+#: Blocks in a file whose entries become runnable pipelines, and so inherit that
+#: file's `pipeline_defaults`. Templates are excluded: a template is not itself
+#: runnable, and applying the defaults to both it and its deployments would
+#: apply them twice, from two different files, with no obvious winner.
+_FILE_DEFAULT_TARGETS = ("pipelines", "jobs", "pipeline_deployments")
+
+#: Stamped onto each pipeline so `load_project` can read them back. Private keys
+#: rather than a parallel mapping, matching how `_template_id` already travels.
+_FILE_TAGS_KEY = "_file_tags"
+_FILE_NOTIFICATIONS_KEY = "_file_notifications"
+_FILE_VARIABLES_KEY = "_file_variables"
+_FILE_SOURCE_KEY = "_file_source"
+
+
+def _apply_file_defaults(document: dict[str, Any], source: Path, root: Path) -> None:
+    """Stamp one file's `pipeline_defaults` onto the pipelines declared in it.
+
+    Splitting the config per team or per tenant means every pipeline in a file
+    usually shares its tags, its variables, and its on-call channel. Repeating
+    them on every entry is the duplication the split was meant to remove, so a
+    file can state them once.
+
+    Variables here are deliberately **not** global. A top-level `variables:`
+    block merges across every file, so two teams cannot both define
+    `batch_size` without colliding; these are visible only to the pipelines in
+    this file, which is what makes per-team files independent.
+
+    Applied here, before the merge, because it is the only point at which
+    "which pipelines are in this file" is still known — afterwards every file's
+    pipelines sit in one mapping.
+    """
+    raw_defaults = document.pop("pipeline_defaults", None)
+    if raw_defaults in (None, "", False):
+        return
+    where = f"'{_display_path(source, root)}' pipeline_defaults"
+    if not isinstance(raw_defaults, dict):
+        raise ConfigError(f"{where} must be a mapping")
+    supported = ("tags", "variables", "notifications")
+    for key in raw_defaults:
+        if key not in supported:
+            raise ConfigError(f"{where} supports only {', '.join(repr(item) for item in supported)}, not '{key}'")
+
+    tags = tuple(str(tag) for tag in _ensure_list(raw_defaults.get("tags"), f"{where}.tags"))
+    notifications = raw_defaults.get("notifications")
+    variables = raw_defaults.get("variables")
+    if variables is not None:
+        # Validated here so a malformed block names its own file, rather than
+        # failing later against whichever pipeline happened to be built first.
+        _ensure_mapping(variables, f"{where}.variables")
+    if tags == () and notifications is None and variables is None:
+        return
+
+    stamped = False
+    for block in _FILE_DEFAULT_TARGETS:
+        entries = document.get(block)
+        if not isinstance(entries, dict):
+            continue
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            stamped = True
+            entry[_FILE_SOURCE_KEY] = _display_path(source, root)
+            if tags:
+                entry[_FILE_TAGS_KEY] = tags
+            if notifications is not None:
+                entry[_FILE_NOTIFICATIONS_KEY] = notifications
+            if variables is not None:
+                entry[_FILE_VARIABLES_KEY] = variables
+    if not stamped:
+        raise ConfigError(f"{where} is set but this file declares no pipelines or deployments for it to apply to.")
 
 
 def load_raw_config(path: Path) -> tuple[dict[str, Any], list[Path]]:
@@ -173,6 +290,9 @@ def load_raw_config(path: Path) -> tuple[dict[str, Any], list[Path]]:
     """
     raw_data = _read_yaml_document(path)
     patterns = raw_data.pop("include", None)
+    # The root file gets the same treatment as any included one: a single-file
+    # project should still be able to tag everything in it at once.
+    _apply_file_defaults(raw_data, path, path)
     if patterns in (None, "", False):
         return raw_data, [path]
 
@@ -196,9 +316,13 @@ def load_raw_config(path: Path) -> tuple[dict[str, Any], list[Path]]:
             resolved = match.resolve()
             if resolved == path.resolve() or resolved in sources:
                 continue
-            document = _read_yaml_document(resolved)
+            document = _read_yaml_document(resolved, path)
             if "include" in document:
-                raise ConfigError(f"'{resolved.name}' uses 'include', which only the root config file may do.")
+                raise ConfigError(
+                    f"'{_display_path(resolved, path)}' uses 'include', which only the root config file may do."
+                )
+            # Before the merge, while this file's own pipelines are still known.
+            _apply_file_defaults(document, resolved, path)
             _merge_included_document(raw_data, document, resolved, origins, path)
             sources.append(resolved)
 
@@ -1132,6 +1256,14 @@ def _parse_task(
             f"Pipeline '{pipeline_id}' task '{task_id}' artifacts",
         )
     )
+    allow_failure = _parse_config_bool(
+        raw_task.get("allow_failure", False),
+        f"Pipeline '{pipeline_id}' task '{task_id}' allow_failure",
+    )
+    alert_on_failure = _parse_config_bool(
+        raw_task.get("alert_on_failure", False),
+        f"Pipeline '{pipeline_id}' task '{task_id}' alert_on_failure",
+    )
 
     task_env = dict(inherited_env)
     task_env.update(
@@ -1196,6 +1328,8 @@ def _parse_task(
                 kill_grace_period_seconds=kill_grace_period_seconds,
                 run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
                 artifact_paths=artifact_paths,
+                allow_failure=allow_failure,
+                alert_on_failure=alert_on_failure,
                 call=callable_text,
                 args=tuple(raw_args),
                 kwargs={str(key): value for key, value in raw_kwargs.items()},
@@ -1227,6 +1361,8 @@ def _parse_task(
             kill_grace_period_seconds=kill_grace_period_seconds,
             run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
             artifact_paths=artifact_paths,
+            allow_failure=allow_failure,
+            alert_on_failure=alert_on_failure,
             path=path,
             python=_expand_string(str(raw_task.get("python") or default_python), env_values),
             args=tuple(raw_args),
@@ -1261,6 +1397,8 @@ def _parse_task(
             kill_grace_period_seconds=kill_grace_period_seconds,
             run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
             artifact_paths=artifact_paths,
+            allow_failure=allow_failure,
+            alert_on_failure=alert_on_failure,
             path=resolved_path,
             command=None if command is None else _expand_string(str(command), env_values),
             shell=shell_name,
@@ -1298,6 +1436,8 @@ def _parse_task(
             kill_grace_period_seconds=kill_grace_period_seconds,
             run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
             artifact_paths=artifact_paths,
+            allow_failure=allow_failure,
+            alert_on_failure=alert_on_failure,
             url=_expand_string(str(url), env_values),
             method=method,
             headers=headers,
@@ -1325,6 +1465,8 @@ def _parse_task(
             kill_grace_period_seconds=kill_grace_period_seconds,
             run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
             artifact_paths=artifact_paths,
+            allow_failure=allow_failure,
+            alert_on_failure=alert_on_failure,
             # Left unset when absent, so the task inherits the central SMTP
             # settings. Defaulting to localhost here would silently override
             # them on every task.
@@ -1358,6 +1500,8 @@ def _parse_task(
         kill_grace_period_seconds=kill_grace_period_seconds,
         run_if=None if run_if is None else _expand_env_only(str(run_if), env_values),
         artifact_paths=artifact_paths,
+        allow_failure=allow_failure,
+        alert_on_failure=alert_on_failure,
         host=_expand_string(str(host), env_values),
         user=None if raw_task.get("user") is None else _expand_string(str(raw_task.get("user")), env_values),
         port=int(raw_task.get("port", 22)),
@@ -1425,7 +1569,19 @@ def load_project(
     pipelines: dict[str, PipelineDefinition] = {}
     project_warnings: list[str] = list(notification_warnings)
     for pipeline_id, raw_pipeline in raw_pipelines.items():
+        # Narrowest wins: pipeline over file over project. A file's variables
+        # see the project's, and a pipeline's see both, so each layer can build
+        # on the one above it the way inline interpolation already does.
         pipeline_variables = dict(root_variables)
+        file_source = raw_pipeline.get(_FILE_SOURCE_KEY)
+        if raw_pipeline.get(_FILE_VARIABLES_KEY) is not None:
+            pipeline_variables.update(
+                _parse_variables(
+                    raw_pipeline[_FILE_VARIABLES_KEY],
+                    f"'{file_source}' pipeline_defaults.variables",
+                    root_values | pipeline_variables,
+                )
+            )
         pipeline_variables.update(
             _parse_variables(
                 raw_pipeline.get("variables"),
@@ -1470,10 +1626,19 @@ def load_project(
             pipeline_values,
         )
         description = _expand_string(str(raw_pipeline.get("description") or ""), pipeline_values)
-        tags = tuple(
-            _expand_string(str(tag), pipeline_values)
-            for tag in _ensure_list(raw_pipeline.get("tags"), f"Pipeline '{pipeline_id}' tags")
-        )
+        # The file's tags come first and the pipeline's are added to them, rather
+        # than replacing: a tag is a label, and "this pipeline lives in the
+        # claims file" stays true however the pipeline labels itself.
+        declared_tags = [
+            *raw_pipeline.get(_FILE_TAGS_KEY, ()),
+            *_ensure_list(raw_pipeline.get("tags"), f"Pipeline '{pipeline_id}' tags"),
+        ]
+        seen_tags: list[str] = []
+        for tag in declared_tags:
+            expanded_tag = _expand_string(str(tag), pipeline_values)
+            if expanded_tag and expanded_tag not in seen_tags:
+                seen_tags.append(expanded_tag)
+        tags = tuple(seen_tags)
         # Conditionals were never applied here, and `bool(...)` made every
         # result true anyway — a non-empty mapping is truthy, and so is the
         # string "false". `enabled: {if: env == "dev", then: false}` therefore
@@ -1601,8 +1766,18 @@ def load_project(
 
         notify_on_failure, notify_on_success = _parse_notify(raw_pipeline.get("notify"), pipeline_id)
         try:
+            # Precedence is pipeline, then file, then project. The file's block
+            # is resolved against the project's first, so a file that states
+            # only `on_failure` still inherits the project's `on_success`.
+            file_defaults = parse_pipeline_notifications(
+                raw_pipeline.get(_FILE_NOTIFICATIONS_KEY),
+                pipeline_id,
+                defaults=(notifications.default_on_failure, notifications.default_on_success),
+            )
             alert_on_failure, alert_on_success = parse_pipeline_notifications(
-                raw_pipeline.get("notifications"), pipeline_id
+                raw_pipeline.get("notifications"),
+                pipeline_id,
+                defaults=file_defaults,
             )
         except NotificationError as exc:
             raise ConfigError(str(exc)) from exc

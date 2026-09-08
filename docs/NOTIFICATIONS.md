@@ -156,14 +156,152 @@ of its members notifies that member **once**, not twice.
 
 ### Which level should it go on?
 
-`notifications:` is accepted on a pipeline, a template, and a deployment. Pick
-the *widest* level where the answer is the same for everything under it.
+`notifications:` is accepted project-wide, on a template, on a deployment, and
+on a pipeline. Pick the *widest* level where the answer is the same for
+everything under it.
 
 | Level | Use it when | Behaviour |
 | --- | --- | --- |
+| **Project** (`notifications.defaults`) | The same people should hear about everything | Applied to every pipeline that does not state its own |
+| **File** (`pipeline_defaults`) | One config file per team or tenant | Applied to the pipelines declared **in that file**; beats the project default |
 | **Template** | Every deployment should alert the same people | Inherited by all of them — write it once |
 | **Deployment** | One tenant needs different destinations | **Replaces** the template's list for that deployment |
-| **Pipeline** | A standalone pipeline, not built from a template | Applies to that pipeline only |
+| **Pipeline** | One pipeline differs from everything above | **Replaces** the inherited value, per outcome |
+
+Precedence runs narrowest-wins: **pipeline → file → project**.
+
+### Alerting on everything, without repeating yourself
+
+`notifications.defaults` sits beside the destinations, so on a split config it
+lives in `piply_alert.yaml` with everything else about alerting:
+
+```yaml
+notifications:
+  teams:
+    production_alerts: { type: channel, webhook: "${TEAMS_PROD_WEBHOOK}" }
+    data_engineering:  { type: chat,    webhook: "${TEAMS_DE_WEBHOOK}" }
+  groups:
+    critical: [production_alerts, data_engineering]
+
+  defaults:
+    on_failure: [critical]          # every pipeline, no per-pipeline block
+    on_success: [data_engineering]  # omit this line to alert only on failure
+```
+
+That is the whole setup. Any pipeline that says nothing now alerts `critical`
+on failure.
+
+A pipeline overrides the default **per outcome**, so narrowing one never
+silently changes the other:
+
+```yaml
+pipelines:
+  noisy_import:
+    notifications:
+      on_success: []              # stop the success card; failures still go to critical
+    tasks: { ... }
+
+  chatty_probe:
+    notifications: false          # opt out of the defaults entirely
+    tasks: { ... }
+
+  billing_export:
+    notifications:
+      on_failure: [finance_oncall]  # replaces critical for failures only;
+    tasks: { ... }                  # on_success still inherits data_engineering
+```
+
+The override **replaces** rather than merges. Merging would mean a pipeline
+could never narrow who gets paged, and "why is this channel still being alerted"
+is the harder question to answer at 3am. To alert the default *and* someone
+else, name both: `on_failure: [critical, finance_oncall]`.
+
+A name that does not exist in `defaults` fails at load, not at send time — one
+typo there would otherwise break alerting for every pipeline at once.
+
+### Routing per file
+
+With the config split one file per team, the on-call channel is usually the same
+for everything in a file. `pipeline_defaults` says it once, at the top of that
+file:
+
+```yaml
+# claims/piply_claims.yaml
+pipeline_defaults:
+  tags: [claims, prod]          # see the tags guide
+  notifications:
+    on_failure: [claims_oncall]  # beats the project default for this file only
+
+pipelines:
+  claim_extract: { ... }
+  claim_load:    { ... }
+```
+
+It applies to the `pipelines:` and `pipeline_deployments:` declared in that same
+file. Templates are excluded on purpose — a template is not runnable, and its
+deployments usually live in a different file, so applying it to both would apply
+it twice with no obvious winner.
+
+#### Destination *names* stay project-wide
+
+Only the **routing** is file-scoped. The destinations themselves — the entries
+under `notifications.teams` — are global, and two files declaring the same name
+is an error:
+
+```
+'notifications.teams.oncall' is defined in more than one config file:
+'claims.yaml' and 'reports.yaml'. Destination names are project-wide. Give them
+distinct names (claims_oncall, reports_oncall) and route per file with
+'pipeline_defaults.notifications.on_failure'.
+```
+
+This is deliberate, and the opposite of how
+[variables](YAML_SPECIFICATION.md#pipeline_defaults--settings-for-one-file)
+work. A variable is a config value, so two teams having their own `batch_size`
+is harmless. A destination is a **real channel**: if `oncall` meant one thing in
+`claims.yaml` and another in `reports.yaml`, the settings page could no longer
+tell you where an alert actually went, and neither could the delivery history.
+
+So name them for what they are and route per file:
+
+```yaml
+# piply_alert.yaml — every destination, named unambiguously
+notifications:
+  teams:
+    claims_oncall:  { type: channel, webhook: "${TEAMS_CLAIMS_WEBHOOK}" }
+    reports_oncall: { type: channel, webhook: "${TEAMS_REPORTS_WEBHOOK}" }
+
+# claims/piply_claims.yaml — this file's pipelines page the claims channel
+pipeline_defaults:
+  notifications:
+    on_failure: [claims_oncall]
+```
+
+### Seeing who gets told
+
+Once defaults are in play, a pipeline's own YAML no longer answers "does anyone
+hear about this?". The pipelines page puts a 🔔 on every pipeline that alerts
+someone, and its tooltip names the destinations — the resolved answer, after
+project and file defaults. No bell means nobody is told.
+
+### Alerting on a task that is allowed to fail
+
+A failed task normally fails its run, so the pipeline alert covers it. A task
+marked `allow_failure: true` is the exception: it is best-effort, the run stays
+green, and nothing would otherwise report it. Pair the two:
+
+```yaml
+tasks:
+  optional_sync:
+    type: cli
+    command: ./sync.sh
+    allow_failure: true      # a failure here does not fail the run
+    alert_on_failure: true   # ...but still tell the on-call channel
+```
+
+The card goes to the pipeline's `on_failure` destinations and says the run
+succeeded but the task did not. It is sent **only** when the run itself
+succeeded — a failed run already has its own card, and a second would be noise.
 
 ```yaml
 pipeline_templates:

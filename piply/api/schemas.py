@@ -339,6 +339,8 @@ class PipelineResponse(BaseModel):
     next_run_at: datetime | None = None
     next_run_label: str
     tags: list[str]
+    #: Who this pipeline alerts once project and file defaults are applied.
+    alert_summary: str = ""
     primary_entry: str
     command_preview: str
     max_concurrent_runs: int
@@ -369,6 +371,7 @@ class PipelineResponse(BaseModel):
             next_run_at=summary.next_run_at,
             next_run_label=summary.next_run_label,
             tags=list(summary.tags),
+            alert_summary=summary.alert_summary,
             primary_entry=summary.primary_entry,
             command_preview=summary.command_preview,
             max_concurrent_runs=summary.max_concurrent_runs,

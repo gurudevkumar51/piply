@@ -29,6 +29,7 @@
                 aria-label="Filter pipelines"
                 oninput="applyPipelineFilters()"
             >
+            <span id="pipeline-tag-filter" hidden></span>
             <div class="segmented" role="group" aria-label="Sort pipelines">
                 <span class="small-kicker">Sort</span>
                 <button type="button" class="toolbar-button" data-sort="name" onclick="setPipelineSort('name')">Name</button>
@@ -178,6 +179,12 @@ function renderPipelineRow(pipeline) {
     const deployment = pipeline.deployment_id
         ? `<span class="meta-pill tiny">${escapeHtml(pipeline.deployment_id)}</span>`
         : "";
+    // With project and file defaults in play, whether a pipeline alerts anyone
+    // is no longer visible in its own YAML. The bell says it does, and the
+    // tooltip says who.
+    const notifies = pipeline.alert_summary
+        ? `<span class="meta-pill tiny notify-pill" title="Notifies ${escapeHtml(pipeline.alert_summary)}" aria-label="Notifies ${escapeHtml(pipeline.alert_summary)}">&#128276;</span>`
+        : "";
 
     return `
         <div class="pipeline-row" data-pipeline-row="${escapeHtml(pipeline.pipeline_id)}">
@@ -188,8 +195,8 @@ function renderPipelineRow(pipeline) {
                 <a class="pipeline-row-title" href="/pipelines/${escapeHtml(pipeline.pipeline_id)}">${escapeHtml(pipeline.title)}</a>
                 <div class="pipeline-row-sub mono">${escapeHtml(pipeline.pipeline_id)}</div>
                 <div class="pipeline-row-tags">
-                    ${deployment}${upstream}${downstream}
-                    ${(pipeline.tags || []).map((tag) => `<span class="meta-pill tiny">${escapeHtml(tag)}</span>`).join("")}
+                    ${deployment}${upstream}${downstream}${notifies}
+                    ${(pipeline.tags || []).map((tag) => `<button type="button" class="meta-pill tiny tag-pill${pipelineTag === tag ? " active" : ""}" onclick="togglePipelineTag('${escapeHtml(tag).replace(/'/g, "\\'")}')" title="Show only pipelines tagged ${escapeHtml(tag)}">${escapeHtml(tag)}</button>`).join("")}
                 </div>
             </div>
             <div class="pipeline-row-cell">
@@ -233,8 +240,12 @@ function applyPipelineFilters() {
     const needle = (document.getElementById("pipeline-search")?.value || "").trim().toLowerCase();
     const grouped = document.getElementById("pipeline-group-toggle")?.checked;
 
-    const visible = pipelinePayloads.filter((item) => matchesFilter(item) && matchesSearch(item, needle));
+    const visible = pipelinePayloads.filter(
+        (item) => matchesFilter(item) && matchesSearch(item, needle) && matchesTag(item),
+    );
     visible.sort(comparePipelines);
+
+    renderTagChip();
 
     emptyState.hidden = visible.length > 0;
 
@@ -346,6 +357,39 @@ function setPipelineSort(mode) {
         button.classList.toggle("active", button.dataset.sort === mode);
     });
     applyPipelineFilters();
+}
+
+// Exact-match, unlike the search box: clicking "prod" must not also match
+// "prod_backup". Null means no tag filter at all.
+let pipelineTag = null;
+
+function matchesTag(pipeline) {
+    if (!pipelineTag) return true;
+    return (pipeline.tags || []).includes(pipelineTag);
+}
+
+function togglePipelineTag(tag) {
+    // Clicking the active tag again clears it, so the pill is its own off switch.
+    pipelineTag = pipelineTag === tag ? null : tag;
+    applyPipelineFilters();
+}
+
+function clearPipelineTag() {
+    pipelineTag = null;
+    applyPipelineFilters();
+}
+
+function renderTagChip() {
+    const holder = document.getElementById("pipeline-tag-filter");
+    if (!holder) return;
+    holder.hidden = !pipelineTag;
+    if (!pipelineTag) return;
+    // A filter with no visible control to remove it is a trap.
+    holder.innerHTML = `
+        <button type="button" class="toolbar-button active" onclick="clearPipelineTag()"
+                aria-label="Clear the ${escapeHtml(pipelineTag)} tag filter">
+            tag: ${escapeHtml(pipelineTag)} &times;
+        </button>`;
 }
 
 function setPipelineFilter(mode) {

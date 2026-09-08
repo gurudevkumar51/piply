@@ -78,7 +78,33 @@
             }
         };
 
-        window.setInterval(refreshScheduler, 5000);
+        // Only poll a tab someone is actually looking at. A dashboard left open
+        // in a background tab otherwise files a request every 5 seconds all day,
+        // which is both pointless and the main reason the server's own log
+        // scrolls away faster than you can read it.
+        let timer = null;
+        const startPolling = () => {
+            if (timer === null) {
+                timer = window.setInterval(refreshScheduler, 5000);
+            }
+        };
+        const stopPolling = () => {
+            window.clearInterval(timer);
+            timer = null;
+        };
+
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                stopPolling();
+            } else {
+                // Refresh at once: the chip is stale by however long it was hidden.
+                refreshScheduler();
+                startPolling();
+            }
+        });
+        if (!document.hidden) {
+            startPolling();
+        }
     });
     </script>
 </body>

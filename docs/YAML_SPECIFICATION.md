@@ -152,6 +152,86 @@ Purely additive: a config with no `include:` behaves exactly as it always has.
 There is deliberately no last-wins. Silently preferring one file would mean
 editing a pipeline and watching nothing change.
 
+### `pipeline_defaults` — settings for one file
+
+Splitting the config per team or tenant means every pipeline in a file usually
+shares its tags and its on-call channel. State them once, at the top of the file:
+
+```yaml
+# claims/piply_claims.yaml
+pipeline_defaults:
+  tags: [claims, prod]
+  variables:
+    source_system: ECW
+    batch_size: 500
+  notifications:
+    on_failure: [claims_oncall]
+
+pipelines:
+  claim_extract:
+    tasks:
+      extract: { type: cli, command: "./pull.sh {source_system} {batch_size}" }
+  claim_load: { ... }
+```
+
+| Key | Applies to | Merge rule |
+| --- | --- | --- |
+| `tags` | `pipelines:` and `pipeline_deployments:` in that file | **Added to** each pipeline's own tags |
+| `variables` | Same | **Overridden by** the pipeline's own, per name |
+| `notifications` | Same | **Replaced** by the pipeline's own, per outcome |
+
+Tags add because a tag is a label — "this lives in the claims file" stays true
+whatever else the pipeline calls itself. Variables and destinations override, so
+a pipeline can still say something different from its file.
+
+Precedence for both is **pipeline → file → project**.
+
+#### Where to declare a variable
+
+| Scope | Declare it in | Visible to |
+| --- | --- | --- |
+| **Global** | top-level `variables:` in `piply.yaml` | Every pipeline in the project |
+| **One file** | `pipeline_defaults.variables` in that file | Only pipelines declared in that file |
+| **One pipeline** | `variables:` on the pipeline | That pipeline |
+
+This is the point of the file scope: a top-level `variables:` block **merges
+across every file**, so two teams cannot both define `batch_size` — the second
+one is a duplicate-key error. Inside `pipeline_defaults` the name is private to
+the file, so `claims.yaml` and `reports.yaml` can each have their own:
+
+```yaml
+# claims/piply_claims.yaml          # reports/piply_reports.yaml
+pipeline_defaults:                  pipeline_defaults:
+  variables:                          variables:
+    batch_size: 500                     batch_size: 50
+```
+
+Each layer sees the one above it, so a file variable can interpolate a project
+one (`label: "{stage}-claims"`). A name that is not defined in scope is left in
+place verbatim rather than emptied, so a typo is visible in the command preview
+instead of silently producing an empty string.
+
+`pipeline_templates:` are deliberately **not** covered: a template is not
+runnable, and its deployments usually live in another file, so applying a file's
+defaults to both would apply them twice. Tag the deployments instead.
+
+A `pipeline_defaults` block in a file that declares no pipelines or deployments
+is an **error** — silently doing nothing looks exactly like the tags failing to
+appear.
+
+Filenames never matter — only the keys inside them. Giving every tenant its own
+folder is a supported layout, so this is fine:
+
+```
+piply.yaml                        include: ["*/piply_template.yaml"]
+ecw/piply_template.yaml           pipeline_templates: {ECW_Extraction: ...}
+athena/piply_template.yaml        pipeline_templates: {ATHENA_Extraction: ...}
+```
+
+The two files share a name and do not conflict. What *would* conflict is
+defining `ECW_Extraction` in both; the error then names each file by its path
+relative to the project, so you can tell them apart.
+
 Blocks whose *members* may be spread across files: `pipelines`, `jobs`,
 `pipeline_templates`, `pipeline_deployments`, `notifications`, `connections`,
 `entities`, `variables`, `defaults`, `secrets`. Anywhere else, the same key in
@@ -535,7 +615,9 @@ pipelines:
     description: Loads and validates.    # shown in the UI
     enabled: true                        # false hides it from the scheduler;
                                          # accepts a conditional, see section 3
-    tags: [ingest, tier1]
+    tags: [ingest, tier1]                # added to any `pipeline_defaults.tags`;
+                                         # click one on the pipelines page to
+                                         # filter, or use ?tag= on /runs
     timezone: UTC                        # overrides the project timezone
 
     schedule:                            # see section 5
@@ -633,6 +715,9 @@ tasks:
 
     depends_on: [extract, validate]
     on_upstream_failure: skip    # skip | fail | continue
+
+    allow_failure: false         # true = best-effort; its failure does not fail the run
+    alert_on_failure: false      # true = alert even when the run stays green
 
     priority: high               # see below
 
@@ -1403,6 +1488,40 @@ pipelines:
 
 ---
 
+### `allow_failure` — a task that is allowed to fail
+
+By default **any** failed task fails its run. `on_upstream_failure` decides what
+*downstream* tasks do about it; it does not change the run's status.
+
+`allow_failure: true` marks a task best-effort. It still runs, still records its
+own `failed` status and exit code, and downstream tasks still follow their own
+`on_upstream_failure` (which defaults to skipping) — but the run finishes
+`success`.
+
+```yaml
+tasks:
+  optional_sync:
+    type: cli
+    command: ./sync.sh
+    allow_failure: true       # a warehouse refresh that is nice to have
+    alert_on_failure: true    # ...but somebody should still hear about it
+
+  main_load:
+    type: cli
+    command: ./load.sh
+    depends_on: [optional_sync]
+    on_upstream_failure: continue   # run even though the sync failed
+```
+
+Without `alert_on_failure`, a tolerated failure is silent by design — that is
+the point of tolerating it. See [NOTIFICATIONS.md](NOTIFICATIONS.md).
+
+| You want | Set |
+| --- | --- |
+| Downstream to run anyway, run still fails | `on_upstream_failure: continue` |
+| Run to stay green, downstream skipped | `allow_failure: true` |
+| Both | Both keys |
+
 ## 12. Aliases And Legacy Keys
 
 Every key below is accepted by the loader. They exist for backward
@@ -1515,6 +1634,9 @@ notifications:
       timeout_seconds: 10               # optional, default 10, must be > 0
   groups:
     critical: [production_alerts]       # reusable bundles of destinations
+  defaults:                             # applied to every pipeline
+    on_failure: [critical]
+    on_success: [data_engineering]      # omit to alert only on failure
 ```
 
 | Key | Default | Purpose |
@@ -1524,6 +1646,12 @@ notifications:
 | `teams.<name>.timeout_seconds` | `10` | Per-request timeout |
 | `teams.<name>.format` | guessed | `adaptive` (Power Automate) or `messagecard` (legacy connector) |
 | `groups.<name>` | — | List of destination names |
+| `defaults.on_failure` | — | Destinations for every pipeline that declares none |
+| `defaults.on_success` | — | Same, for successful runs |
+
+`defaults` removes the need for a `notifications:` block on each pipeline. A
+name that does not exist is a **load error**, not a send-time one — a typo here
+would otherwise break alerting for every pipeline at once.
 
 An unresolved `${VAR}` is a **warning**, not an error, and the destination is
 skipped at send time. A webhook URL is a credential — keep it in the
@@ -1542,6 +1670,18 @@ pipelines:
 A bare list means **on failure**: `notifications: [critical]`. Group names work
 anywhere a destination name does, and a destination named twice is notified
 once.
+
+Where `notifications.defaults` is set, a pipeline overrides it **per outcome**:
+naming `on_failure` replaces the default for failures and leaves successes
+inherited. The override replaces rather than merges, so a pipeline can narrow
+who is paged — to alert the default *and* someone else, list both.
+
+| Pipeline writes | Result |
+| --- | --- |
+| nothing | Inherits both defaults |
+| `on_failure: [x]` | `x` on failure; the default `on_success` still applies |
+| `on_success: []` | Successes silenced; the default `on_failure` still applies |
+| `notifications: false` | Opts out of the defaults entirely — alerts nobody |
 
 ### `notify` (pipeline level, email)
 

@@ -1458,9 +1458,12 @@ What the message means and what to do about it.
 | `Pipeline 'x' contains a cycle at task 'y'` | `depends_on` loops | Break the loop |
 | `Pipeline trigger cycle detected at 'x'` | `triggers_on_success` loops | Break the loop |
 | `Pipeline 'x' triggers unknown pipeline 'y'` | Typo, or the target is a template not a deployment | Use a real pipeline id |
-| `'pipelines.x' is defined in more than one config file` | The same pipeline, or the same block of it, in two included files | Keep each block in one file; the message names both |
+| `'pipelines.x' is defined in more than one config file` | The same pipeline, or the same block of it, in two included files | Keep each block in one file; the message names both, relative to the project. It is the *key* that clashes, never the filename — two folders may each hold a `piply_template.yaml` |
 | `include pattern 'x' matched no files` | A glob that matches nothing — a silent no-match would look like the pipelines vanished | Fix the path, relative to `piply.yaml` |
 | `'x.yaml' uses 'include', which only the root config file may do` | Nested includes | Move the pattern into the root file |
+| `... pipeline_defaults is set but this file declares no pipelines` | A `pipeline_defaults:` block in a file holding only templates or destinations | Move it to the file that declares the pipelines or deployments |
+| `... pipeline_defaults supports only 'tags', 'variables', 'notifications'` | A typo in the block | Those are the only three keys; the message names the file |
+| `'variables.x' is defined in more than one config file` | Two files declare the same **top-level** variable; those are global and merge | Move them into each file's `pipeline_defaults.variables`, where the name is private to that file |
 | `Task 'x' selects unknown entity 'y'` | `entities: [y]` names a dimension the pipeline never declared | Declare it, or fix the spelling |
 | `Entity expansion produced duplicate runtime task id 'x'` | Two entity values slug to the same id | Give them distinct values, or use the mapping form |
 | `sql_sensor connection 'x' is not a connection string` | A file path where a DSN belongs, usually `@name` pointing at one | Use `database:` for SQLite, or `sqlite:///path` |
@@ -1470,6 +1473,7 @@ What the message means and what to do about it.
 | `PIPLY_DATABASE is set in this process's environment` | The variable wins over `.env`, so the Settings switch cannot take effect | Change it in the compose file or unit, and restart |
 | `FileNotFoundError: [Errno 2] No such file or directory` from a Teams alert | A CA-bundle variable — `SSL_CERT_FILE` and friends — points at a path that is gone | The message names the variable; unset it or point it at a real bundle |
 | `request failed (ConnectError)` | DNS or the network, from the machine Piply runs on | Check the webhook host is reachable there, and any configured proxy |
+| `HTTP 401: ... AuthorizationFailed` from a Teams alert | The `sig` in the webhook URL is stale or truncated — the credential is the URL itself, so this is never about the card or the account | Copy the current URL from the flow's trigger; re-saving a flow issues a new one. The message reports the signature's length, so a short one means it was truncated or line-wrapped in `.env` |
 | `notifications.teams.x.format must be one of` | A typo in `format:` | `adaptive` for Power Automate, `messagecard` for a legacy connector |
 | `Pipeline 'x' cannot trigger itself on success` | Self-reference | Remove it |
 | `... task 'y' requires command or path for cli tasks` | `type: cli` with neither | Add `command:` |

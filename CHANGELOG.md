@@ -11,8 +11,119 @@ rather than buried in the feature list.
 
 ## 0.3.3 — 2026-09-06
 
-Two fixes, both reported from a live install. Every 0.3.2 config keeps working
-untouched.
+Notification routing, tags you can filter by, and four fixes — all prompted by a
+live install. Every 0.3.2 config keeps working untouched: every key added here
+is opt-in and defaults to the old behaviour.
+
+### Added
+
+- **`notifications.defaults` alerts every pipeline without a block on each
+  one.** Declaring `on_failure:` per pipeline meant editing 29 places to change
+  the on-call channel, and any pipeline added later was silent until someone
+  remembered. A project-level default now applies to every pipeline that does
+  not state its own:
+
+  ```yaml
+  notifications:
+    teams: { ... }
+    defaults:
+      on_failure: [critical]
+  ```
+
+  A pipeline overrides it **per outcome**, so narrowing failures never silently
+  changes successes; `on_success: []` silences one outcome and
+  `notifications: false` opts out entirely. Defaults are resolved into each
+  pipeline at load time, so the run record, the UI's "used by" panel, and
+  `piply validate` all show who will actually be told. A typo in a default is a
+  load error rather than 29 silent pipelines.
+
+- **File-scoped variables.** A top-level `variables:` block merges across every
+  included file, so two teams could not both define `batch_size` — the second
+  was a duplicate-key error, and one of them had to rename. Declaring them under
+  a file's `pipeline_defaults.variables` makes the name private to that file:
+
+  ```yaml
+  # claims/piply_claims.yaml        # reports/piply_reports.yaml
+  pipeline_defaults:                pipeline_defaults:
+    variables:                        variables:
+      batch_size: 500                   batch_size: 50
+  ```
+
+  Precedence is pipeline → file → project, and each layer sees the one above it,
+  so a file variable can interpolate a project one. Global variables still
+  belong in `piply.yaml`; top-level `variables:` behaves exactly as before.
+
+  Notification **destinations** stay project-wide on purpose — a destination is
+  a real channel, and one name meaning two channels would make the settings page
+  and the delivery history unable to say where an alert went. Notification
+  *routing* is already file-scoped. A duplicate-key error for either now names
+  the fix that actually applies to it.
+
+- **`pipeline_defaults` gives one config file its own tags and destinations.**
+  With the config split one file per team or tenant, every pipeline in a file
+  usually shares both. Stating them once at the top of the file removes the
+  duplication the split was meant to remove in the first place:
+
+  ```yaml
+  # claims/piply_claims.yaml
+  pipeline_defaults:
+    tags: [claims, prod]
+    notifications:
+      on_failure: [claims_oncall]
+  ```
+
+  Tags are **added** to each pipeline's own; destinations **replace** them, per
+  outcome. Precedence is pipeline → file → project. Templates are excluded on
+  purpose — their deployments usually live elsewhere, so covering both would
+  apply the defaults twice.
+
+- **Tags are now a filter, not just a label.** Clicking a tag on the pipelines
+  page filters to it, with a visible chip to clear it; matching is exact, so
+  `prod` no longer also matches `prod_backup`. The runs page gained a tag
+  dropdown, and `/runs?tag=claims` works directly. The tag resolves to pipeline
+  ids inside the query rather than filtering afterwards, so `limit` still means
+  "this many matching runs".
+
+- **`allow_failure: true` marks a task best-effort.** Previously any failed task
+  failed its run — `on_upstream_failure` only governed what downstream tasks
+  did — so there was no way to say "this sync is optional". The task still
+  records its own failure; only the run's status stops depending on it. Paired
+  with `alert_on_failure: true` on the same task, somebody is still told, which
+  is the one failure a pipeline-level alert cannot report.
+
+- **A bell on the pipelines listing shows which pipelines alert someone**, with
+  the destinations in its tooltip. With project and file defaults in play, a
+  pipeline's own YAML no longer answers that question.
+
+### Performance
+
+- **The CLI starts about twice as fast.** `uvicorn`, `httpx` and `asyncio` were
+  imported at module scope but are only needed by `piply start` and by actually
+  sending a card. Deferring them to their point of use cut `import
+  piply.cli.main` from ~470ms to ~215ms, which every command that is not the
+  server — `validate`, `runs`, `tasks retry` — was paying on every invocation.
+  A packaging test now fails if one of them is imported at module scope again.
+
+- **A login attempt no longer stalls the whole server.** Verifying a password is
+  ~240k PBKDF2 rounds, about 100ms, and it ran on the event loop because the
+  login route must be `async def` to read its form. Four concurrent attempts
+  made an unrelated page take **817ms** instead of 5ms — and a login page is
+  exactly what gets hit repeatedly when someone is guessing. Hashing now runs in
+  a threadpool, for both login and first-run admin creation.
+
+### Changed
+
+- **The runs list refreshes itself** every 10 seconds instead of needing a
+  reload to notice a run starting or finishing. It re-fetches the same
+  server-rendered page and swaps the table, so there is one renderer rather than
+  a JS copy of every row, and it holds off while a log drawer is open, while a
+  filter has focus, or while the tab is in the background.
+
+- **The scheduler chip stops polling a tab nobody is looking at**, and its
+  successful poll no longer prints an access-log line. An open dashboard was
+  filing a request every 5 seconds in every tab, and the resulting wall of
+  identical 200s buried the lines that matter in `piply start`'s output. A poll
+  that fails is still logged — that is when it is worth having.
 
 ### Fixed
 
@@ -30,6 +141,19 @@ untouched.
   label it was describing. It now opens downward and is no longer clipped, and
   the run id and full timestamp were moved into it, replacing the duplicate
   browser tooltip that used to appear alongside.
+- **A duplicate-key error across two included files with the same name was
+  unactionable.** Splitting a config per tenant gives every folder its own
+  `piply_template.yaml`, and the error printed bare filenames — `'…' is defined
+  in more than one config file: 'piply_template.yaml' and
+  'piply_template.yaml'` — which reads like Piply is rejecting the *name*. It
+  never was: only the keys inside a file can clash. Included files are now
+  named by their path relative to the project, so the folders tell them apart.
+- **`HTTP 401 AuthorizationFailed` from a Teams alert gave no way forward.** The
+  credential is the webhook URL itself, so a 401 means its `sig` is stale or
+  truncated — never that the card or the account is wrong, which is what the
+  bare message suggests. The failure now says so, and reports the signature's
+  length, which is what separates a truncated URL from one invalidated by
+  re-saving the flow. The URL is still never logged.
 
 ---
 
