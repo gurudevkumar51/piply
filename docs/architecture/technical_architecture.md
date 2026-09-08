@@ -291,7 +291,7 @@ too, so a busy run stays fresh even between heartbeat ticks.
 ### Recovery
 
 Three complementary mechanisms, described in full in
-[LIFECYCLES.md §8](../LIFECYCLES.md#8-recovery-process):
+[LIFECYCLES.md §9](../LIFECYCLES.md#9-recovery-process):
 
 1. **Graceful shutdown** — stop accepting work, then interrupt what is active.
 2. **Startup recovery** — interrupt runs whose `owner_pid` is no longer alive.

@@ -294,18 +294,29 @@ piply stop --config piply-demo/piply.yaml
 
 ## Docs
 
-**Using Piply**
+**[Documentation index](docs/README.md)** — start here; everything below, organised.
 
-- [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
-- [YAML Specification](docs/YAML_SPECIFICATION.md): every config key, with defaults
-- [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
+**Writing config**
+
+- [Pipelines](docs/PIPELINES.md): schedules, concurrency, retries, chaining, tags
+- [Tasks](docs/TASKS.md): the six task types, dependencies, failure behaviour, artifacts
+- [Variables](docs/VARIABLES.md): `{name}`, the four scopes, precedence, conditionals
+- [Environment Variables](docs/ENVIRONMENT.md): `${NAME}`, `.env`, every `PIPLY_*` setting
+- [Templates and Deployments](docs/TEMPLATES_AND_DEPLOYMENTS.md): one pipeline shape, many tenants
 - [Sensors](docs/SENSORS.md): file, SQL, and API triggers, and how polling actually behaves
 - [Notifications](docs/NOTIFICATIONS.md): Microsoft Teams and email alerts, and what happens when delivery fails
+- [YAML Specification](docs/YAML_SPECIFICATION.md): the reference — every config key, with defaults
+- [Execution Examples](docs/EXAMPLES.md): runnable patterns for each feature
+
+**Operating Piply**
+
+- [CLI Reference](docs/CLI.md): every command and flag
 - [UI Guide](docs/UI_GUIDE.md): every page and what it answers
+- [HTTP API Reference](docs/API.md): every route, with the permission it requires
 - [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
 - [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
+- [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments
-- [HTTP API Reference](docs/API.md): every route, with the permission it requires
 - [Changelog](CHANGELOG.md): what changed per release, and what to check before upgrading
 
 **Understanding Piply**

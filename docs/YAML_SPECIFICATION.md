@@ -13,6 +13,23 @@ Preview what a config would actually execute, without running it:
 piply plan --config piply.yaml
 ```
 
+## Looking for an explanation rather than a key?
+
+This page **enumerates**; the guides **teach**. If you are learning a topic
+rather than looking up a default, start here instead:
+
+| Topic | Guide | Reference section below |
+| --- | --- | --- |
+| Pipelines, schedules, retries | [Pipelines](PIPELINES.md) | [§4](#4-pipeline-keys), [§5](#5-schedules) |
+| Task types and failure behaviour | [Tasks](TASKS.md) | [§6](#6-tasks) |
+| `{name}` and its scopes | [Variables](VARIABLES.md) | [§2](#2-interpolation), [§3](#3-top-level-keys) |
+| `${NAME}` and `PIPLY_*` | [Environment Variables](ENVIRONMENT.md) | [§10](#10-environment-variables) |
+| Many tenants, one shape | [Templates and Deployments](TEMPLATES_AND_DEPLOYMENTS.md) | [§8](#8-templates-and-deployments) |
+| Alerts | [Notifications](NOTIFICATIONS.md) | [§13](#13-notifications) |
+| Sensors | [Sensors](SENSORS.md) | [§7](#7-sensors) |
+
+Full map: [documentation index](README.md).
+
 ---
 
 ## 1. Document Structure

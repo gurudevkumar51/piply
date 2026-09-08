@@ -95,6 +95,23 @@ is opt-in and defaults to the old behaviour.
   the destinations in its tooltip. With project and file defaults in play, a
   pipeline's own YAML no longer answers that question.
 
+### Documentation
+
+- **Six new topic guides, and an index.** The reference had grown to 1,700 lines,
+  which is the right shape for looking up a default and the wrong one for
+  learning a topic. Added [CLI](docs/CLI.md) (there was no command reference at
+  all), [Variables](docs/VARIABLES.md), [Environment
+  Variables](docs/ENVIRONMENT.md), [Pipelines](docs/PIPELINES.md),
+  [Tasks](docs/TASKS.md), and [Templates and
+  Deployments](docs/TEMPLATES_AND_DEPLOYMENTS.md), plus
+  [docs/README.md](docs/README.md) as the map.
+
+  Guides teach and cross-link; the YAML specification stays the single
+  exhaustive key list, so the two cannot drift into disagreeing. Two tests now
+  guard it: every relative link and `#anchor` across all 24 markdown files must
+  resolve, and every page must be reachable from the index. The link check found
+  three already-broken anchors on its first run.
+
 ### Performance
 
 - **The CLI starts about twice as fast.** `uvicorn`, `httpx` and `asyncio` were

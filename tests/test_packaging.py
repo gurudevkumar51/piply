@@ -308,3 +308,60 @@ def test_sending_an_alert_still_works_with_the_lazy_imports() -> None:
     # Nothing is listening, so it must come back as a reported failure — not an
     # ImportError or a NameError from the deferred import.
     assert result.stdout.strip() == "reported-failure", result.stderr
+
+
+def _markdown_files() -> list[Path]:
+    """Every shipped markdown file."""
+    return sorted(ROOT.glob("docs/**/*.md")) + [ROOT / "README.md", ROOT / "CHANGELOG.md"]
+
+
+def _heading_slugs(path: Path) -> set[str]:
+    """GitHub-style anchor slugs for a file's headings."""
+    slugs = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#"):
+            text = line.lstrip("#").strip().lower()
+            slugs.add(re.sub(r"[^\w\s-]", "", text).strip().replace(" ", "-"))
+    return slugs
+
+
+def test_every_documentation_link_resolves() -> None:
+    """A dead link is worse than no link: it sends a reader looking for a page.
+
+    Checks relative file targets *and* `#anchor` fragments, because a renumbered
+    section silently breaks every link into it and nothing else would notice.
+    """
+    link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+    slug_cache: dict[Path, set[str]] = {}
+    broken: list[str] = []
+
+    for path in _markdown_files():
+        for label, target in link_pattern.findall(path.read_text(encoding="utf-8")):
+            if target.startswith(("http://", "https://", "mailto:", "#!")):
+                continue
+            file_part, _, anchor = target.partition("#")
+            destination = (path.parent / file_part).resolve() if file_part else path.resolve()
+            if not destination.exists():
+                broken.append(f"{path.name}: [{label}]({target}) -> missing file")
+                continue
+            if anchor:
+                if destination not in slug_cache:
+                    slug_cache[destination] = _heading_slugs(destination)
+                if anchor not in slug_cache[destination]:
+                    broken.append(f"{path.name}: [{label}]({target}) -> missing anchor")
+
+    assert not broken, "broken documentation links:\n  " + "\n  ".join(broken)
+
+
+def test_the_documentation_index_lists_every_page() -> None:
+    """A page nobody links to is a page nobody reads.
+
+    `docs/README.md` is the map; a new guide that never reaches it is invisible
+    however good it is.
+    """
+    index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+    missing = [
+        path.name for path in sorted(ROOT.glob("docs/*.md")) if path.name != "README.md" and path.name not in index
+    ]
+
+    assert not missing, f"not linked from docs/README.md: {missing}"
