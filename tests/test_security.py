@@ -461,3 +461,64 @@ def test_a_user_created_by_an_admin_can_sign_in(restricted) -> None:
     # A username is stored lower-cased, so the sign-in form must not be
     # case-sensitive on it.
     assert service.authenticate("CAROL", "Carol-Pass-9") is not None
+
+
+def test_a_login_attempt_does_not_stall_the_rest_of_the_server(tmp_path: Path) -> None:
+    """Password verification must not run on the event loop.
+
+    Verifying a password is ~240k PBKDF2 rounds, roughly 100ms. The login route
+    has to be `async def` to read its form, so calling `authenticate` directly
+    would block every other request for that long — and a login page is exactly
+    what gets hit repeatedly when someone is guessing passwords.
+    """
+    import concurrent.futures
+    import time
+
+    (tmp_path / "workspace").mkdir()
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Login load",
+                "workspace: workspace",
+                "pipelines:",
+                "  p:",
+                "    tasks:",
+                "      t: {type: cli, command: echo hi}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(str(config_path))) as client:
+        # Warm the app so import and first-connection cost is not measured.
+        client.get("/login")
+
+        def bad_login() -> None:
+            client.post(
+                "/login",
+                data={"username": "nobody", "password": "wrong-password"},
+                follow_redirects=False,
+            )
+
+        def health() -> float:
+            started = time.perf_counter()
+            client.get("/login")
+            return time.perf_counter() - started
+
+        baseline = max(health() for _ in range(3))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            logins = [pool.submit(bad_login) for _ in range(4)]
+            time.sleep(0.02)
+            under_load = pool.submit(health).result()
+            for item in logins:
+                item.result()
+
+    # Generous: the point is that a page load stays in the same order of
+    # magnitude rather than queueing behind several 100ms hashes.
+    assert under_load < baseline + 0.35, (
+        f"a plain page took {under_load:.3f}s while logins ran (baseline {baseline:.3f}s); "
+        "password hashing is probably back on the event loop"
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -13,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
-import uvicorn
 
 from piply.core.auth import AuthError, generate_password
 from piply.core.dialects import is_postgres_dsn
@@ -1387,6 +1387,37 @@ def stop(
     typer.echo("Shutdown requested. The background server will exit gracefully within a few seconds.")
 
 
+#: Endpoints the UI polls on a timer rather than because anyone asked for them.
+_POLLED_PATHS = ("/api/dashboard/scheduler",)
+
+
+class _QuietPollFilter(logging.Filter):
+    """Drop access-log lines for the UI's own polling, keeping the terminal readable.
+
+    An open dashboard files one of these every few seconds, which buries the
+    lines that matter — a run starting, a task failing, a notification refused —
+    under a wall of identical 200s.
+
+    Only *successful* polls are dropped. A poll that 404s or 500s is exactly
+    when the log is worth having, so those still appear.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return False for a successful poll, True for everything else."""
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        # uvicorn logs '%s - "%s %s HTTP/%s" %d' with the path third and the
+        # status last; the path carries its query string.
+        path = str(args[2]).split("?", 1)[0]
+        return not (str(args[4]).startswith("2") and path in _POLLED_PATHS)
+
+
+def _quieten_poll_access_logs() -> None:
+    """Install the poll filter on uvicorn's access logger."""
+    logging.getLogger("uvicorn.access").addFilter(_QuietPollFilter())
+
+
 @app.command()
 def start(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
@@ -1436,6 +1467,12 @@ def start(
     typer.echo(f"Using config: {config_path}")
     typer.echo(f"Runtime database: {_describe_database(config_path, settings)}")
     typer.echo(f"Starting Piply on http://{host}:{port}")
+    _quieten_poll_access_logs()
+    # Imported here rather than at module scope: uvicorn pulls in asyncio and
+    # watchfiles and costs ~170ms, which every other command — `validate`,
+    # `runs`, `tasks retry` — was paying for a server it never starts.
+    import uvicorn
+
     uvicorn.run("piply.api.app:create_app", factory=True, host=host, port=port, reload=reload)
 
 

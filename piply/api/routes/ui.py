@@ -100,6 +100,7 @@ def pipelines_page(request: Request) -> HTMLResponse:
             "template_id": summary.template_id,
             "deployment_id": summary.deployment_id,
             "tags": list(summary.tags),
+            "alert_summary": summary.alert_summary,
             "enabled": summary.enabled,
             "paused": summary.paused,
             "schedule_text": summary.schedule_text,
@@ -252,6 +253,7 @@ RUN_STATUSES = ("queued", "running", "success", "failed", "timed_out", "cancelle
 def runs_page(
     request: Request,
     pipeline_id: str | None = None,
+    tag: str | None = None,
     status: str | None = None,
     trigger: str | None = None,
     date_from: str | None = None,
@@ -277,18 +279,34 @@ def runs_page(
             return parsed.astimezone()
         return None
 
-    runs = service.list_runs(
-        pipeline_id=pipeline_id or None,
-        status=status or None,
-        trigger=trigger or None,
-        created_after=_parse_moment(date_from, end_of_day=False),
-        created_before=_parse_moment(date_to, end_of_day=True),
-        sort=sort,
-        limit=max(1, min(500, limit)),
-    )
     allowed_pipelines = visible_pipelines(request, service.list_pipelines())
     allowed_ids = {item.pipeline_id for item in allowed_pipelines}
-    runs = [item for item in runs if item.pipeline_id in allowed_ids]
+    known_tags = sorted({item for pipeline in allowed_pipelines for item in pipeline.tags})
+
+    # A tag names a set of pipelines, so it is resolved to ids and pushed into
+    # the query. Filtering afterwards would make `limit` count runs that were
+    # then thrown away, and a page of 100 could show three.
+    selected_ids: set[str] | None = None
+    if pipeline_id:
+        selected_ids = {pipeline_id}
+    if tag:
+        tagged = {item.pipeline_id for item in allowed_pipelines if tag in item.tags}
+        selected_ids = tagged if selected_ids is None else selected_ids & tagged
+
+    if selected_ids is not None and not selected_ids:
+        # An empty set must mean "nothing matches", never "no filter".
+        runs = []
+    else:
+        runs = service.list_runs(
+            pipeline_id=",".join(sorted(selected_ids)) if selected_ids else None,
+            status=status or None,
+            trigger=trigger or None,
+            created_after=_parse_moment(date_from, end_of_day=False),
+            created_before=_parse_moment(date_to, end_of_day=True),
+            sort=sort,
+            limit=max(1, min(500, limit)),
+        )
+        runs = [item for item in runs if item.pipeline_id in allowed_ids]
     lineage = service.lineage_for_runs(runs)
 
     return _templates(request).TemplateResponse(
@@ -301,8 +319,10 @@ def runs_page(
             "pipelines": allowed_pipelines,
             "trigger_types": TRIGGER_TYPES,
             "run_statuses": RUN_STATUSES,
+            "known_tags": known_tags,
             "filters": {
                 "pipeline_id": pipeline_id or "",
+                "tag": tag or "",
                 "status": status or "",
                 "trigger": trigger or "",
                 "date_from": date_from or "",

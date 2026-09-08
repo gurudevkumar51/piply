@@ -132,6 +132,12 @@ class TaskDefinition:
     timeout_seconds: int | None = None
     kill_grace_period_seconds: int = 5
     run_if: str | None = None
+    #: A best-effort task: its failure does not fail the run. Downstream tasks
+    #: still follow their own `on_upstream_failure`, which defaults to skipping.
+    allow_failure: bool = False
+    #: Alert the pipeline's failure destinations when this task fails but the
+    #: run still succeeds — a tolerated failure that nothing else reports.
+    alert_on_failure: bool = False
     artifact_paths: tuple[str, ...] = ()
     path: Path | None = None
     python: str | None = None
@@ -499,6 +505,22 @@ class PipelineSummary:
     retry_summary: str = "No automatic retry"
     template_id: str | None = None
     deployment_id: str | None = None
+    #: Who hears about this pipeline, after project and file defaults have been
+    #: applied. Carried so the listing can show at a glance which pipelines
+    #: alert someone — with defaults in play that is no longer obvious from the
+    #: pipeline's own YAML.
+    alert_on_failure: tuple[str, ...] = ()
+    alert_on_success: tuple[str, ...] = ()
+
+    @property
+    def alert_summary(self) -> str:
+        """A one-line description of who is told, for the listing's tooltip."""
+        parts = []
+        if self.alert_on_failure:
+            parts.append(f"on failure: {', '.join(self.alert_on_failure)}")
+        if self.alert_on_success:
+            parts.append(f"on success: {', '.join(self.alert_on_success)}")
+        return "; ".join(parts)
 
     @property
     def execution_summary(self) -> str:

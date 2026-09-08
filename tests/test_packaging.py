@@ -257,3 +257,54 @@ def test_api_reference_covers_every_route() -> None:
 
     missing = sorted(route for route in routes if not documented(route))
     assert not missing, f"routes missing from docs/API.md: {missing}"
+
+
+def test_the_cli_does_not_import_the_server_or_http_stack() -> None:
+    """`piply validate` should not pay for a web server it never starts.
+
+    `uvicorn`, `httpx` and `asyncio` together cost roughly 250ms of the CLI's
+    startup — more than half of it — and none are needed to read a config, list
+    runs, or retry a task. They are imported at the point of use instead.
+
+    Asserted by inspection rather than by timing: a stopwatch test is flaky on a
+    busy machine, and the thing that actually regresses is someone adding a
+    module-level import back.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, piply.cli.main; print(','.join(sorted({'uvicorn','httpx','asyncio'} & set(sys.modules))))",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=True,
+    )
+
+    leaked = [name for name in result.stdout.strip().split(",") if name]
+    assert not leaked, f"importing the CLI pulled in {leaked}; import them where they are used"
+
+
+def test_sending_an_alert_still_works_with_the_lazy_imports() -> None:
+    """The lazy import must not have broken the thing it made lazy."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from piply.core.notifications import TeamsDestination, build_alert, send_alert; "
+            "d = TeamsDestination(name='x', destination_type='channel', "
+            "webhook='http://127.0.0.1:9/none', timeout_seconds=0.4); "
+            "out = send_alert([d], build_alert(title='t', pipeline_id='p', status='failed', "
+            "run_id='r', trigger='manual', tasks='0/1', duration='0s')); "
+            "print('delivered' if out and out[0][1] else 'reported-failure')",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=True,
+    )
+
+    # Nothing is listening, so it must come back as a reported failure — not an
+    # ImportError or a NameError from the deferred import.
+    assert result.stdout.strip() == "reported-failure", result.stderr

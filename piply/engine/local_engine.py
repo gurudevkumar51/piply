@@ -168,8 +168,23 @@ class LocalEngine(BaseEngine):
                     cancel_event,
                 )
 
-            failed_tasks = [task_id for task_id, status in task_statuses.items() if status in {"failed", "timed_out"}]
-            timed_out_tasks = [task_id for task_id, status in task_statuses.items() if status == "timed_out"]
+            # A task marked `allow_failure` is best-effort: it still records its
+            # own failure, and downstream tasks still follow their own
+            # `on_upstream_failure`, but it does not decide the run's status.
+            def _decides_run_status(task_id: str) -> bool:
+                task = pipeline.tasks.get(task_id)
+                return task is None or not task.allow_failure
+
+            failed_tasks = [
+                task_id
+                for task_id, status in task_statuses.items()
+                if status in {"failed", "timed_out"} and _decides_run_status(task_id)
+            ]
+            timed_out_tasks = [
+                task_id
+                for task_id, status in task_statuses.items()
+                if status == "timed_out" and _decides_run_status(task_id)
+            ]
             if pipeline_timed_out.is_set():
                 timeout_error = f"Pipeline timed out after {pipeline.timeout_seconds} seconds."
                 self._mark_pending_tasks_timed_out(pipeline, run_id, store, runner, task_statuses)

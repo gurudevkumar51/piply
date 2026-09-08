@@ -35,6 +35,15 @@
                 {% endfor %}
             </select>
 
+            {% if known_tags %}
+            <select name="tag" class="toolbar-input" aria-label="Filter by tag" onchange="this.form.submit()">
+                <option value="">Any tag</option>
+                {% for item in known_tags %}
+                <option value="{{ item }}" {% if filters.tag == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
+
             <select name="status" class="toolbar-input" aria-label="Filter by status" onchange="this.form.submit()">
                 <option value="">Any status</option>
                 <option value="failed,timed_out,interrupted" {% if filters.status == 'failed,timed_out,interrupted' %}selected{% endif %}>
@@ -79,6 +88,7 @@
             <a class="button ghost tiny-button" href="/runs">Reset</a>
         </form>
 
+        <div id="runs-listing">
         {% if runs %}
         <div class="table-wrap">
             <table class="data-table runs-table">
@@ -152,6 +162,7 @@
             <a href="/runs">Clear them</a> to see the full history.
         </div>
         {% endif %}
+        </div>
     </section>
 </div>
 
@@ -174,6 +185,67 @@
 
 {% block scripts %}
 <script>
+// The list is server-rendered, so refreshing it re-fetches this same page and
+// swaps in the new table rather than re-implementing every row in JS. One
+// renderer, no duplicated markup, and the filters in the URL are honoured for
+// free.
+const RUNS_REFRESH_MS = 10000;
+let runsRefreshTimer = null;
+
+function runsRefreshBlocked() {
+    // Never yank the table out from under someone who is reading logs or
+    // part-way through changing a filter.
+    if (document.getElementById("run-logs-drawer")?.classList.contains("open")) return true;
+    const active = document.activeElement;
+    return !!active && ["SELECT", "INPUT", "TEXTAREA"].includes(active.tagName);
+}
+
+async function refreshRunsList() {
+    if (runsRefreshBlocked()) return;
+    const listing = document.getElementById("runs-listing");
+    if (!listing) return;
+    try {
+        const response = await fetch(window.location.href, {
+            headers: {"X-Requested-With": "piply-refresh"},
+            credentials: "same-origin",
+        });
+        if (!response.ok) return;
+        const parsed = new DOMParser().parseFromString(await response.text(), "text/html");
+        const fresh = parsed.getElementById("runs-listing");
+        // Compare before writing: an unchanged table would otherwise drop any
+        // text selection and flicker every ten seconds for no reason.
+        if (!fresh || fresh.innerHTML === listing.innerHTML) return;
+        if (runsRefreshBlocked()) return;
+        listing.innerHTML = fresh.innerHTML;
+    } catch (error) {
+        // A failed refresh is not worth interrupting the page for; the next
+        // tick tries again, and a real outage shows on the scheduler chip.
+    }
+}
+
+function startRunsRefresh() {
+    if (runsRefreshTimer === null) {
+        runsRefreshTimer = window.setInterval(refreshRunsList, RUNS_REFRESH_MS);
+    }
+}
+
+function stopRunsRefresh() {
+    window.clearInterval(runsRefreshTimer);
+    runsRefreshTimer = null;
+}
+
+document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+        stopRunsRefresh();
+    } else {
+        refreshRunsList();
+        startRunsRefresh();
+    }
+});
+if (!document.hidden) {
+    startRunsRefresh();
+}
+
 // Opening the drawer keeps you on the list. Following the link to the run page
 // loses your filters and scroll position, which is the wrong trade when all you
 // want is "why did that one fail?".

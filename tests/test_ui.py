@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -294,6 +295,38 @@ def test_pipelines_page_renders_clickable_run_dots(tmp_path: Path) -> None:
     assert by_id["never_run"]["recent_runs"] == []
 
 
+def _css_rule(selector: str) -> str:
+    """The declarations of the first `selector { ... }` block in the stylesheet."""
+    css = (Path(__file__).resolve().parents[1] / "piply/ui/static/styles.css").read_text(encoding="utf-8")
+    match = re.search(r"(?<![\w.-])" + re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert match, f"{selector} not found in styles.css"
+    return match.group(1)
+
+
+def test_the_run_dot_tooltip_is_not_clipped_by_its_own_table() -> None:
+    """The tooltip must escape the table and point away from the label it explains.
+
+    Two separate things once broke it, and both are invisible in the markup. The
+    table clipped its children, so the tooltip was cut off on the first and last
+    rows — the two most likely to be hovered. And it was anchored above the dot,
+    which is exactly where that row's own "LAST 5 RUNS" label sits.
+    """
+    table = _css_rule(".pipeline-table")
+    tip = _css_rule(".run-dot-tip")
+
+    # `overflow: hidden` on the container clips the tooltip regardless of z-index.
+    assert "overflow" not in table, f"overflow on .pipeline-table clips the tooltip: {table!r}"
+    # The end rows carry the radius instead, or the hover tint bleeds past the corners.
+    assert "border-top-left-radius" in _css_rule(".pipeline-row:first-child")
+    assert "border-bottom-left-radius" in _css_rule(".pipeline-row:last-child")
+
+    # Anchored below the dot, not above it.
+    assert "top:" in tip and "bottom:" not in tip, f"tooltip should hang below the dot: {tip!r}"
+    # It overhangs the next row, so it must render over it and stay click-through.
+    assert "pointer-events: none" in tip
+    assert "z-index" in tip
+
+
 def test_pipeline_groups_are_collapsible(tmp_path: Path, monkeypatch) -> None:
     """Template groups can be collapsed, and the choice survives a re-render.
 
@@ -436,3 +469,150 @@ def test_the_task_focus_panel_can_be_closed(tmp_path: Path) -> None:
         assert f"function {closer}()" in page
         # Escape closes it, but only once any drawer on top has been dismissed.
         assert 'if (event.key !== "Escape")' in page
+
+
+TAGGED_CONFIG = "\n".join(
+    [
+        'version: "1"',
+        "title: Tagged",
+        "workspace: workspace",
+        "pipeline_defaults:",
+        "  tags: [billing]",
+        "pipelines:",
+        "  claims_extract:",
+        "    tags: [nightly]",
+        "    tasks:",
+        "      t: {type: cli, command: echo claims}",
+        "  reports_build:",
+        "    tasks:",
+        "      t: {type: cli, command: echo reports}",
+    ]
+)
+
+
+def test_runs_can_be_filtered_by_tag(tmp_path: Path) -> None:
+    """A tag names a set of pipelines, so it must filter runs as well as pipelines.
+
+    Resolved to pipeline ids and pushed into the query rather than filtered
+    afterwards, or `limit` would count rows that are then discarded and a page
+    of 100 could show three.
+    """
+    config_path = _project(tmp_path, TAGGED_CONFIG)
+    service = PipelineService(config_path=config_path)
+    claims = service.trigger_pipeline("claims_extract", wait=True).run_id
+    reports = service.trigger_pipeline("reports_build", wait=True).run_id
+
+    with TestClient(create_app(str(config_path))) as client:
+        both = client.get("/runs?tag=billing").text
+        only_claims = client.get("/runs?tag=nightly").text
+        nothing = client.get("/runs?tag=does_not_exist").text
+        unfiltered = client.get("/runs").text
+
+    # The file-level tag covers both pipelines.
+    assert claims in both and reports in both
+    # The pipeline's own tag covers only itself.
+    assert claims in only_claims and reports not in only_claims
+    # An unknown tag means nothing matches, never "no filter".
+    assert claims not in nothing and reports not in nothing
+    assert claims in unfiltered and reports in unfiltered
+
+
+def test_a_tag_and_a_pipeline_filter_combine(tmp_path: Path) -> None:
+    """Two filters narrow together; a contradiction returns nothing."""
+    config_path = _project(tmp_path, TAGGED_CONFIG)
+    service = PipelineService(config_path=config_path)
+    claims = service.trigger_pipeline("claims_extract", wait=True).run_id
+    reports = service.trigger_pipeline("reports_build", wait=True).run_id
+
+    with TestClient(create_app(str(config_path))) as client:
+        agreeing = client.get("/runs?tag=billing&pipeline_id=claims_extract").text
+        contradictory = client.get("/runs?tag=nightly&pipeline_id=reports_build").text
+
+    assert claims in agreeing and reports not in agreeing
+    assert claims not in contradictory and reports not in contradictory
+
+
+def test_the_tag_filter_is_offered_only_when_tags_exist(tmp_path: Path) -> None:
+    """An always-empty dropdown is clutter on a project that does not use tags."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with TestClient(create_app(str(_project(tmp_path, TAGGED_CONFIG)))) as client:
+        tagged = client.get("/runs").text
+    with TestClient(create_app(str(_project(plain, RUN_HISTORY_CONFIG)))) as client:
+        untagged = client.get("/runs").text
+
+    assert 'name="tag"' in tagged
+    assert ">billing<" in tagged and ">nightly<" in tagged
+    assert 'name="tag"' not in untagged
+
+
+def test_the_pipelines_page_ships_a_clickable_tag_filter(tmp_path: Path) -> None:
+    """Tags were searchable as free text only, which cannot match exactly."""
+    with TestClient(create_app(str(_project(tmp_path, TAGGED_CONFIG)))) as client:
+        body = client.get("/pipelines").text
+
+    assert "togglePipelineTag" in body
+    assert "matchesTag" in body
+    # And a visible way to remove the filter once it is on.
+    assert "clearPipelineTag" in body
+
+
+def test_a_pipeline_that_alerts_someone_is_marked_on_the_listing(tmp_path: Path) -> None:
+    """With defaults in play, a pipeline's own YAML no longer says who it tells.
+
+    `notifications.defaults` and a file's `pipeline_defaults` both add
+    destinations from outside the pipeline block, so the listing has to show the
+    resolved answer or there is no way to see it without reading three files.
+    """
+    config = "\n".join(
+        [
+            'version: "1"',
+            "title: Bells",
+            "workspace: workspace",
+            "notifications:",
+            "  teams:",
+            "    oncall: {type: channel, webhook: 'https://example.invalid/hook'}",
+            "  defaults:",
+            "    on_failure: [oncall]",
+            "pipelines:",
+            "  inherits_default:",
+            "    tasks:",
+            "      t: {type: cli, command: echo hi}",
+            "  opted_out:",
+            "    notifications: false",
+            "    tasks:",
+            "      t: {type: cli, command: echo hi}",
+        ]
+    )
+    config_path = _project(tmp_path, config)
+    service = PipelineService(config_path=config_path)
+
+    summaries = {item.pipeline_id: item for item in service.list_pipelines()}
+    assert summaries["inherits_default"].alert_summary == "on failure: oncall"
+    assert summaries["opted_out"].alert_summary == ""
+
+    with TestClient(create_app(str(config_path))) as client:
+        body = client.get("/pipelines").text
+        payload = client.get("/api/pipelines").json()
+
+    # The bell and its tooltip are rendered from this field.
+    assert "notify-pill" in body
+    by_id = {item["pipeline_id"]: item for item in payload}
+    assert by_id["inherits_default"]["alert_summary"] == "on failure: oncall"
+    assert by_id["opted_out"]["alert_summary"] == ""
+
+
+def test_the_runs_list_refreshes_itself(tmp_path: Path) -> None:
+    """A running pipeline must show up without the user reloading the page.
+
+    The refresh re-fetches this same server-rendered page and swaps the table,
+    so there is exactly one renderer rather than a JS copy of every row.
+    """
+    with TestClient(create_app(str(_project(tmp_path, RUN_HISTORY_CONFIG)))) as client:
+        body = client.get("/runs").text
+
+    assert 'id="runs-listing"' in body
+    assert "refreshRunsList" in body
+    # It must not fight the user: no swap while a drawer is open or a filter is focused.
+    assert "runsRefreshBlocked" in body
+    assert "visibilitychange" in body

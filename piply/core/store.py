@@ -1072,14 +1072,19 @@ class RunStore:
     ) -> list[RunRecord]:
         """List recent runs with optional filters and an explicit sort order.
 
-        ``status`` and ``trigger`` accept a comma-separated list so the UI can
-        offer multi-select without a second round trip.
+        ``pipeline_id``, ``status`` and ``trigger`` accept a comma-separated list
+        so the UI can offer multi-select without a second round trip. A tag
+        filter resolves to a set of pipelines, and passing them here keeps
+        ``limit`` meaning "this many matching runs" rather than "this many runs,
+        of which some match".
         """
         conditions: list[str] = []
         params: list[object] = []
         if pipeline_id:
-            conditions.append("pipeline_id = ?")
-            params.append(pipeline_id)
+            values = [item.strip() for item in str(pipeline_id).split(",") if item.strip()]
+            if values:
+                conditions.append(f"pipeline_id IN ({', '.join('?' for _ in values)})")
+                params.extend(values)
         if status:
             values = [item.strip() for item in str(status).split(",") if item.strip()]
             if values:

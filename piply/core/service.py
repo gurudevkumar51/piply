@@ -374,6 +374,8 @@ class PipelineService:
                     retry_summary=pipeline.retry_policy.summary,
                     template_id=pipeline.template_id,
                     deployment_id=pipeline.deployment_id,
+                    alert_on_failure=pipeline.alert_on_failure,
+                    alert_on_success=pipeline.alert_on_success,
                 )
             )
         return sorted(summaries, key=lambda item: item.title.lower())
@@ -1566,6 +1568,7 @@ class PipelineService:
         reach them lives in central settings or the `notifications:` block.
         """
         self._send_teams_alert(pipeline, run)
+        self._send_task_failure_alert(pipeline, run)
         self._send_email_notification(pipeline, run)
 
     def _record_delivery(
@@ -1607,6 +1610,18 @@ class PipelineService:
                 )
             return
 
+        self._post_alert(pipeline, run, names, title=pipeline.title, error=run.error)
+
+    def _post_alert(
+        self,
+        pipeline: PipelineDefinition,
+        run: RunRecord,
+        names: tuple[str, ...] | list[str],
+        *,
+        title: str,
+        error: str | None,
+    ) -> None:
+        """Resolve destination names and post one card to each."""
         settings = getattr(self.project, "notifications", None)
         if settings is None or not settings.configured:
             message = "Teams notification skipped: no 'notifications:' destinations are declared."
@@ -1632,14 +1647,14 @@ class PipelineService:
         results = send_alert(
             destinations,
             lambda destination: build_alert(
-                title=pipeline.title,
+                title=title,
                 pipeline_id=pipeline.pipeline_id,
                 status=run.status,
                 run_id=run.run_id,
                 trigger=run.trigger,
                 tasks=f"{run.successful_tasks}/{run.task_count} succeeded",
                 duration="unknown" if run.duration_seconds is None else f"{run.duration_seconds:.1f}s",
-                error=run.error,
+                error=error,
                 run_url=self._run_url(run.run_id),
                 card_format=destination.card_format,
             ),
@@ -1647,6 +1662,40 @@ class PipelineService:
         )
         for name, delivered, detail in results:
             self._record_delivery(run, pipeline, name, "sent" if delivered else "failed", detail or None)
+
+    def _send_task_failure_alert(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
+        """Alert about a task that failed without failing its run.
+
+        A task marked `alert_on_failure: true` is one whose failure is tolerated
+        — an optional sync, a best-effort refresh — so the run finishes green and
+        nobody hears about it. That is the one gap the pipeline-level alert
+        cannot cover, and the only case this fires in: when the run did not
+        succeed, its own failure card already says so, and a second card would
+        be noise.
+        """
+        flagged = {task.task_id for task in pipeline.tasks.values() if task.alert_on_failure}
+        if run.status != "success" or not flagged or not pipeline.alert_on_failure:
+            return
+
+        try:
+            failed = sorted(
+                item.task_id
+                for item in self.store.list_task_runs(run.run_id)
+                if item.task_id in flagged and item.status in ("failed", "timed_out")
+            )
+        except Exception:  # noqa: BLE001 - a reporting extra must never fail a run
+            return
+        if not failed:
+            return
+
+        listed = ", ".join(failed)
+        self._post_alert(
+            pipeline,
+            run,
+            pipeline.alert_on_failure,
+            title=f"{pipeline.title} - task failed",
+            error=f"The run succeeded, but these tasks failed and were tolerated: {listed}.",
+        )
 
     def _run_url(self, run_id: str) -> str | None:
         """Return a link back to the run, when a public base URL is configured."""

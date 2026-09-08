@@ -5,6 +5,7 @@ from __future__ import annotations
 from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -136,7 +137,11 @@ async def login_submit(request: Request):
             url="/login?error=Too+many+failed+attempts.+Try+again+in+a+few+minutes.",
             status_code=303,
         )
-    user = service.authenticate(username, password)
+    # Off the event loop: verifying a password is ~240k PBKDF2 rounds, about
+    # 100ms. This route has to be `async def` to read the form, so calling it
+    # directly would stall *every* other request for that long — and a login
+    # page is exactly what gets hit repeatedly when someone is guessing.
+    user = await run_in_threadpool(service.authenticate, username, password)
     session_name = None if user is None else user.username
 
     if user is None:

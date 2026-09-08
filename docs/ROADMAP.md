@@ -43,13 +43,17 @@ an optional extra.
 
 ---
 
-## 0.3 — Operability
+## Next — Operability
+
+Listed in priority order. Deliberately not tied to version numbers: pinning a
+patch release to unbuilt work means renaming the roadmap every time a fix
+ships.
 
 **Theme: know what happened, and who did it — and keep the config workable as
 it grows.**
 
 The config-size problem is solved (`include:`, shipped in 0.3.0) and outbound
-alerting is in (Teams, 0.3.0–0.3.2). What remains is the audit trail — "who
+alerting is in (Teams, 0.3.0–0.3.3). What remains is the audit trail — "who
 *did* what" — and the reliability gap where one flaky task still costs a whole
 run.
 
@@ -83,7 +87,7 @@ included files rather than one. Full design, including the rules table, is in
 Shipped as `include:`, with duplicate detection across files, both file
 names in every conflict error, and reload watching every included file.
 
-### 0.3.3 Audit log — **highest value**
+### Audit log — **highest value**
 
 There is currently no record of who triggered, retried, cancelled, deleted, or
 reconfigured anything. For a tool sitting in front of healthcare or financial
@@ -105,7 +109,7 @@ existing prune settings.
 
 **Cost:** S · no new dependency · one table
 
-### 0.3.4 Task-level retry
+### Task-level retry
 
 Pipeline-level `retry:` means one flaky vendor API forces a whole-run retry.
 Most real flakiness is one task.
@@ -123,7 +127,7 @@ Retries happen inside the task slot, so the DAG never sees the failure.
 
 **Cost:** S · no new dependency
 
-### 0.3.5 Session and token management
+### Session and token management
 
 Follow-through on the auth work:
 
@@ -136,7 +140,7 @@ the permission model.
 
 **Cost:** M · no new dependency
 
-### 0.3.6 SLA tracking
+### SLA tracking
 
 A pipeline that normally takes 10 minutes and is now at 55 is invisible until
 its hard timeout. `expected_duration: 15m` plus a warning state, reusing the
@@ -144,7 +148,7 @@ its hard timeout. `expected_duration: 15m` plus a warning state, reusing the
 
 **Cost:** S
 
-### 0.3.7 Polish
+### Polish
 
 - **Dark mode.** The palette is already CSS variables; this is one media query
   and a toggle.
@@ -160,7 +164,7 @@ its hard timeout. `expected_duration: 15m` plus a warning state, reusing the
 
 **Theme: stop being one process, without becoming a distributed system.**
 
-### 0.4.1 Concurrency pools
+### Concurrency pools
 
 The one that matters most for the RCM-style workload. Eight tenant deployments
 that all trigger the same downstream pipeline serialise behind each other, and
@@ -180,7 +184,7 @@ take — rather than encoding it in cron offsets.
 
 **Cost:** M · no new dependency · the queue table already exists
 
-### 0.4.2 Multiple worker processes
+### Multiple worker processes
 
 Today one process runs everything. A worker pool that claims queue rows would
 lift the ceiling. The queue already has the dedupe and dispatch columns needed;
@@ -192,7 +196,7 @@ opt-in, single-process by default, and must not require a broker.
 
 **Cost:** L
 
-### 0.4.3 Log persistence outside the metadata store
+### Log persistence outside the metadata store
 
 Logs dominate row count. Streaming them to files or object storage with only an
 index row in the database would keep the database small and make retention
@@ -200,7 +204,7 @@ cheap.
 
 **Cost:** M
 
-### 0.4.4 Secret-manager backends
+### Secret-manager backends
 
 The `secrets:` block already abstracts backends. Adding Vault, AWS Secrets
 Manager, and Azure Key Vault as **optional extras** would remove the last reason
@@ -249,10 +253,10 @@ Recorded so it is not relitigated. Full reasoning in
 | Goal | Biggest remaining gap | Addressed by |
 | --- | --- | --- |
 | Lightweight | Nothing pressing — 8 runtime dependencies | Hold the line: new backends stay extras |
-| Fast | Log table growth on long-lived installs | 0.4.3 log persistence, existing prune |
-| Secure | No audit trail; global API token | 0.3.3 audit log, 0.3.5 token management |
+| Fast | Log table growth on long-lived installs | Log persistence, existing prune |
+| Secure | No audit trail; global API token | Audit log, token management |
 | Easy to use | UI cannot supply run parameters | 0.5 declared `params:` |
 
-If only one thing gets built next, make it **0.3.3 audit logging**. It is small,
+If only one thing gets built next, make it **audit logging**. It is small,
 needs no new dependency, and it is the question every reviewer asks first once
 more than one person can press Run.
