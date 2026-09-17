@@ -453,12 +453,18 @@ class PipelineService:
         if current_slot is None:
             return []
 
+        # Backfilling from the last materialized slot is what recovers the slots
+        # missed while the server was down. A pause is not downtime, though: the
+        # pipeline was deliberately held back, so resuming must not replay it.
+        # The floor recorded at resume is where catch-up restarts.
+        floor = self.store.get_schedule_floor(pipeline.pipeline_id)
+
         latest_slot = self.store.get_latest_materialized_slot(pipeline.pipeline_id)
         if latest_slot is None:
-            return [current_slot]
+            return [] if floor is not None and current_slot <= floor else [current_slot]
 
         slots: list[datetime] = []
-        cursor = latest_slot
+        cursor = latest_slot if floor is None else max(latest_slot, floor)
         for _ in range(limit):
             next_slot = pipeline.schedule.next_after(cursor)
             if next_slot is None or next_slot > now:
@@ -1841,7 +1847,14 @@ class PipelineService:
     def set_pipeline_paused(self, pipeline_id: str, paused: bool, *, actor: str | None = None) -> PipelineSummary:
         """Pause or resume a pipeline schedule, recording who asked."""
         self.get_pipeline(pipeline_id)
-        self.store.set_pipeline_paused(pipeline_id, paused)
+        # Resuming records the moment it happened, so the slots that fell during
+        # the pause are not backfilled the instant the pipeline comes back.
+        # Pausing leaves any existing floor alone: it only ever moves forward.
+        self.store.set_pipeline_paused(
+            pipeline_id,
+            paused,
+            schedule_floor=None if paused else datetime.now(timezone.utc),
+        )
         _LOGGER.info(
             "Pipeline '%s' %s by %s",
             pipeline_id,

@@ -9,6 +9,87 @@ rather than buried in the feature list.
 
 ---
 
+## 0.3.4 — unreleased
+
+### Fixed
+
+- **A paused pipeline fired its whole backlog the moment it was resumed.**
+  Reported from a live install: a nightly pipeline paused for three days ran
+  **four times** on the way back.
+
+  Catch-up walks forward from the last *materialized* slot, and a pause
+  materializes nothing — so the cursor sat frozen at the last slot before the
+  pause, and resuming replayed every slot in between. Reproduced exactly: four
+  runs enqueued on the first tick after resume.
+
+  Resuming now records a floor and catch-up starts there, so the pause is not
+  replayed. Resuming is not retroactive either: a slot that passed earlier on
+  the day you resume is gone rather than resurrected.
+
+  **An outage is still backfilled.** Slots missed because the server was *down*
+  are picked up as before — nobody asked for those to be skipped. That
+  distinction is the point of the fix, and is covered by its own test.
+
+  | Situation | On the way back |
+  | --- | --- |
+  | Pipeline was paused | Nothing replayed; the next slot runs normally |
+  | Server was down | Missed slots backfilled, unchanged |
+
+  Existing databases gain a `schedule_floor` column automatically. A pipeline
+  paused *before* upgrading gets its floor when you resume it, so the fix
+  applies to a pause already in progress.
+
+### Behaviour changes
+
+- **An automatic retry no longer re-runs tasks that already succeeded.** The
+  retry policy's `mode` now defaults to `resume` instead of `startover`.
+
+  On a parallel pipeline the old default was expensive and occasionally
+  harmful: one failing task dragged every sibling through a second execution,
+  repeating the long extracts that had worked — and repeating whatever they
+  wrote — purely to retry the one that had not. Measured on a pipeline with one
+  fast failure beside two six-second successes, a retry cost 14.0s under
+  `startover` and 8.8s under `resume`, re-running no successful task at all.
+
+  Nothing else changes: the failed task and everything downstream of it still
+  run, and `mode: startover` is unchanged where a partial run genuinely must be
+  thrown away — a non-idempotent load, or a run whose partial output has to be
+  discarded before retrying.
+
+  ```yaml
+  retry:
+    attempts: 3
+    mode: startover     # only if a partial run must not be resumed
+  ```
+
+  The **Re-run** button on the runs page is deliberately unaffected. Clicking it
+  means "run this again", so it keeps using `startover`; this change is about
+  what Piply does on its own after a failure.
+
+  A retry has always waited for the whole run to finish rather than starting the
+  moment one task failed, so it never overlaps a sibling still in flight. That
+  ordering previously held by accident of where the retry is enqueued; a test
+  now asserts it directly.
+
+### Documentation
+
+- **Six new topic guides, and an index.** The reference had grown to 1,700 lines,
+  which is the right shape for looking up a default and the wrong one for
+  learning a topic. Added [CLI](docs/CLI.md) (there was no command reference at
+  all), [Variables](docs/VARIABLES.md), [Environment
+  Variables](docs/ENVIRONMENT.md), [Pipelines](docs/PIPELINES.md),
+  [Tasks](docs/TASKS.md), and [Templates and
+  Deployments](docs/TEMPLATES_AND_DEPLOYMENTS.md), plus
+  [docs/README.md](docs/README.md) as the map.
+
+  Guides teach and cross-link; the YAML specification stays the single
+  exhaustive key list, so the two cannot drift into disagreeing. Two tests now
+  guard it: every relative link and `#anchor` across all 24 markdown files must
+  resolve, and every page must be reachable from the index. The link check found
+  three already-broken anchors on its first run.
+
+---
+
 ## 0.3.3 — 2026-09-06
 
 Notification routing, tags you can filter by, and four fixes — all prompted by a
@@ -94,23 +175,6 @@ is opt-in and defaults to the old behaviour.
 - **A bell on the pipelines listing shows which pipelines alert someone**, with
   the destinations in its tooltip. With project and file defaults in play, a
   pipeline's own YAML no longer answers that question.
-
-### Documentation
-
-- **Six new topic guides, and an index.** The reference had grown to 1,700 lines,
-  which is the right shape for looking up a default and the wrong one for
-  learning a topic. Added [CLI](docs/CLI.md) (there was no command reference at
-  all), [Variables](docs/VARIABLES.md), [Environment
-  Variables](docs/ENVIRONMENT.md), [Pipelines](docs/PIPELINES.md),
-  [Tasks](docs/TASKS.md), and [Templates and
-  Deployments](docs/TEMPLATES_AND_DEPLOYMENTS.md), plus
-  [docs/README.md](docs/README.md) as the map.
-
-  Guides teach and cross-link; the YAML specification stays the single
-  exhaustive key list, so the two cannot drift into disagreeing. Two tests now
-  guard it: every relative link and `#anchor` across all 24 markdown files must
-  resolve, and every page must be reachable from the index. The link check found
-  three already-broken anchors on its first run.
 
 ### Performance
 

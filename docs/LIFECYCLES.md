@@ -45,7 +45,8 @@ tick()  every PIPLY_SCHEDULER_POLL_INTERVAL_SECONDS
   +-- write heartbeat
   +-- reconcile stale runs
   +-- reload config if the file changed on disk
-  +-- enqueue_due_schedules()   # backfills every missed slot
+  +-- enqueue_due_schedules()   # backfills slots missed while down,
+  |                              # but never those skipped by a pause
   +-- poll_sensors()            # records health per sensor
   +-- drain_trigger_queue()     # dispatch due triggers in order
   |
@@ -310,11 +311,16 @@ Two modes, available automatically via the pipeline `retry` policy and manually
 from the UI, API, and CLI.
 
 ```text
-startover                       resume
----------                       ------
-re-run every task               reuse successful tasks from the source run
-                                re-run the failed task and everything after it
+resume (default)                startover
+----------------                ---------
+reuse successful tasks          re-run every task, including the ones
+re-run the failed task          that already succeeded
+  and everything after it
 ```
+
+`resume` is the default because re-running a task that already succeeded costs
+time and repeats whatever it wrote. Choose `startover` when a partial run must
+be discarded before retrying.
 
 ```text
 run fails

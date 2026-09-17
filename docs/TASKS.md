@@ -144,7 +144,9 @@ its own alert. See [Notifications](NOTIFICATIONS.md).
 ### Retries
 
 Retry policy is set per pipeline, not per task — see
-[Pipelines](PIPELINES.md#4-retries). To re-run a single task from a failed run:
+[Pipelines](PIPELINES.md#4-retries). An automatic retry defaults to `resume`, so
+tasks that already succeeded are **not** run again; only the failed task and
+whatever depends on it. To re-run a single task from a failed run:
 
 ```bash
 piply tasks retry RUN_ID TASK_ID           # resume: this task and downstream

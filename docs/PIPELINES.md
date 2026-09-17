@@ -105,10 +105,26 @@ is scoped to a different tenant or date.
 retry:
   attempts: 3
   delay: 30s
+  mode: resume      # the default
 ```
 
-The policy is per pipeline. A failed task is retried up to `attempts` times
-before the run is failed.
+The policy is per pipeline. A failed run is retried up to `attempts` times.
+
+| Mode | Behaviour |
+| --- | --- |
+| `resume` | **Default.** Keeps the tasks that already succeeded; re-runs the failed one and everything downstream of it |
+| `startover` | Re-runs every task, including the ones that passed |
+
+`resume` is the default because re-running a task that already succeeded costs
+time and repeats whatever it wrote. On a parallel pipeline that matters a lot:
+one failing task should not drag two long, successful extracts through a second
+execution.
+
+Reach for `startover` when a partial run has to be discarded before retrying — a
+non-idempotent load, or one that leaves half-written output behind.
+
+A retry always waits for the **whole run** to finish, not just the task that
+failed. A sibling still executing is never overlapped by its own retry.
 
 To retry after the fact, from a specific task rather than the start:
 
@@ -186,6 +202,20 @@ enabled:
 
 A paused pipeline stays paused across restarts — the state is in the database,
 not the config. It also still accepts manual runs; pausing stops the *schedule*.
+
+**Resuming is not retroactive.** Slots that fell while a pipeline was paused are
+not replayed: pause three days of a nightly job and resuming gives you one run
+at the next scheduled time, not four at once. A slot that passed earlier on the
+day you resume is gone too — resuming picks up from the moment you resume.
+
+That is different from an **outage**. If the server was simply down over a
+scheduled window, those slots *are* backfilled when it comes back, because
+nobody asked for them to be skipped.
+
+| Situation | On the way back |
+| --- | --- |
+| Pipeline was paused | Nothing replayed; next slot runs normally |
+| Server was down | Missed slots backfilled |
 
 ---
 

@@ -356,6 +356,7 @@ deleted with the account, in the same transaction.
 | --- | --- | --- |
 | `pipeline_id` | TEXT PK | |
 | `paused` | INTEGER | 1 when paused from the UI or CLI. Survives restarts and config reloads. |
+| `schedule_floor` | TEXT | Set when the pipeline is resumed. Slots at or before it are never backfilled, so a pause is not replayed on the way back. Added automatically to existing databases. |
 
 ### `meta`
 

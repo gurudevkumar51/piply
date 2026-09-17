@@ -669,7 +669,9 @@ def _parse_retry_policy(raw_value: Any, pipeline_id: str) -> RetryPolicy:
         raise ConfigError(f"Pipeline '{pipeline_id}' retry must be a mapping")
 
     attempts = int(raw_value.get("attempts", raw_value.get("count", 0)))
-    mode = str(raw_value.get("mode", "startover")).strip().lower()
+    # Defaults to resume, matching RetryPolicy: retrying should not repeat the
+    # tasks that already succeeded.
+    mode = str(raw_value.get("mode", RetryPolicy().mode)).strip().lower()
     delay_seconds = int(raw_value.get("delay_seconds", raw_value.get("delay", 0)))
     if attempts < 0:
         raise ConfigError(f"Pipeline '{pipeline_id}' retry attempts must be zero or greater")

@@ -217,7 +217,11 @@ class RunStore:
 
                 CREATE TABLE IF NOT EXISTS pipeline_overrides (
                     pipeline_id TEXT PRIMARY KEY,
-                    paused INTEGER NOT NULL DEFAULT 0
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    -- Slots at or before this moment are never backfilled. Set
+                    -- when a pipeline is resumed, so the days it spent paused
+                    -- are not replayed the instant it comes back.
+                    schedule_floor TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS meta (
@@ -267,6 +271,9 @@ class RunStore:
             )
 
             self._refresh_schema_info(connection)
+
+            if "schedule_floor" not in self.dialect.existing_columns(connection, "pipeline_overrides"):
+                connection.execute("ALTER TABLE pipeline_overrides ADD COLUMN schedule_floor TEXT")
 
             if "primary_entry" not in self._run_columns:
                 connection.execute("ALTER TABLE runs ADD COLUMN primary_entry TEXT")
@@ -2262,19 +2269,50 @@ class RunStore:
             failed_runs=int(totals["failed_runs"] or 0),
         )
 
-    def set_pipeline_paused(self, pipeline_id: str, paused: bool) -> None:
-        """Persist a schedule pause override for one pipeline."""
+    def set_pipeline_paused(self, pipeline_id: str, paused: bool, *, schedule_floor: datetime | None = None) -> None:
+        """Persist a schedule pause override for one pipeline.
+
+        `schedule_floor` is recorded on resume. Without it, resuming replays
+        every slot that fell during the pause — three days off meant four runs
+        firing at once on the way back, which is the opposite of what pausing
+        was asked to do.
+        """
         with self._lock, self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO pipeline_overrides (pipeline_id, paused)
-                VALUES (?, ?)
-                ON CONFLICT(pipeline_id)
-                DO UPDATE SET paused = excluded.paused
-                """,
-                (pipeline_id, 1 if paused else 0),
-            )
+            if schedule_floor is None:
+                connection.execute(
+                    """
+                    INSERT INTO pipeline_overrides (pipeline_id, paused)
+                    VALUES (?, ?)
+                    ON CONFLICT(pipeline_id)
+                    DO UPDATE SET paused = excluded.paused
+                    """,
+                    (pipeline_id, 1 if paused else 0),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO pipeline_overrides (pipeline_id, paused, schedule_floor)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(pipeline_id)
+                    DO UPDATE SET paused = excluded.paused, schedule_floor = excluded.schedule_floor
+                    """,
+                    (pipeline_id, 1 if paused else 0, schedule_floor.isoformat()),
+                )
             connection.commit()
+
+    def get_schedule_floor(self, pipeline_id: str) -> datetime | None:
+        """Return the moment before which slots must not be backfilled."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT schedule_floor FROM pipeline_overrides WHERE pipeline_id = ?",
+                (pipeline_id,),
+            ).fetchone()
+        if not row or not row["schedule_floor"]:
+            return None
+        parsed = _from_iso(str(row["schedule_floor"]))
+        if parsed is None:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
     def is_pipeline_paused(self, pipeline_id: str) -> bool:
         """Return whether a pipeline is paused in the override table."""

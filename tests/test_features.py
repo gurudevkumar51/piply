@@ -1493,3 +1493,126 @@ def test_a_global_entity_that_no_task_uses_is_warned_about(tmp_path: Path) -> No
     assert not [w for w in project.warnings if "claim_extract" in w]
     # And the behaviour itself is unchanged, so nothing silently breaks.
     assert len(project.pipelines["nightly_cleanup"].tasks) == 3
+
+
+PARALLEL_RETRY_CONFIG = "\n".join(
+    [
+        'version: "1"',
+        "title: Parallel retry",
+        "workspace: workspace",
+        "pipelines:",
+        "  parallel_flow:",
+        "    parallelizable: true",
+        "    max_parallel_tasks: 4",
+        "    retry:",
+        "      attempts: 1",
+        "      delay: 0",
+        "MODE_LINE",
+        "    tasks:",
+        "      fail_fast:",
+        "        type: cli",
+        '        command: python -c "import sys; sys.exit(7)"',
+        "      slow_a:",
+        "        type: cli",
+        "        command: python -c \"import time; time.sleep(2); print('slow_a done')\"",
+        "      slow_b:",
+        "        type: cli",
+        "        command: python -c \"import time; time.sleep(2); print('slow_b done')\"",
+    ]
+)
+
+
+def _parallel_retry_project(tmp_path: Path, *, mode: str | None) -> Path:
+    """A pipeline whose failing task runs beside two slow, successful ones."""
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    mode_line = f"      mode: {mode}" if mode else ""
+    body = PARALLEL_RETRY_CONFIG.replace("MODE_LINE\n", f"{mode_line}\n" if mode_line else "")
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(body.replace("MODE_LINE\n", "").replace("\nMODE_LINE", ""), encoding="utf-8")
+    return config_path
+
+
+def _settled_runs(service: PipelineService, expected: int, timeout: float = 40.0):
+    """Wait until `expected` runs exist and none is still going."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        runs = service.list_runs(limit=10)
+        if len(runs) >= expected and all(item.status not in {"running", "queued"} for item in runs):
+            return sorted(runs, key=lambda item: item.created_at)
+        time.sleep(0.2)
+    raise AssertionError(f"runs did not settle: {[(r.run_id, r.status) for r in service.list_runs(limit=10)]}")
+
+
+def test_an_automatic_retry_does_not_repeat_tasks_that_already_succeeded(tmp_path: Path) -> None:
+    """The default retry mode must not redo work that passed.
+
+    On a parallel pipeline, one failing task used to drag every sibling through a
+    second execution — repeating the long extracts that worked, and any side
+    effect they had, purely to retry the one that did not.
+    """
+    service = PipelineService(
+        config_path=_parallel_retry_project(tmp_path, mode=None),
+        database_path=tmp_path / "runs.db",
+    )
+
+    service.trigger_pipeline("parallel_flow", wait=True)
+    first, retry = _settled_runs(service, 2)
+
+    assert retry.trigger == "retry"
+    _, retry_tasks, _ = service.get_run(retry.run_id)
+    by_id = {item.task_id: item for item in retry_tasks}
+
+    # The successful siblings are carried across, not executed again.
+    assert by_id["slow_a"].status == "success"
+    assert by_id["slow_b"].status == "success"
+    for skipped in ("slow_a", "slow_b"):
+        started, finished = by_id[skipped].started_at, by_id[skipped].finished_at
+        elapsed = None if not (started and finished) else (finished - started).total_seconds()
+        assert elapsed is None or elapsed < 1.5, f"{skipped} was re-executed for {elapsed}s"
+
+    # The failing one is retried, and still fails.
+    assert by_id["fail_fast"].status == "failed"
+    assert first.status == "failed"
+
+
+def test_startover_still_re_runs_everything_when_asked_for(tmp_path: Path) -> None:
+    """Changing the default must not remove the old behaviour, only stop assuming it."""
+    service = PipelineService(
+        config_path=_parallel_retry_project(tmp_path, mode="startover"),
+        database_path=tmp_path / "runs.db",
+    )
+
+    service.trigger_pipeline("parallel_flow", wait=True)
+    _, retry = _settled_runs(service, 2)
+
+    _, retry_tasks, _ = service.get_run(retry.run_id)
+    by_id = {item.task_id: item for item in retry_tasks}
+    for repeated in ("slow_a", "slow_b"):
+        started, finished = by_id[repeated].started_at, by_id[repeated].finished_at
+        assert started and finished
+        assert (finished - started).total_seconds() >= 1.5, f"{repeated} should have been re-executed"
+
+
+def test_a_retry_never_starts_while_a_sibling_task_is_still_running(tmp_path: Path) -> None:
+    """A retry must wait for the whole run, not just the task that failed.
+
+    `fail_fast` fails within milliseconds while two siblings still have seconds
+    to go. Starting the retry then would put two copies of the same pipeline on
+    the same data. Nothing enforced this before; the ordering held by accident of
+    where the retry is enqueued.
+    """
+    service = PipelineService(
+        config_path=_parallel_retry_project(tmp_path, mode=None),
+        database_path=tmp_path / "runs.db",
+    )
+
+    service.trigger_pipeline("parallel_flow", wait=True)
+    first, retry = _settled_runs(service, 2)
+
+    _, first_tasks, _ = service.get_run(first.run_id)
+    last_finish = max(item.finished_at for item in first_tasks if item.finished_at)
+    retry_start = retry.started_at or retry.created_at
+
+    assert retry_start >= last_finish, (
+        f"retry began at {retry_start} but a task of {first.run_id} was still running until {last_finish}"
+    )

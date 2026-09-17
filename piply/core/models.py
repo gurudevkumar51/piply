@@ -34,7 +34,13 @@ class RetryPolicy:
     """RetryPolicy configures automatic retries for a pipeline."""
 
     attempts: int = 0
-    mode: RetryMode = "startover"
+    #: `resume` re-runs only what did not succeed. The old default was
+    #: `startover`, which re-ran every task including the ones that had already
+    #: passed — on a parallel pipeline that means repeating the long extracts
+    #: that worked in order to retry the one that did not, and repeating any
+    #: side effect they had. Set `mode: startover` explicitly where a partial
+    #: run really must be thrown away.
+    mode: RetryMode = "resume"
     delay_seconds: int = 0
 
     @property

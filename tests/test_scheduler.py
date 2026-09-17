@@ -345,3 +345,119 @@ def test_a_pipeline_can_disable_its_schedule_per_environment(tmp_path: Path, mon
         encoding="utf-8",
     )
     assert load_project(config_path).pipelines["nightly"].enabled is False
+
+
+def _paused_pipeline_project(tmp_path: Path) -> Path:
+    """A pipeline on a one-minute interval, so a pause spans many slots quickly."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    (workspace / "job.py").write_text("print('job')", encoding="utf-8")
+    config_path = tmp_path / "piply.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'version: "1"',
+                "title: Pause Test",
+                "workspace: workspace",
+                "pipelines:",
+                "  scheduled_flow:",
+                "    schedule:",
+                "      interval_seconds: 60",
+                "    tasks:",
+                "      main:",
+                "        type: python",
+                "        path: job.py",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _resume_at(service: PipelineService, pipeline_id: str, moment: datetime) -> None:
+    """Resume as though the wall clock were `moment`, so the floor is deterministic."""
+    service.store.set_pipeline_paused(pipeline_id, False, schedule_floor=moment)
+
+
+def test_resuming_a_paused_pipeline_does_not_replay_the_pause(tmp_path: Path) -> None:
+    """Pausing means "do not run", so coming back must not run the whole backlog.
+
+    Reported from a live install: a pipeline paused for three days fired four
+    times the moment it was resumed. Catch-up walked forward from the last
+    materialized slot, and a pause materializes nothing, so the cursor sat
+    frozen at the last slot before the pause.
+    """
+    service = PipelineService(
+        config_path=_paused_pipeline_project(tmp_path),
+        database_path=tmp_path / "runs.db",
+        engine=ImmediateEngine(),
+    )
+    first_slot = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+    service.trigger_pipeline("scheduled_flow", trigger="schedule", scheduled_for=first_slot, wait=False)
+
+    service.set_pipeline_paused("scheduled_flow", True)
+    paused_through = first_slot + timedelta(minutes=30)
+    assert service.enqueue_due_schedules(now=paused_through) == 0
+
+    # Resume half a minute before the next slot, then let the scheduler tick.
+    _resume_at(service, "scheduled_flow", paused_through + timedelta(seconds=30))
+    enqueued = service.enqueue_due_schedules(now=paused_through + timedelta(minutes=1))
+
+    assert enqueued == 1, f"resuming replayed {enqueued} slots from the pause"
+
+
+def test_a_pipeline_resumed_after_its_slot_waits_for_the_next_one(tmp_path: Path) -> None:
+    """Resuming is not retroactive: a slot that passed during the pause is gone."""
+    service = PipelineService(
+        config_path=_paused_pipeline_project(tmp_path),
+        database_path=tmp_path / "runs.db",
+        engine=ImmediateEngine(),
+    )
+    first_slot = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+    service.trigger_pipeline("scheduled_flow", trigger="schedule", scheduled_for=first_slot, wait=False)
+    service.set_pipeline_paused("scheduled_flow", True)
+
+    resumed = first_slot + timedelta(minutes=30, seconds=10)
+    _resume_at(service, "scheduled_flow", resumed)
+
+    # The 10:30 slot fell during the pause and is not resurrected.
+    assert service.enqueue_due_schedules(now=resumed + timedelta(seconds=20)) == 0
+    # The next one runs normally.
+    assert service.enqueue_due_schedules(now=first_slot + timedelta(minutes=31)) == 1
+
+
+def test_downtime_is_still_backfilled(tmp_path: Path) -> None:
+    """The catch-up loop exists for an outage, and must keep working.
+
+    The pause fix must not turn into "never backfill anything" — a server that
+    was down over a scheduled window should still pick those slots up.
+    """
+    service = PipelineService(
+        config_path=_paused_pipeline_project(tmp_path),
+        database_path=tmp_path / "runs.db",
+        engine=ImmediateEngine(),
+    )
+    first_slot = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+    service.trigger_pipeline("scheduled_flow", trigger="schedule", scheduled_for=first_slot, wait=False)
+
+    # No pause, no ticks for three minutes, as though the process were stopped.
+    assert service.enqueue_due_schedules(now=first_slot + timedelta(minutes=3)) == 3
+
+
+def test_the_schedule_floor_survives_a_later_pause(tmp_path: Path) -> None:
+    """Pausing again must not discard the floor and re-open the old backlog."""
+    service = PipelineService(
+        config_path=_paused_pipeline_project(tmp_path),
+        database_path=tmp_path / "runs.db",
+        engine=ImmediateEngine(),
+    )
+    first_slot = datetime(2026, 4, 11, 10, 0, tzinfo=timezone.utc)
+    service.trigger_pipeline("scheduled_flow", trigger="schedule", scheduled_for=first_slot, wait=False)
+
+    service.set_pipeline_paused("scheduled_flow", True)
+    resumed = first_slot + timedelta(minutes=30)
+    _resume_at(service, "scheduled_flow", resumed)
+    assert service.store.get_schedule_floor("scheduled_flow") == resumed
+
+    service.set_pipeline_paused("scheduled_flow", True)
+    assert service.store.get_schedule_floor("scheduled_flow") == resumed, "pausing cleared the floor"

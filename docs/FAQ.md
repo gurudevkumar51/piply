@@ -961,6 +961,13 @@ piply resume nightly
 
 The pause is stored in the database and survives restarts and config reloads.
 
+Resuming does **not** replay the pause. A nightly job paused for three days
+gives you one run at the next scheduled time, not four at once, and a slot that
+passed earlier on the day you resume is not resurrected either.
+
+An outage is treated differently: slots missed because the server was *down*
+are still backfilled, since nobody asked for those to be skipped.
+
 ### Can two runs of the same pipeline overlap?
 
 Not by default — `max_concurrent_runs` is 1. Raise it if overlap is safe.
@@ -976,12 +983,14 @@ pipelines:
   nightly:
     retry:
       attempts: 2
-      mode: resume          # or startover
+      mode: resume          # the default; use startover to discard partial work
       delay_seconds: 30
 ```
 
-`resume` restarts from the failed task and keeps successful results.
-`startover` re-runs everything.
+`resume` is the **default**: it restarts from the failed task and keeps the
+results of everything that already succeeded. `startover` re-runs the whole
+pipeline, which is only what you want when a partial run has to be discarded
+before retrying — a non-idempotent load, say.
 
 Retry is currently **pipeline-level**. Per-task retry is on the roadmap.
 

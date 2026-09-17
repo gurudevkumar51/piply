@@ -660,7 +660,7 @@ pipelines:
 
     retry:
       attempts: 2
-      mode: resume                       # resume | startover
+      mode: resume                       # resume (default) | startover
       delay_seconds: 10
 
     triggers_on_success:
