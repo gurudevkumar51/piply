@@ -36,6 +36,70 @@ class TriggerRunRequest(BaseModel):
     command_overrides: dict[str, str] = Field(default_factory=dict)
     params: dict[str, object] = Field(default_factory=dict)
     tenant_id: str | None = None
+    #: Values for `{placeholder}` variables the config does not supply, used
+    #: when running a normally-downstream pipeline by hand. They are applied the
+    #: same way an upstream pipeline's variables are, so nothing new has to
+    #: understand them.
+    variables: dict[str, str] = Field(default_factory=dict)
+
+
+class PreviewRequest(BaseModel):
+    """PreviewRequest carries the values a dry run should resolve against."""
+
+    params: dict[str, object] = Field(default_factory=dict)
+    command_overrides: dict[str, str] = Field(default_factory=dict)
+    tenant_id: str | None = None
+    source_run_id: str | None = None
+
+
+class BackfillScheduleRequest(BaseModel):
+    """BackfillScheduleRequest selects the historic window to materialize."""
+
+    start: datetime
+    end: datetime
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class PruneRequest(BaseModel):
+    """PruneRequest optionally overrides the configured retention window."""
+
+    run_retention_days: int | None = Field(default=None, ge=0)
+    log_retention_days: int | None = Field(default=None, ge=0)
+    max_runs_per_pipeline: int | None = Field(default=None, ge=0)
+    dry_run: bool = False
+    vacuum: bool = True
+
+
+class SmtpSettingsRequest(BaseModel):
+    """Central SMTP configuration submitted by an administrator."""
+
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = None
+    #: Omit to keep the stored password; it is never returned by the API.
+    password: str | None = None
+    from_address: str | None = None
+    use_tls: bool | None = None
+    use_ssl: bool | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+
+
+class DatabaseSettingsRequest(BaseModel):
+    """Where Piply should keep its own runtime state."""
+
+    backend: str = "sqlite"
+    sqlite_path: str | None = None
+    dsn: str | None = None
+    #: Copy the current runs, logs, and accounts into the new database. Only
+    #: possible when the target is empty; without it the new store starts blank
+    #: and the old one is left untouched.
+    migrate: bool = False
+
+
+class SmtpTestRequest(BaseModel):
+    """Where to send a test message."""
+
+    recipient: str
 
 
 class RunResponse(BaseModel):
@@ -66,6 +130,8 @@ class RunResponse(BaseModel):
     parent_run_id: str | None = None
     parent_pipeline_id: str | None = None
     tenant_id: str | None = None
+    #: Account that asked for this run; None for scheduler and sensor runs.
+    actor: str | None = None
 
     @classmethod
     def from_record(cls, record: RunRecord) -> RunResponse:
@@ -96,6 +162,7 @@ class RunResponse(BaseModel):
             parent_run_id=record.parent_run_id,
             parent_pipeline_id=record.parent_pipeline_id,
             tenant_id=record.tenant_id,
+            actor=record.actor,
         )
 
 
@@ -110,6 +177,11 @@ class TaskResponse(BaseModel):
     enabled: bool
     command_preview: str
     on_upstream_failure: str
+    priority: int = 0
+    timeout_seconds: int | None = None
+    kill_grace_period_seconds: int = 5
+    run_if: str | None = None
+    artifact_paths: list[str] = Field(default_factory=list)
     shell: str | None = None
     template_id: str | None = None
     entity_key: str | None = None
@@ -127,6 +199,11 @@ class TaskResponse(BaseModel):
             enabled=definition.enabled,
             command_preview=definition.command_preview,
             on_upstream_failure=definition.on_upstream_failure,
+            priority=definition.priority,
+            timeout_seconds=definition.timeout_seconds,
+            kill_grace_period_seconds=definition.kill_grace_period_seconds,
+            run_if=definition.run_if,
+            artifact_paths=list(definition.artifact_paths),
             shell=definition.shell,
             template_id=definition.template_id,
             entity_key=definition.entity_key,
@@ -144,6 +221,9 @@ class TaskRunResponse(BaseModel):
     status: str
     position: int
     command_preview: str
+    priority: int = 0
+    timeout_seconds: int | None = None
+    run_if: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     exit_code: int | None = None
@@ -166,6 +246,9 @@ class TaskRunResponse(BaseModel):
             status=record.status,
             position=record.position,
             command_preview=record.command_preview,
+            priority=record.priority,
+            timeout_seconds=record.timeout_seconds,
+            run_if=record.run_if,
             started_at=record.started_at,
             finished_at=record.finished_at,
             exit_code=record.exit_code,
@@ -262,6 +345,8 @@ class PipelineResponse(BaseModel):
     latest_task_states: dict[str, str]
     retry_summary: str
     last_run: RunResponse | None = None
+    #: Newest first. Drives the run-history dots on the pipeline listing.
+    recent_runs: list[RunResponse] = Field(default_factory=list)
 
     @classmethod
     def from_summary(cls, summary: PipelineSummary) -> PipelineResponse:
@@ -290,6 +375,7 @@ class PipelineResponse(BaseModel):
             latest_task_states=dict(summary.latest_task_states),
             retry_summary=summary.retry_summary,
             last_run=RunResponse.from_record(summary.last_run) if summary.last_run else None,
+            recent_runs=[RunResponse.from_record(item) for item in summary.recent_runs],
         )
 
 
@@ -351,6 +437,9 @@ class SchedulerResponse(BaseModel):
     label: str | None = None
     heartbeat: str | None = None
     heartbeat_age_seconds: float | None = None
+    owner_pid: int | None = None
+    owner_alive: bool | None = None
+    started_at: str | None = None
     last_error: str | None = None
     config_path: str
     database_path: str
@@ -383,12 +472,16 @@ class DashboardResponse(BaseModel):
 
 
 class RunDetailResponse(BaseModel):
-    """RunDetailResponse adds task runs and logs to one run summary."""
+    """RunDetailResponse adds task runs, logs, and pipeline lineage to one run."""
 
     run: RunResponse
     task_runs: list[TaskRunResponse]
     logs: list[LogResponse]
     upcoming_runs: list[UpcomingRunResponse] = Field(default_factory=list)
+    downstream: list[dict[str, object]] = Field(default_factory=list)
+    upstream: dict[str, object] | None = None
+    artifacts: list[dict[str, object]] = Field(default_factory=list)
+    has_run_config: bool = False
 
 
 class TaskDetailResponse(BaseModel):

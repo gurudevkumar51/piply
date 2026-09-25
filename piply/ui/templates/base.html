@@ -25,8 +25,10 @@
             <div class="nav-links">
                 <a class="nav-link {% if page == 'dashboard' %}active{% endif %}" href="/">Dashboard</a>
                 <a class="nav-link {% if page == 'pipelines' %}active{% endif %}" href="/pipelines">Pipelines</a>
-                <a class="nav-link {% if page == 'matrix' %}active{% endif %}" href="/execution-matrix">Execution Matrix</a>
+                <a class="nav-link {% if page == 'runs' %}active{% endif %}" href="/runs">Runs</a>
+                <a class="nav-link {% if page == 'matrix' %}active{% endif %}" href="/execution-matrix">Grid</a>
                 <a class="nav-link {% if page == 'logs' %}active{% endif %}" href="/logs">Logs</a>
+                <a class="nav-link {% if page == 'diagnostics' %}active{% endif %}" href="/diagnostics">Diagnostics</a>
                 <a class="nav-link {% if page == 'settings' %}active{% endif %}" href="/settings">Settings</a>
             </div>
 
@@ -39,7 +41,12 @@
                 <span data-scheduler-label>{{ scheduler.label or ('scheduler live' if scheduler.running else 'scheduler offline') }}</span>
             </div>
 
+            {% if request.state.user %}
+            <span class="meta-pill tiny" title="Signed in as {{ request.state.user.username }} ({{ request.state.user.role }})">
+                {{ request.state.user.username }}
+            </span>
             <a href="/logout" class="button ghost" style="padding: 6px 12px; font-size: 0.85rem;">Logout</a>
+            {% endif %}
         </nav>
 
         {% block content %}{% endblock %}

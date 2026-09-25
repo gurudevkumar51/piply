@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def read_secret(env: Mapping[str, str], name: str) -> str | None:
+    """Return a secret from ``NAME``, or from the file named by ``NAME_FILE``.
+
+    The ``_FILE`` form is the Docker and Kubernetes convention for mounted
+    secrets. It is preferred on a server because an environment variable is
+    readable through ``docker inspect``, ``/proc/<pid>/environ``, and most
+    crash reporters, while a mounted file is not.
+    """
+    path_value = env.get(f"{name}_FILE")
+    if path_value:
+        try:
+            content = Path(path_value).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read {name}_FILE at {path_value}: {exc}") from exc
+        if content:
+            return content
+    return env.get(name) or None
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -42,6 +62,57 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+class SettingsError(ValueError):
+    """Raised when an environment setting cannot be used as configured."""
+
+
+# Server URLs that are not a supported metadata store, mapped to the reason.
+_UNSUPPORTED_DATABASE_SCHEMES = (
+    "mysql",
+    "mariadb",
+    "mssql",
+    "sqlserver",
+    "odbc",
+    "oracle",
+    "mongodb",
+    "cockroachdb",
+)
+
+
+def _validate_database_setting(value: str) -> None:
+    """Reject a PIPLY_DATABASE value that is neither a file path nor a supported DSN.
+
+    Treating an unrecognised URL as a path produces a confusing filesystem
+    error, or worse, silently creates a directory named ``mysql:`` and starts an
+    empty runtime.
+    """
+    if "://" not in value:
+        return
+
+    scheme = value.split("://", 1)[0].strip().lower()
+    base_scheme = scheme.split("+", 1)[0]
+
+    if base_scheme in {"postgres", "postgresql"}:
+        return  # Supported: the optional PostgreSQL metadata store.
+
+    if base_scheme in _UNSUPPORTED_DATABASE_SCHEMES:
+        raise SettingsError(
+            f"PIPLY_DATABASE does not support '{scheme}'. The metadata store is either a SQLite "
+            "file path (the default) or a PostgreSQL URL. Other databases are reached from "
+            "sql_sensor and from tasks instead. "
+            "See docs/YAML_SPECIFICATION.md section 'Runtime storage and external databases'."
+        )
+    if base_scheme in {"sqlite", "sqlite3"}:
+        raise SettingsError(
+            "PIPLY_DATABASE must be a plain file path, not a sqlite:// URL. "
+            f"Use the path directly, for example '{value.split('://', 1)[1].lstrip('/') or 'piply.db'}'."
+        )
+    raise SettingsError(
+        f"PIPLY_DATABASE has an unrecognised scheme '{scheme}'. Use a SQLite file path or a "
+        "PostgreSQL URL such as 'postgresql://user:password@host:5432/piply'."
+    )
+
+
 def _resolve_optional_path(value: str | None, base_dir: Path | None = None) -> Path | None:
     """Resolve a possibly relative path against the supplied base directory."""
     if value is None or not value.strip():
@@ -59,6 +130,8 @@ class PiplySettings:
 
     config_path: Path | None
     database_path: Path | None
+    #: Set instead of database_path when the metadata store is PostgreSQL.
+    database_dsn: str | None
     default_max_parallel_tasks: int
     stale_run_timeout_seconds: int
     heartbeat_interval_seconds: int
@@ -66,11 +139,29 @@ class PiplySettings:
     queue_dispatch_batch_size: int
     queue_dispatch_stale_seconds: int
     upcoming_run_preview_count: int
+    pipeline_run_history_count: int
+    reconcile_interval_seconds: int
+    retention_run_days: int
+    retention_log_days: int
+    retention_max_runs_per_pipeline: int
+    artifacts_dir: Path | None
+    metrics_enabled: bool
     auth_enabled: bool
     auth_username: str | None
     auth_password: str | None
     api_token: str | None
     env_values: dict[str, str]
+
+    @property
+    def database_configured(self) -> bool:
+        """Return whether a metadata store was chosen explicitly.
+
+        False means nothing set `PIPLY_DATABASE`, so Piply would silently fall
+        back to a file under the config directory. On a server that default is
+        usually wrong — it is the container path that gets wiped on redeploy —
+        so a fresh install is sent to the setup page to choose deliberately.
+        """
+        return self.database_path is not None or self.database_dsn is not None
 
 
 def _candidate_env_files(config_path: Path | None) -> list[Path]:
@@ -90,7 +181,9 @@ def load_settings(
     environ: dict[str, str] | None = None,
 ) -> PiplySettings:
     """Load settings from .env files and environment variables."""
-    env_source = dict(environ or os.environ)
+    # `is None` rather than a truth test: an explicitly empty mapping means "no
+    # environment", which is how a caller asks for the unconfigured defaults.
+    env_source = dict(os.environ if environ is None else environ)
     resolved_config = Path(config_path).resolve() if config_path else None
 
     merged_env: dict[str, str] = {}
@@ -103,7 +196,15 @@ def load_settings(
         resolved_config = _resolve_optional_path(config_value)
 
     base_dir = resolved_config.parent if resolved_config is not None else Path.cwd()
-    resolved_database = _resolve_optional_path(merged_env.get("PIPLY_DATABASE"), base_dir)
+    raw_database = (merged_env.get("PIPLY_DATABASE") or "").strip()
+    database_dsn: str | None = None
+    resolved_database: Path | None = None
+    if raw_database:
+        _validate_database_setting(raw_database)
+        if "://" in raw_database:
+            database_dsn = raw_database
+        else:
+            resolved_database = _resolve_optional_path(raw_database, base_dir)
     default_max_parallel_tasks = max(
         1,
         _parse_int(merged_env.get("PIPLY_DEFAULT_MAX_PARALLEL_TASKS"), 4),
@@ -132,10 +233,26 @@ def load_settings(
         1,
         _parse_int(merged_env.get("PIPLY_UPCOMING_RUN_PREVIEW_COUNT"), 8),
     )
+    pipeline_run_history_count = max(
+        1,
+        min(20, _parse_int(merged_env.get("PIPLY_PIPELINE_RUN_HISTORY_COUNT"), 5)),
+    )
+    reconcile_interval_seconds = max(
+        0,
+        _parse_int(merged_env.get("PIPLY_RECONCILE_INTERVAL_SECONDS"), 15),
+    )
+    retention_run_days = max(0, _parse_int(merged_env.get("PIPLY_RETENTION_RUN_DAYS"), 30))
+    retention_log_days = max(0, _parse_int(merged_env.get("PIPLY_RETENTION_LOG_DAYS"), 14))
+    retention_max_runs_per_pipeline = max(
+        0,
+        _parse_int(merged_env.get("PIPLY_RETENTION_MAX_RUNS_PER_PIPELINE"), 200),
+    )
+    artifacts_dir = _resolve_optional_path(merged_env.get("PIPLY_ARTIFACTS_DIR"), base_dir)
+    metrics_enabled = _parse_bool(merged_env.get("PIPLY_METRICS_ENABLED"), True)
 
     auth_username = merged_env.get("PIPLY_AUTH_USERNAME")
-    auth_password = merged_env.get("PIPLY_AUTH_PASSWORD")
-    api_token = merged_env.get("PIPLY_API_TOKEN")
+    auth_password = read_secret(merged_env, "PIPLY_AUTH_PASSWORD")
+    api_token = read_secret(merged_env, "PIPLY_API_TOKEN")
     auth_enabled = _parse_bool(merged_env.get("PIPLY_AUTH_ENABLED")) or any(
         [auth_username and auth_password, api_token]
     )
@@ -143,6 +260,7 @@ def load_settings(
     return PiplySettings(
         config_path=resolved_config,
         database_path=resolved_database,
+        database_dsn=database_dsn,
         default_max_parallel_tasks=default_max_parallel_tasks,
         stale_run_timeout_seconds=stale_run_timeout_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
@@ -150,6 +268,13 @@ def load_settings(
         queue_dispatch_batch_size=queue_dispatch_batch_size,
         queue_dispatch_stale_seconds=queue_dispatch_stale_seconds,
         upcoming_run_preview_count=upcoming_run_preview_count,
+        pipeline_run_history_count=pipeline_run_history_count,
+        reconcile_interval_seconds=reconcile_interval_seconds,
+        retention_run_days=retention_run_days,
+        retention_log_days=retention_log_days,
+        retention_max_runs_per_pipeline=retention_max_runs_per_pipeline,
+        artifacts_dir=artifacts_dir,
+        metrics_enabled=metrics_enabled,
         auth_enabled=auth_enabled,
         auth_username=auth_username,
         auth_password=auth_password,

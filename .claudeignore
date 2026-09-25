@@ -1,0 +1,89 @@
+# Paths Claude should not read or search.
+#
+# The goal is that a search only ever hits real, current source: piply/, tests/,
+# docs/, wiki/, and the top-level project files. Everything below is either a
+# build copy, a cache, or throwaway test output — reading it produces stale or
+# duplicated matches.
+
+# --- Build and packaging artifacts -----------------------------------------
+# build/lib/piply/ is a full stale copy of the package. Searching it returns two
+# hits for every symbol, one of them out of date.
+build/
+build_tmp/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+.installed.cfg
+pip-wheel-metadata/
+share/python-wheels/
+
+# --- Compiled and cached Python --------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Virtual environments ---------------------------------------------------
+env/
+ENV/
+venv/
+.venv/
+
+# --- Tool caches ------------------------------------------------------------
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Test scratch directories ----------------------------------------------
+.pytest_tmp/
+pytest_tmp*/
+pytest_basetemp*/
+
+# --- Runtime state ----------------------------------------------------------
+# Generated at runtime; the schema lives in piply/core/store.py.
+.piply/
+*.db
+*.db-wal
+*.db-shm
+*.log
+logs/
+
+# --- Secrets ----------------------------------------------------------------
+# Never read real secrets. .env.example is intentionally not ignored.
+.env
+.env.*
+!.env.example
+.secrets.env
+
+# --- Editor and OS noise ----------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Vendored frontend assets ----------------------------------------------
+node_modules/
+*.min.js
+*.min.css
+*.map
+
+# --- Binary and data files --------------------------------------------------
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.pdf
+*.zip
+*.tar.gz
+*.whl
+*.parquet
+*.xlsx

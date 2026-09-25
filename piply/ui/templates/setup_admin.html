@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create the first admin</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="login-shell">
+        <form class="login-card setup-card" method="post" action="/setup/admin">
+            <div class="brand-mark" aria-hidden="true">pl</div>
+            <span class="small-kicker">Step 2 of 2 &mdash; optional</span>
+            <h1 class="panel-title">Create the first admin</h1>
+            <p class="page-header-copy">
+                Piply is <strong>open to anyone who can reach it</strong> until the first
+                account exists. Creating one turns sign-in on for everybody, so do this
+                before putting Piply on a network other people share.
+            </p>
+
+            {% if error %}
+            <div class="login-error" role="alert">{{ error }}</div>
+            {% endif %}
+
+            <label class="login-field">
+                <span class="small-kicker">Username</span>
+                <input type="text" name="username" value="{{ submitted.username or '' }}"
+                       autocomplete="username" spellcheck="false" autofocus required>
+            </label>
+
+            <label class="login-field">
+                <span class="small-kicker">Password</span>
+                <input type="password" name="password" autocomplete="new-password" required>
+            </label>
+
+            <label class="login-field">
+                <span class="small-kicker">Confirm password</span>
+                <input type="password" name="confirm" autocomplete="new-password" required>
+            </label>
+
+            <button class="button primary" type="submit">Create admin and continue</button>
+
+            <p class="setup-hint">
+                This account can do everything, including creating the rest. You will be
+                signed in as it straight away &mdash; there is no separate sign-in step.
+            </p>
+
+            <a class="button ghost" href="/">Skip for now</a>
+            <p class="setup-hint">
+                Skipping leaves Piply open with no sign-in, which is fine on a laptop. You
+                can create the first account later under Settings, or with
+                <span class="mono">piply users create &lt;name&gt; --role admin</span>.
+            </p>
+        </form>
+    </div>
+</body>
+</html>

@@ -4,59 +4,82 @@
 
 {% block content %}
 <div class="page-grid">
-    <section class="hero">
-        <div class="eyebrow">Pipeline detail</div>
-        <h1 class="hero-headline">{{ pipeline.title }} <span>DAG view</span>.</h1>
-        <p class="hero-copy">{{ pipeline.description or "This pipeline is ready for execution, but it still needs a stronger operator-facing description in the config." }}</p>
-        <div class="hero-actions">
-            <button class="button primary" data-run-button="{{ pipeline.pipeline_id }}" onclick="triggerPipeline('{{ pipeline.pipeline_id }}', { scope: document.getElementById('command-override-panel') || document })">Run now</button>
-            <button class="button {% if pipeline.paused %}secondary{% else %}warn{% endif %}" onclick="togglePipelinePause('{{ pipeline.pipeline_id }}', {{ 'false' if pipeline.paused else 'true' }})">
-                {% if pipeline.paused %}Resume schedule{% else %}Pause schedule{% endif %}
-            </button>
-            <button class="button ghost" onclick="deletePipeline('{{ pipeline.pipeline_id }}')">Delete pipeline</button>
-            <a class="button ghost" href="/pipelines">Back to pipelines</a>
+    <section class="compact-header">
+        <div>
+            <div class="eyebrow">Pipeline</div>
+            <h1 class="panel-title" style="font-size:1.5rem; margin:0;">{{ pipeline.title }}</h1>
+            <div class="muted mono" style="margin-top:3px;">{{ pipeline.pipeline_id }}</div>
+            {% if pipeline.description %}
+            <p class="page-header-copy" style="margin:6px 0 0;">{{ pipeline.description }}</p>
+            {% endif %}
         </div>
-        <div class="hero-meta" style="margin-top:18px;">
+        <div class="run-stats-row">
             <span class="status-badge {% if pipeline.last_run %}{{ pipeline.last_run.status }}{% else %}queued{% endif %}" data-last-run-status>
                 {% if pipeline.last_run %}{{ pipeline.last_run.status }}{% else %}no runs yet{% endif %}
             </span>
+            <button class="button primary" data-run-button="{{ pipeline.pipeline_id }}" onclick="triggerPipeline('{{ pipeline.pipeline_id }}', { scope: document.getElementById('command-override-panel') || document })">Run now</button>
+            <button class="button secondary" onclick="openPreview()">Preview</button>
+            <button class="button {% if pipeline.paused %}secondary{% else %}ghost{% endif %}" onclick="togglePipelinePause('{{ pipeline.pipeline_id }}', {{ 'false' if pipeline.paused else 'true' }})">
+                {% if pipeline.paused %}Resume{% else %}Pause{% endif %}
+            </button>
+            <button class="button ghost" onclick="deletePipeline('{{ pipeline.pipeline_id }}')">Delete</button>
+        </div>
+    </section>
+
+    <!-- One merged metadata strip, collapsible so the DAG can take the space. -->
+    <section class="panel tight-panel collapsible" id="metadata-panel">
+        <div class="collapsible-header">
+            <button type="button" class="collapse-toggle" id="metadata-toggle"
+                    aria-expanded="true" aria-controls="metadata-body"
+                    onclick="toggleMetadataPanel()">
+                <span class="collapse-caret" aria-hidden="true">&#9662;</span>
+                <span class="small-kicker">Pipeline metadata</span>
+            </button>
+            <!-- Stays visible when collapsed, so the essentials are never hidden. -->
+            <div class="collapsed-summary">
+                <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
+                <span class="meta-pill">{{ pipeline.schedule_text }}</span>
+                <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+                <span class="meta-pill">{{ pipeline.execution_summary }}</span>
+            </div>
+        </div>
+        <div class="collapsible-body" id="metadata-body">
+        <div class="hero-meta">
             <span class="meta-pill">next <span data-next-run-label>{{ pipeline.next_run_label }}</span></span>
+            <span class="meta-pill">{{ pipeline.schedule_text }}</span>
             <span class="meta-pill">{{ pipeline.task_count }} tasks</span>
+            <span class="meta-pill">{{ pipeline.execution_summary }}</span>
+            <span class="meta-pill">{{ pipeline.retry_summary }}</span>
+            {% if pipeline_definition.timeout_seconds %}
+            <span class="meta-pill">timeout {{ pipeline_definition.timeout_seconds }}s</span>
+            {% endif %}
+            <span class="meta-pill">max concurrent {{ pipeline.max_concurrent_runs }}</span>
             {% if pipeline.template_id %}
             <span class="meta-pill">template {{ pipeline.template_id }}</span>
             {% endif %}
             {% if pipeline.deployment_id %}
             <span class="meta-pill">deployment {{ pipeline.deployment_id }}</span>
             {% endif %}
-            <span class="meta-pill">{{ pipeline.execution_summary }}</span>
-            <span class="meta-pill">{{ pipeline.retry_summary }}</span>
+            {% for source in pipeline.triggered_by %}
+            <span class="tag">← {{ source }}</span>
+            {% endfor %}
             {% for target in pipeline.trigger_targets %}
-            <span class="tag">triggers {{ target }}</span>
+            <span class="tag">→ {{ target }}</span>
+            {% endfor %}
+            {% for tag in pipeline.tags %}
+            <span class="meta-pill tiny">{{ tag }}</span>
+            {% endfor %}
+            <span class="meta-pill mono path-value" title="{{ pipeline.primary_entry }}">{{ pipeline.primary_entry }}</span>
+        </div>
+        {% if pipeline_definition.variables %}
+        <div class="hero-meta" style="margin-top:8px;">
+            <span class="small-kicker">Variables</span>
+            {% for key, value in pipeline_definition.variables.items() %}
+            <span class="meta-pill tiny mono">{{ key }}={{ value }}</span>
             {% endfor %}
         </div>
-
-        <section class="detail-grid hero-detail-grid">
-            <article class="detail-card">
-                <div class="detail-label">Schedule</div>
-                <div class="detail-value">{{ pipeline.schedule_text }}</div>
-            </article>
-            <article class="detail-card">
-                <div class="detail-label">Primary entry</div>
-                <div class="detail-value mono path-value">{{ pipeline.primary_entry }}</div>
-            </article>
-            <article class="detail-card">
-                <div class="detail-label">Flow summary</div>
-                <div class="detail-value mono path-value">{{ pipeline.command_preview }}</div>
-            </article>
-            <article class="detail-card">
-                <div class="detail-label">Execution</div>
-                <div class="detail-value">{{ pipeline.execution_summary }}</div>
-            </article>
-            <article class="detail-card">
-                <div class="detail-label">Retry policy</div>
-                <div class="detail-value">{{ pipeline.retry_summary }}</div>
-            </article>
-        </section>
+        {% endif %}
+        </div>
     </section>
 
     <section class="panel">
@@ -69,13 +92,13 @@
                 <span class="status-badge success">success</span>
                 <span class="status-badge running">running</span>
                 <span class="status-badge failed">failed</span>
+                <span class="status-badge timed_out">timed out</span>
                 <span class="status-badge interrupted">interrupted</span>
-                <span class="status-badge cancelled">cancelled</span>
-                <span class="status-badge queued">queued</span>
                 <span class="status-badge skipped">skipped</span>
+                <button class="toolbar-button" id="pipeline-focus-toggle" type="button" onclick="togglePipelineFocusPanel()">Hide task focus</button>
             </div>
         </div>
-        <div class="dag-operator-grid">
+        <div class="dag-operator-grid" id="pipeline-dag-grid">
             <div class="dag-shell">
                 <div class="dag-stage" id="dag-stage"></div>
             </div>
@@ -194,6 +217,22 @@
         {% endif %}
     </section>
 </div>
+
+<div class="drawer-backdrop" id="preview-backdrop" hidden onclick="closePreview()"></div>
+<aside class="side-drawer" id="preview-drawer" aria-hidden="true" aria-labelledby="preview-title">
+    <div class="drawer-header">
+        <div>
+            <div class="detail-label">Execution preview</div>
+            <h2 class="panel-title" id="preview-title">Dry run</h2>
+            <p class="panel-copy" id="preview-summary">Nothing is executed. This is what a run would do right now.</p>
+        </div>
+        <div class="inline-actions">
+            <button class="button primary tiny-button" type="button" onclick="runFromPreview()">Run it</button>
+            <button class="button ghost tiny-button" type="button" onclick="closePreview()">Close</button>
+        </div>
+    </div>
+    <div id="preview-body"><div class="empty-state">Loading preview...</div></div>
+</aside>
 {% endblock %}
 
 {% block scripts %}
@@ -363,11 +402,145 @@ async function refreshPipelineDetail() {
     }
 }
 
+// Collapsing metadata and the task focus panel hands the space to the DAG,
+// which is the reason to be on this page. Both choices persist per browser.
+const METADATA_KEY = "piply.pipelineMetadataOpen";
+const FOCUS_KEY = "piply.pipelineFocusOpen";
+
+function applyMetadataState(open, { persist = true } = {}) {
+    const panel = document.getElementById("metadata-panel");
+    const toggle = document.getElementById("metadata-toggle");
+    if (!panel || !toggle) return;
+    panel.classList.toggle("collapsed", !open);
+    toggle.setAttribute("aria-expanded", String(open));
+    if (persist) window.localStorage.setItem(METADATA_KEY, open ? "true" : "false");
+}
+
+function toggleMetadataPanel() {
+    const panel = document.getElementById("metadata-panel");
+    applyMetadataState(panel.classList.contains("collapsed"));
+}
+
+function applyPipelineFocusState(open, { persist = true, rerender = true } = {}) {
+    const grid = document.getElementById("pipeline-dag-grid");
+    const button = document.getElementById("pipeline-focus-toggle");
+    if (!grid || !button) return;
+    grid.classList.toggle("inspector-collapsed", !open);
+    button.textContent = open ? "Hide task focus" : "Show task focus";
+    button.classList.toggle("active", !open);
+    if (persist) window.localStorage.setItem(FOCUS_KEY, open ? "true" : "false");
+    // The SVG is laid out to its container, so it has to be redrawn.
+    if (rerender) renderPipelineDag();
+}
+
+function togglePipelineFocusPanel() {
+    const grid = document.getElementById("pipeline-dag-grid");
+    applyPipelineFocusState(grid.classList.contains("inspector-collapsed"));
+}
+
+function renderPreview(preview) {
+    const summary = [
+        `${preview.runnable_task_count}/${preview.task_count} tasks would run`,
+        `${preview.execution_mode} execution`,
+        preview.schedule_text,
+    ];
+    document.getElementById("preview-summary").textContent = summary.join(" · ");
+
+    const variableRows = Object.entries(preview.variables || {})
+        .map(([key, value]) => `<span class="meta-pill tiny mono">${escapeHtml(key)}=${escapeHtml(String(value))}</span>`)
+        .join("");
+    const entityRows = Object.entries(preview.entities || {})
+        .map(([key, values]) => `<span class="meta-pill tiny mono">${escapeHtml(key)}: ${escapeHtml(values.join(", "))}</span>`)
+        .join("");
+
+    const stages = (preview.stages || []).map((stage, index) => {
+        const tasks = stage.map((taskId) => {
+            const task = preview.tasks.find((item) => item.task_id === taskId);
+            if (!task) return "";
+            const badges = [
+                `<span class="meta-pill tiny">${escapeHtml(task.task_type)}</span>`,
+                task.priority ? `<span class="meta-pill tiny">priority ${task.priority}</span>` : "",
+                task.timeout_seconds ? `<span class="meta-pill tiny">timeout ${task.timeout_seconds}s</span>` : "",
+                task.run_if ? `<span class="meta-pill tiny mono">run_if ${escapeHtml(task.run_if)}</span>` : "",
+                (task.artifact_paths || []).length ? `<span class="meta-pill tiny">${task.artifact_paths.length} artifact glob(s)</span>` : "",
+            ].filter(Boolean).join("");
+            return `
+                <div class="preview-task ${task.will_run ? "" : "skipped"}">
+                    <div><span class="status-badge ${task.will_run ? "success" : "skipped"}">${task.will_run ? "run" : "skip"}</span></div>
+                    <div>
+                        <div><strong>${escapeHtml(task.title)}</strong> <span class="muted mono">${escapeHtml(task.task_id)}</span></div>
+                        <div class="pipeline-row-tags">${badges}</div>
+                        <pre class="code-block inspector-code" style="margin-top:6px;">${escapeHtml(task.command)}</pre>
+                        ${task.skip_reason ? `<p class="footer-note">${escapeHtml(task.skip_reason)}</p>` : ""}
+                    </div>
+                </div>`;
+        }).join("");
+        return `<div class="preview-stage"><div class="small-kicker">Stage ${index + 1}</div>${tasks}</div>`;
+    }).join("");
+
+    const warnings = (preview.warnings || []).length
+        ? `<div class="inspector-section"><div class="small-kicker">Warnings</div>${preview.warnings.map((item) => `<p class="footer-note">${escapeHtml(item)}</p>`).join("")}</div>`
+        : "";
+
+    document.getElementById("preview-body").innerHTML = `
+        ${variableRows ? `<div class="inspector-section"><div class="small-kicker">Resolved variables</div><div class="pipeline-row-tags">${variableRows}</div></div>` : ""}
+        ${entityRows ? `<div class="inspector-section"><div class="small-kicker">Expanded entities</div><div class="pipeline-row-tags">${entityRows}</div></div>` : ""}
+        <div class="inspector-section">
+            <div class="small-kicker">Execution order</div>
+            ${stages || '<div class="empty-state">No tasks to preview.</div>'}
+        </div>
+        ${preview.triggers_on_success.length ? `<div class="inspector-section"><div class="small-kicker">Downstream on success</div><div class="pipeline-row-tags">${preview.triggers_on_success.map((item) => `<span class="meta-pill tiny">${escapeHtml(item)}</span>`).join("")}</div></div>` : ""}
+        ${warnings}
+    `;
+}
+
+async function openPreview() {
+    document.getElementById("preview-backdrop").hidden = false;
+    document.getElementById("preview-drawer").classList.add("open");
+    document.getElementById("preview-drawer").setAttribute("aria-hidden", "false");
+    document.body.classList.add("drawer-open");
+    document.getElementById("preview-body").innerHTML = '<div class="empty-state">Loading preview...</div>';
+    try {
+        const overrides = collectCommandOverrides(document.getElementById("command-override-panel") || document);
+        renderPreview(await piplyRequest(`/api/pipelines/${pipelineId}/preview`, {
+            method: "POST",
+            body: JSON.stringify({ command_overrides: overrides }),
+        }));
+    } catch (error) {
+        document.getElementById("preview-body").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function closePreview() {
+    document.getElementById("preview-backdrop").hidden = true;
+    document.getElementById("preview-drawer").classList.remove("open");
+    document.getElementById("preview-drawer").setAttribute("aria-hidden", "true");
+    document.body.classList.remove("drawer-open");
+}
+
+function runFromPreview() {
+    closePreview();
+    triggerPipeline(pipelineId, { scope: document.getElementById("command-override-panel") || document });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+    // Metadata starts collapsed so the graph leads; the focus panel starts open.
+    applyMetadataState(window.localStorage.getItem(METADATA_KEY) === "true", { persist: false });
+    applyPipelineFocusState(window.localStorage.getItem(FOCUS_KEY) !== "false", { persist: false, rerender: false });
     syncPipelineDagTasks(latestTaskRunPayloads);
     focusPipelineTask(selectedPipelineTaskId, false);
     if (pipelinePageActive) {
         setInterval(refreshPipelineDetail, 4000);
+    }
+    // /pipelines/<id>?preview=1 opens the drawer straight from the listing page.
+    if (new URLSearchParams(window.location.search).get("preview") === "1") {
+        openPreview();
+    }
+});
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        closePreview();
     }
 });
 </script>

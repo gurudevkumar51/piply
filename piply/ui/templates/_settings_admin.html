@@ -1,0 +1,185 @@
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title">Database</h2>
+            <p class="panel-copy">
+                Where Piply keeps its own runs, logs, schedules, and accounts. This is not
+                the databases your pipelines read from.
+            </p>
+        </div>
+        <span class="meta-pill">{{ database.backend }}</span>
+    </div>
+
+    <div class="detail-card">
+        <div class="detail-label">Current</div>
+        <div class="detail-value mono path-value">{{ database.location }}</div>
+        <p class="setup-hint">
+            {{ database.row_counts.runs }} run(s), {{ database.row_counts.users }} account(s).
+        </p>
+    </div>
+
+    {% if database.env_managed %}
+    <p class="footer-note">
+        <strong>PIPLY_DATABASE is set in this server's environment.</strong> That overrides
+        the <span class="mono">.env</span> file, so it cannot be changed from here. Edit it
+        where it is set — your compose file, systemd unit, or Kubernetes manifest — and
+        restart.
+    </p>
+    {% else %}
+    <fieldset class="setup-choice">
+        <legend class="small-kicker">Move to</legend>
+        <label class="setup-option">
+            <input type="radio" name="db-backend" value="sqlite" checked onchange="showDatabaseBackend('sqlite')">
+            <span><strong>SQLite file</strong>
+                <span class="setup-hint">One file, nothing to install.</span></span>
+        </label>
+        <label class="setup-option">
+            <input type="radio" name="db-backend" value="postgres" onchange="showDatabaseBackend('postgres')">
+            <span><strong>PostgreSQL</strong>
+                <span class="setup-hint">Survives a container redeploy.</span></span>
+        </label>
+    </fieldset>
+
+    <div id="db-sqlite-fields" class="settings-form setup-fields">
+        <label class="login-field"><span class="small-kicker">Database file</span>
+            <input id="db-sqlite-path" type="text" spellcheck="false" autocomplete="off"
+                   placeholder=".piply/piply.db"></label>
+    </div>
+    <div id="db-postgres-fields" class="settings-form setup-fields" hidden>
+        <label class="login-field"><span class="small-kicker">Connection URL</span>
+            <input id="db-dsn" type="text" spellcheck="false" autocomplete="off"
+                   placeholder="postgresql://piply:secret@db.internal:5432/piply"></label>
+    </div>
+
+    <label class="toolbar-check">
+        <input id="db-migrate" type="checkbox" checked>
+        Copy the current data across
+    </label>
+    <p class="setup-hint">
+        Piply connects before saving, so a wrong value is refused here. Without the copy the
+        new database starts from whatever it already holds — usually nothing. The old
+        database is never deleted either way, and copying needs an empty target.
+    </p>
+
+    <div class="card-actions">
+        <button class="button primary" type="button" onclick="saveDatabase()">Test and switch</button>
+    </div>
+    {% endif %}
+    <pre class="code-block" id="database-result" hidden></pre>
+</section>
+
+{# Admin-only panels: central SMTP and account management. #}
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title">Email (SMTP)</h2>
+            <p class="panel-copy">
+                Configured once here and reused by every <span class="mono">type: email</span> task and every
+                pipeline <span class="mono">notify:</span> block. A task may still override any field inline.
+            </p>
+        </div>
+        <span class="meta-pill">{% if smtp.configured %}configured{% else %}not configured{% endif %}</span>
+    </div>
+
+    <div class="settings-form">
+        <label class="login-field"><span class="small-kicker">Host</span>
+            <input id="smtp-host" type="text" value="{{ smtp.host }}" placeholder="smtp.example.com"></label>
+        <label class="login-field"><span class="small-kicker">Port</span>
+            <input id="smtp-port" type="number" value="{{ smtp.port }}"></label>
+        <label class="login-field"><span class="small-kicker">Username</span>
+            <input id="smtp-username" type="text" value="{{ smtp.username }}" autocomplete="off"></label>
+        <label class="login-field"><span class="small-kicker">Password</span>
+            <input id="smtp-password" type="password" autocomplete="new-password"
+                   placeholder="{% if smtp.password_set %}unchanged{% else %}not set{% endif %}"></label>
+        <label class="login-field"><span class="small-kicker">From address</span>
+            <input id="smtp-from" type="text" value="{{ smtp.from_address }}" placeholder="piply@example.com"></label>
+        <label class="toolbar-check">
+            <input id="smtp-tls" type="checkbox" {% if smtp.use_tls %}checked{% endif %}> STARTTLS</label>
+        <label class="toolbar-check">
+            <input id="smtp-ssl" type="checkbox" {% if smtp.use_ssl %}checked{% endif %}> Implicit SSL</label>
+    </div>
+
+    <p class="footer-note">
+        The password is write-only: it is never returned by the API or shown here. Leave it blank to keep the
+        stored value. Setting <span class="mono">PIPLY_SMTP_PASSWORD</span> in the environment takes precedence
+        and avoids storing it in the database at all.
+    </p>
+
+    <div class="card-actions">
+        <button class="button primary" onclick="saveSmtp()">Save</button>
+        <button class="button ghost" onclick="testSmtp()">Send test email</button>
+    </div>
+    <pre class="code-block" id="smtp-result" hidden></pre>
+</section>
+
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title">Users and permissions</h2>
+            <p class="panel-copy">
+                Admins see everything. Other accounts only see the pipelines they are granted, and can only take
+                the actions granted on each one.
+            </p>
+        </div>
+        <span class="meta-pill">{% if auth_required %}authentication on{% else %}authentication off{% endif %}</span>
+    </div>
+
+    {% if users %}
+    <div class="table-wrap">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>User</th><th>Role</th><th>State</th><th>Last login</th>
+                    <th>Pipeline permissions</th><th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in users %}
+                <tr>
+                    <td class="mono">{{ item.username }}</td>
+                    <td>{{ item.role }}</td>
+                    <td>{% if item.is_active %}active{% else %}disabled{% endif %}</td>
+                    <td class="nowrap">{{ item.last_login_at or "never" }}</td>
+                    <td>
+                        {% if item.role == 'admin' %}
+                        <span class="meta-pill tiny">every pipeline</span>
+                        {% elif item.permissions %}
+                        {% for pipeline_id, actions in item.permissions.items() %}
+                        <span class="meta-pill tiny mono">{% if pipeline_id == '*' %}all{% else %}{{ pipeline_id }}{% endif %}: {{ actions|join(',') }}</span>
+                        {% endfor %}
+                        {% else %}<span class="muted">none</span>{% endif %}
+                    </td>
+                    <td>
+                        <div class="table-actions">
+                            <button class="button ghost tiny-button" onclick="promptGrant('{{ item.username }}')">Grant</button>
+                            <button class="button ghost tiny-button" onclick="deleteAccount('{{ item.username }}')">Delete</button>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        No accounts exist, so authentication is off. Create the first one below, or with
+        <span class="mono">piply users create &lt;name&gt; --role admin</span>.
+    </div>
+    {% endif %}
+
+    <div class="settings-form" style="margin-top:12px;">
+        <label class="login-field"><span class="small-kicker">New username</span>
+            <input id="new-username" type="text" autocomplete="off"></label>
+        <label class="login-field"><span class="small-kicker">Password (8+ characters)</span>
+            <input id="new-password" type="password" autocomplete="new-password"></label>
+        <label class="login-field"><span class="small-kicker">Role</span>
+            <select id="new-role">
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+            </select></label>
+    </div>
+    <div class="card-actions">
+        <button class="button primary" onclick="createAccount()">Create account</button>
+    </div>
+    <pre class="code-block" id="user-result" hidden></pre>
+</section>

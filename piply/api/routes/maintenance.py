@@ -1,0 +1,360 @@
+"""Preview, artifact browsing, backfill, and retention endpoints."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+
+from piply.api.auth import (
+    get_service,
+    guard_run,
+    require_admin,
+    require_permission,
+    visible_pipeline_ids,
+)
+from piply.api.routes.setup import (
+    apply_database_setting,
+    database_is_env_managed,
+    persist_database_setting,
+    validate_database_choice,
+)
+from piply.api.schemas import (
+    BackfillScheduleRequest,
+    DatabaseSettingsRequest,
+    PreviewRequest,
+    PruneRequest,
+    RunResponse,
+    SmtpSettingsRequest,
+    SmtpTestRequest,
+)
+from piply.core.artifacts import is_readable_artifact
+from piply.core.dialects import is_postgres_dsn
+from piply.core.secrets import mask_env_values
+from piply.core.store import RunStore
+from piply.settings import SettingsError
+
+router = APIRouter(tags=["operations"])
+
+
+@router.post("/api/pipelines/{pipeline_id}/preview", response_model=dict[str, object])
+def preview_pipeline(
+    request: Request,
+    pipeline_id: str,
+    payload: PreviewRequest | None = None,
+) -> dict[str, object]:
+    """Return a dry-run preview of what a run would execute."""
+    require_permission(request, "view", pipeline_id)
+    if payload is not None and payload.command_overrides:
+        # Overriding a command means choosing what the server executes, so it is
+        # an administrator action even though the preview itself runs nothing.
+        require_admin(request, "Only administrators can preview overridden commands.")
+    service = get_service(request)
+    try:
+        preview = service.preview_pipeline(
+            pipeline_id,
+            params=(payload.params if payload is not None else None),
+            tenant_id=(payload.tenant_id if payload is not None else None),
+            command_overrides=(payload.command_overrides if payload is not None else None),
+            source_run_id=(payload.source_run_id if payload is not None else None),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return preview.as_dict()
+
+
+@router.get("/api/pipelines/{pipeline_id}/preview", response_model=dict[str, object])
+def get_pipeline_preview(request: Request, pipeline_id: str) -> dict[str, object]:
+    """Return the dry-run preview for a pipeline using its configured values."""
+    require_permission(request, "view", pipeline_id)
+    service = get_service(request)
+    try:
+        return service.preview_pipeline(pipeline_id).as_dict()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/api/runs/{run_id}/artifacts", response_model=list[dict[str, object]])
+def list_run_artifacts(request: Request, run_id: str, task_id: str | None = None) -> list[dict[str, object]]:
+    """List the files produced by one run."""
+    guard_run(request, run_id, "view")
+    service = get_service(request)
+    try:
+        return service.list_run_artifacts(run_id, task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/api/runs/{run_id}/artifacts/download")
+def download_run_artifact(request: Request, run_id: str, path: str = Query(...)) -> FileResponse:
+    """Download one recorded artifact.
+
+    The requested path must be one this run actually recorded and must resolve
+    inside an allowed root, so a crafted path cannot read unrelated files.
+    """
+    guard_run(request, run_id, "view")
+    service = get_service(request)
+    try:
+        artifacts = service.list_run_artifacts(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    match = next((item for item in artifacts if str(item["path"]) == path), None)
+    if match is None:
+        raise HTTPException(status_code=404, detail="This run did not record an artifact at that path.")
+    candidate = Path(path)
+    if not is_readable_artifact(candidate, service.artifact_roots()):
+        raise HTTPException(status_code=404, detail="The artifact is no longer readable on disk.")
+    return FileResponse(
+        candidate,
+        filename=str(match["name"]),
+        media_type=str(match.get("content_type") or "application/octet-stream"),
+    )
+
+
+@router.post("/api/runs/{run_id}/backfill", response_model=RunResponse)
+def backfill_run(request: Request, run_id: str) -> RunResponse:
+    """Re-execute one historic run using the configuration it originally captured."""
+    guard_run(request, run_id, "run")
+    service = get_service(request)
+    try:
+        run = service.backfill_run(run_id, wait=False)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RunResponse.from_record(run)
+
+
+@router.post("/api/pipelines/{pipeline_id}/backfill", response_model=dict[str, object])
+def backfill_schedule(request: Request, pipeline_id: str, payload: BackfillScheduleRequest) -> dict[str, object]:
+    """Queue one run per scheduled slot inside a historic window."""
+    require_permission(request, "run", pipeline_id)
+    service = get_service(request)
+    try:
+        slots = service.backfill_schedule(
+            pipeline_id,
+            start=payload.start,
+            end=payload.end,
+            limit=payload.limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "pipeline_id": pipeline_id,
+        "queued": len(slots),
+        "slots": [slot.isoformat() for slot in slots],
+    }
+
+
+@router.post("/api/maintenance/prune", response_model=dict[str, object])
+def prune_history(request: Request, payload: PruneRequest | None = None) -> dict[str, object]:
+    """Delete history beyond the configured retention window."""
+    # Retention is installation-wide and irreversible, so it is never delegated
+    # through a per-pipeline grant.
+    require_admin(request, "Only administrators can prune history.")
+    service = get_service(request)
+    overrides: dict[str, int] = {}
+    if payload is not None:
+        if payload.run_retention_days is not None:
+            overrides["run_retention_days"] = payload.run_retention_days
+        if payload.log_retention_days is not None:
+            overrides["log_retention_days"] = payload.log_retention_days
+        if payload.max_runs_per_pipeline is not None:
+            overrides["max_runs_per_pipeline"] = payload.max_runs_per_pipeline
+    return service.prune(
+        dry_run=bool(payload.dry_run) if payload is not None else False,
+        vacuum=bool(payload.vacuum) if payload is not None else True,
+        **overrides,
+    )
+
+
+@router.get("/api/runs/{run_id}/config", response_model=dict[str, object])
+def get_run_config(request: Request, run_id: str) -> dict[str, object]:
+    """Return the runtime configuration snapshot captured for one run.
+
+    Credential-looking environment values are masked. The stored snapshot keeps
+    the real values so a replay still works; only this view is redacted.
+    """
+    guard_run(request, run_id, "view")
+    service = get_service(request)
+    snapshot = service.store.get_run_config(run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="This run was created before runtime configuration was captured.")
+    redacted = dict(snapshot)
+    for key in ("env", "inherited_env"):
+        if isinstance(redacted.get(key), dict):
+            redacted[key] = mask_env_values(redacted[key])
+    return redacted
+
+
+@router.get("/api/logs/stream", response_model=list[dict[str, object]])
+def stream_logs(
+    request: Request,
+    run_id: str | None = None,
+    pipeline_id: str | None = None,
+    task_id: str | None = None,
+    after: datetime | None = None,
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> list[dict[str, object]]:
+    """Return log lines newer than ``after`` for incremental log following."""
+    if run_id is not None:
+        guard_run(request, run_id, "view")
+    elif pipeline_id is not None:
+        require_permission(request, "view", pipeline_id)
+    else:
+        require_permission(request, "view")
+
+    lines = get_service(request).tail_logs(
+        run_id=run_id,
+        pipeline_id=pipeline_id,
+        task_id=task_id,
+        after=after,
+        limit=limit,
+    )
+    allowed = visible_pipeline_ids(request)
+    if allowed is None:
+        return lines
+    return [line for line in lines if line.get("pipeline_id") in allowed]
+
+
+_SMTP_ADMIN_ONLY = "Only administrators can change SMTP settings."
+_DATABASE_ADMIN_ONLY = "Only administrators can change the database."
+
+
+def _current_database_value(request: Request) -> str | None:
+    """Return the configured PIPLY_DATABASE value, credentials included.
+
+    Used only to detect a no-op change; it is never returned to a caller.
+    """
+    settings = request.app.state.settings
+    if settings.database_dsn is not None:
+        return settings.database_dsn
+    return None if settings.database_path is None else str(settings.database_path)
+
+
+@router.get("/api/settings/smtp", response_model=dict[str, object])
+def get_smtp(request: Request) -> dict[str, object]:
+    """Return the central SMTP configuration. The password is never included."""
+    require_admin(request, _SMTP_ADMIN_ONLY)
+    return get_service(request).get_smtp_settings()
+
+
+@router.put("/api/settings/smtp", response_model=dict[str, object])
+def put_smtp(request: Request, payload: SmtpSettingsRequest) -> dict[str, object]:
+    """Update the central SMTP configuration.
+
+    Omitting the password keeps the stored one, so the host can be edited
+    without retyping a secret the form never displays.
+    """
+    require_admin(request, _SMTP_ADMIN_ONLY)
+    return get_service(request).save_smtp_settings(payload.model_dump(exclude_none=True))
+
+
+@router.post("/api/settings/smtp/test", response_model=dict[str, str])
+def test_smtp(request: Request, payload: SmtpTestRequest) -> dict[str, str]:
+    """Send one test message to confirm the configuration works."""
+    require_admin(request, _SMTP_ADMIN_ONLY)
+    try:
+        return {"status": "sent", "detail": get_service(request).send_test_email(payload.recipient)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced to the admin as a message
+        raise HTTPException(status_code=502, detail=f"SMTP test failed: {exc}") from exc
+
+
+@router.get("/api/settings/database", response_model=dict[str, object])
+def get_database_settings(request: Request) -> dict[str, object]:
+    """Describe the metadata store. Credentials are never returned."""
+    require_admin(request, _DATABASE_ADMIN_ONLY)
+    service = get_service(request)
+    settings = request.app.state.settings
+    return {
+        "backend": service.store.dialect.name,
+        # `location` is already credential-free for a DSN.
+        "location": service.database_location,
+        "configured": settings.database_configured,
+        # A read-only install cannot be changed from here; the UI hides the form.
+        "env_managed": database_is_env_managed(),
+        "row_counts": service.store.row_counts(),
+    }
+
+
+@router.put("/api/settings/database", response_model=dict[str, object])
+def put_database_settings(request: Request, payload: DatabaseSettingsRequest) -> dict[str, object]:
+    """Point Piply at a different metadata store.
+
+    Admin-only, and validated by opening the target before anything is written,
+    so a wrong DSN fails here rather than at the next restart.
+
+    Switching does **not** move data. The old database is left untouched and the
+    new one starts from whatever it already holds, which is usually nothing —
+    set `migrate` to copy the current contents across instead.
+    """
+    require_admin(request, _DATABASE_ADMIN_ONLY)
+    if database_is_env_managed():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "PIPLY_DATABASE is set in this process's environment, which overrides the "
+                ".env file, so changing it here would have no effect. Change it where it is "
+                "set — your compose file, systemd unit, or Kubernetes manifest — and restart."
+            ),
+        )
+    service = get_service(request)
+
+    # A run in flight holds the *old* store: it would finish writing there while
+    # the new database keeps the half-copied row, leaving a run stuck at
+    # `running` forever and the real result in a database nothing reads.
+    # Refusing is the only answer that cannot lose a run.
+    in_flight = service.store.count_running_runs()
+    if in_flight:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{in_flight} run(s) are still in progress. Wait for them to finish, or pause "
+                "the schedules, then switch — moving the database now would strand them."
+            ),
+        )
+
+    config_path = Path(service.config_path)
+
+    try:
+        value, description = validate_database_choice(
+            payload.backend.strip().lower(),
+            payload.sqlite_path or "",
+            payload.dsn or "",
+            base_dir=config_path.parent,
+        )
+    except (ValueError, SettingsError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if value == _current_database_value(request):
+        raise HTTPException(status_code=400, detail="That is already the configured database.")
+
+    copied: dict[str, int] | None = None
+    if payload.migrate:
+        try:
+            target = RunStore(value if is_postgres_dsn(value) else Path(value))
+            copied = service.store.copy_into(target)
+        except ValueError as exc:
+            # `copy_into` refuses a non-empty target rather than merging two
+            # histories, which has no safe answer.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - surfaced to the admin verbatim
+            raise HTTPException(status_code=502, detail=f"Copying data failed: {exc}") from exc
+
+    persist_database_setting(config_path, value)
+    apply_database_setting(request)
+    return {
+        "status": "updated",
+        "backend": get_service(request).store.dialect.name,
+        "location": description,
+        "migrated": copied,
+    }

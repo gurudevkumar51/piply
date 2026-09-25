@@ -1,0 +1,625 @@
+# Piply Future Features
+
+Ideas that are **not built**. Everything here is a proposal, ordered by the
+value it would add against the cost of building it.
+
+Two constraints shape every entry:
+
+1. **Stay lightweight.** No broker, no external database, no daemon zoo. A new
+   runtime dependency needs to earn its place; anything that can be optional
+   should be an extra, not a default.
+2. **Stay backward compatible.** An existing `piply.yaml` must keep working
+   untouched. New capability arrives as new optional keys.
+
+Legend: **Effort** S (days) / M (1–2 weeks) / L (a month+).
+
+---
+
+## Tier 1 — highest value for the cost
+
+### 1.1 Alerting on failure — **shipped in 0.2.1**
+
+Delivered as pipeline-level `notify:` plus central SMTP under Settings. The
+shape below is close to what shipped; `on_timeout` and `on_sla_miss` are still
+open. See [Authentication](AUTHENTICATION.md) and the YAML specification.
+
+**Problem.** Today you learn a pipeline failed by opening the UI. There is no
+push.
+
+**Proposal.** A pipeline-level `on_failure` block reusing the existing operator
+implementations, so nothing new has to be written to send the message.
+
+```yaml
+pipelines:
+  nightly:
+    on_failure:
+      - type: email
+        to: [oncall@example.com]
+        subject: "{pipeline_id} failed: {error}"
+      - type: webhook
+        url: ${SLACK_WEBHOOK}
+        body: '{"text": "{pipeline_id} run {run_id} failed"}'
+    on_success:
+      - type: webhook
+        url: ${SLACK_WEBHOOK}
+        body: '{"text": "{pipeline_id} finished in {duration}"}'
+```
+
+Add `on_timeout` and `on_sla_miss` later using the same shape.
+
+**Why it matters.** This is the single largest gap between Piply and a tool a
+team can rely on unattended. Everything needed already exists — the operators,
+the run record, the success/failure callbacks.
+
+**Effort:** S · **Deps:** none
+
+---
+
+### 1.2 SLA / expected-duration tracking
+
+**Problem.** A pipeline that normally takes 10 minutes and is now at 55 is
+invisible until it hits its hard timeout.
+
+**Proposal.**
+
+```yaml
+pipelines:
+  nightly:
+    sla:
+      expected_duration: 15m      # warn past this
+      must_finish_by: "06:00"     # wall-clock deadline
+```
+
+Surface as a `piply_run_sla_breached` metric, an amber row on the listing page,
+and an `on_sla_miss` hook. The store already records durations, so the baseline
+can also be computed automatically (e.g. p95 of the last 20 runs) and offered as
+a suggestion rather than requiring a hand-tuned number.
+
+**Why it matters.** Slow is the failure mode that hard timeouts miss.
+
+**Effort:** M · **Deps:** none
+
+---
+
+### 1.3 Run parameters as a first-class form
+
+Partly delivered: a manual run now prompts for any `{placeholder}` the config
+leaves unresolved, and `piply run --var NAME=VALUE` supplies them from the CLI.
+What is still open is a *declared* contract with types, defaults, and
+validation.
+
+**Problem.** `--param key=value` exists on the CLI but the UI cannot supply
+parameters, and nothing declares what a pipeline accepts.
+
+**Proposal.** Declare the contract, then render it.
+
+```yaml
+pipelines:
+  backfill_report:
+    params:
+      start_date:
+        type: date
+        required: true
+      tenant:
+        type: enum
+        values: [acme, globex]
+        default: acme
+      dry_run:
+        type: bool
+        default: true
+```
+
+The Run button opens a generated form; values land in `context["params"]` and in
+the run configuration snapshot, so a parameterised run can be replayed exactly.
+Validation happens before the run is created rather than inside task code.
+
+**Why it matters.** Turns Piply into something a non-author can safely operate.
+
+**Effort:** M · **Deps:** none
+
+---
+
+### 1.4 dbt artifact awareness
+
+**Problem.** dbt is the single most common thing Piply is asked to orchestrate,
+and today it is opaque. `dbt run --selector feed_silver` is *one* Piply task. If
+it fails you get an exit code and a wall of stdout, and the question you
+actually have — *which model broke, and how long did the rest take* — is
+answered by scrolling.
+
+Measured on a real project (RCM-Data-pipeline): 1132 model files, 444 nodes,
+46 selectors, 19 dbt tasks across the medallion chain. At that size "the silver
+stage failed" is not an actionable message.
+
+**Proposal.** Read the artifacts dbt already writes. No dbt dependency, no
+import — just parsing JSON that a `type: cli` task leaves in `target/`.
+
+```yaml
+tasks:
+  load_silver:
+    type: cli
+    command: dbt run {dbt_ops} --selector {selector}
+    dbt_results: RCM_DataFlow/target      # new: where to look afterwards
+```
+
+After the task exits, Piply reads `run_results.json` and records one row per
+model:
+
+| From the artifact | Shown as |
+| --- | --- |
+| `unique_id` | model name |
+| `status` | success / error / skipped |
+| `execution_time` | per-model duration |
+| `message`, `failures` | the actual error, not stdout |
+| `adapter_response.rows_affected` | rows written |
+| `relation_name` | the table or view produced |
+
+These land in the existing task-output and artifact panels — no new UI concept.
+`manifest.json` additionally allows `piply plan` to **validate selector names
+before a run**, which with 46 selectors and interpolated values like
+`--selector int_{selector}` catches a typo at validate time instead of at 03:00.
+
+**Why it matters.** It is the highest-value-per-line integration available:
+per-model failure attribution, per-model timing that feeds SLA tracking (1.2),
+and selector validation — for roughly 100 lines and **zero new dependencies**.
+The artifact schema is versioned and stable, so it works across dbt versions and
+adapters.
+
+Measured cost of reading them: `manifest.json` is 1.9 MB and parses in ~10 ms.
+
+**Deliberately out of scope — do not embed dbt.** Importing `dbt-core` or
+`dbtRunner` would be a mistake:
+
+- dbt-core pulls roughly 50 transitive dependencies into a project whose entire
+  runtime is 8.
+- It version-locks Piply to dbt's release cadence, and adapters ship separately.
+- Real deployments run dbt in a *different* environment on purpose — the RCM
+  project uses `conda run -n py313_piply_automation dbt ...`. Embedding would
+  force dbt into Piply's interpreter and break that separation.
+
+Shelling out is the correct boundary, not a workaround.
+
+**Also out of scope — expanding `manifest.json` into per-model Piply tasks.**
+Tempting, since it would give per-model retry and priority. But it duplicates
+dbt's own scheduler, which understands `ref()`, threading, and incremental
+state in ways Piply would have to re-derive. Two DAGs that can disagree is worse
+than one opaque task. dbt should own dbt's DAG; Piply owns *when* dbt runs and
+*what happened*.
+
+**Not a fix for the concurrency bottleneck.** Several tenant deployments
+serialising behind one shared downstream pipeline is [2.3 concurrency
+pools](#23-pipeline-level-concurrency-pools), unrelated to dbt awareness.
+
+**Effort:** S–M · **Deps:** none
+
+A `type: dbt` shorthand that builds the command and wires this up automatically
+is a reasonable follow-on, but only after the artifact parsing exists — the
+parsing is where the value is, the shorthand is sugar over `{dbt_ops}`.
+
+---
+
+### 1.5 Log persistence outside SQLite
+
+**Problem.** Every log line is a row. A chatty dbt run can add tens of thousands
+of rows per execution, which is why `piply prune` is necessary at all.
+
+**Proposal.** Keep the last N lines in SQLite for the UI's live tail, and stream
+the full log to a per-run file under `.piply/logs/<run_id>.log`. Serve old logs
+from the file. Optional gzip on completion.
+
+**Why it matters.** Directly attacks the main growth driver of the database, and
+makes retention a file-deletion problem instead of a `DELETE` + `VACUUM` one.
+
+**Effort:** M · **Deps:** none
+
+---
+
+### 1.6 Task-level retry
+
+**Problem.** `retry` is pipeline-level. One flaky API call forces a whole-run
+retry.
+
+**Proposal.**
+
+```yaml
+tasks:
+  call_vendor_api:
+    type: api
+    url: https://vendor/api
+    retry:
+      attempts: 3
+      delay_seconds: 5
+      backoff: exponential        # fixed | linear | exponential
+      retry_on: [timeout, 5xx]
+```
+
+Retries happen inside the task slot, so the DAG never sees the failure.
+
+**Why it matters.** Most real flakiness is one task, not one pipeline.
+
+**Effort:** S · **Deps:** none
+
+---
+
+### 1.7 Splitting `piply.yaml` across files
+
+**Problem.** One config file per project stops scaling once a real tenant
+rollout arrives. Measured on RCM-Data-pipeline:
+
+| Section | Lines | Entries |
+| --- | --- | --- |
+| `pipeline_deployments` | 434 | 29 |
+| `pipelines` | 361 | 8 |
+| `pipeline_templates` | 163 | 4 |
+| everything else | 16 | — |
+| **total** | **974** | |
+
+Adding one tenant means editing a 974-line file, and every change to any
+pipeline produces a diff in the same file — so two people touching unrelated
+tenants conflict in git for no reason.
+
+**Proposal.** An `include:` list in the root file. Everything else stays exactly
+as it is.
+
+### Which cut to recommend
+
+The obvious instinct is to group a template with the deployments that use it.
+Edit history says that is wrong. Across the last 35 commits to a production
+`piply.yaml`:
+
+| What the commit touched | Count |
+| --- | --- |
+| `pipelines` only | 12 |
+| `pipeline_deployments` only | 4 |
+| `pipeline_templates` only | 3 |
+| deployments **and** templates together | 6 |
+| any single section only | 19 of 35 |
+
+Templates and their deployments change together in under a fifth of commits.
+The real pattern is that **`pipelines` is the churn** — the shared medallion
+chain — while **deployments are the most stable section**, because adding a
+tenant is a fifteen-line stanza and nothing else moves.
+
+So the master file should hold the *stable inventory*, and the volatile
+definitions should live in their own files:
+
+```yaml
+# piply.yaml — project settings and the full deployment inventory
+version: "1"
+title: RCM Data Flow
+workspace: .
+
+variables:
+  dbt_ops: --project-dir RCM_DataFlow --profiles-dir ".dbt"
+
+include:
+  - config/templates/*.yaml
+  - config/pipelines/*.yaml
+
+# Every tenant rollout, in one place. Rarely edited, and the one view that
+# answers "what actually runs, and when".
+pipeline_deployments:
+  BENNETT_ETL_Flow:
+    template: ECW_Extract_test
+    schedule: {cron: "0 3 * * 0"}
+    variables: {practice: BENNETT}
+    triggers_on_success: [Bronze_to_Silver]
+  # ... 28 more
+```
+
+```
+config/
+  templates/
+    ecw_extract.yaml          4 templates, ~40 lines each
+    monthly_flow.yaml
+    claim_extract.yaml
+    ar_claims.yaml
+  pipelines/
+    medallion.yaml            Bronze_to_Silver -> Feed_dim_int_fact -> Report_Semantic_Flow
+    claim_medallion.yaml      the CLAIM_EXTRACT variant of the same chain
+    ar.yaml                   AR_Claims_Allocation, AR_auto_scripts
+```
+
+That puts the 12-commits-a-month section in files of its own, keeps the master
+file as a scannable inventory of ~450 lines of flat stanzas, and means two
+people working on different chains stop conflicting.
+
+**If the master file later becomes the conflict point** — at 50 tenants rather
+than 29 — deployments can be split per tenant with no format change, since
+`include:` is just a list of paths. Onboarding then becomes *adding a file*
+rather than editing one, which is the lowest-conflict option available. It is
+not worth the fragmentation yet: at 29 deployments the single inventory is more
+useful than the conflict saving.
+
+### Rules worth deciding up front
+
+These are what separate a real feature from "concatenate some files".
+
+| Question | Proposed answer |
+| --- | --- |
+| Which keys may an included file define? | `pipelines`, `pipeline_templates`, `pipeline_deployments`, `variables`, `connections`, `secrets` |
+| Which are root-only? | `version`, `title`, `workspace`, `include` — rejected with a clear message elsewhere |
+| How do sections combine? | Merged by key |
+| What about a duplicate key? | **An error naming both files.** Never last-wins |
+| How are include paths resolved? | Relative to the file that declares them |
+| Can included files include? | Yes, with cycle detection |
+| Ordering? | As listed; globs expand sorted, so loading is deterministic |
+
+The duplicate rule matters most. Silent override is the exact failure mode that
+has already cost time twice in this project — a missing `env_file` that loaded
+nothing, and an `smtp_host` default that quietly replaced central settings. Two
+files defining `BENNETT_ETL_Flow` should stop the load and say so.
+
+> ⚠️ **Include paths resolve against the including file, not `workspace:`.**
+> That is deliberately different from `env_file`, which is workspace-relative.
+> Includes describe config structure and belong next to the config; `env_file`
+> points at runtime data and belongs next to the work. The difference has to be
+> documented loudly, because the `env_file` rule has already surprised people.
+
+### What else has to change
+
+- **Merge everything before resolving anything.** In the recommended layout the
+  master file's deployments reference templates defined in *included* files, so
+  include resolution has to complete before `_normalize_pipeline_definitions`
+  runs. Resolving per file would break the moment a deployment and its template
+  live apart — which is the whole point of the layout.
+- **`piply validate` and `piply plan` should print the source file** for each
+  pipeline. Without it, "duplicate pipeline id" is unactionable across 5 files.
+- **Every `ConfigError` needs file provenance.** `Pipeline 'x' task 'y' points to
+  a missing script` is fine in one file and useless across six.
+- **Config reload watches one mtime today.** It has to watch every included file,
+  or editing a deployment file will not be noticed.
+- **`piply init` should keep writing a single file.** Splitting is for projects
+  that have grown into it; a starter project with five pipelines is easier to
+  read in one place.
+
+**Why it matters.** This is the difference between Piply being pleasant at 5
+pipelines and pleasant at 50. It is also purely additive — a single-file config
+keeps working untouched, because a config with no `include:` behaves exactly as
+it does now.
+
+**Effort:** M · **Deps:** none
+
+---
+
+## Tier 2 — clear value, more work
+
+### 2.1 Per-tenant downstream chains
+
+**Problem.** When N deployments all trigger one shared downstream pipeline, the
+downstream serialises across tenants and carries whichever tenant triggered it.
+A stuck tenant delays everyone.
+
+**Proposal.** Let a trigger fan out into a tenant-scoped instance.
+
+```yaml
+pipeline_deployments:
+  acme_ingest:
+    template: tenant_ingest
+    tenant: acme
+    triggers_on_success:
+      - pipeline: silver_template
+        as_deployment: "{tenant}_silver"   # isolated per tenant
+```
+
+**Why it matters.** The shared-downstream pattern is common in multi-tenant
+setups and its blast radius is currently all tenants.
+
+**Effort:** L · **Deps:** none
+
+---
+
+### 2.2 Data-aware scheduling (assets)
+
+**Problem.** Triggers are pipeline-to-pipeline. If two upstreams both feed one
+downstream, there is no way to say "run when *both* have refreshed."
+
+**Proposal.** Declare what a pipeline produces and consumes.
+
+```yaml
+pipelines:
+  extract_a:
+    produces: [bronze.appointments]
+  extract_b:
+    produces: [bronze.charges]
+  build_silver:
+    consumes: [bronze.appointments, bronze.charges]   # waits for both
+```
+
+**Why it matters.** Removes hand-maintained trigger graphs, which drift.
+
+**Effort:** L · **Deps:** none
+
+---
+
+### 2.3 Pipeline-level concurrency pools
+
+**Problem.** `max_parallel_tasks` is per pipeline. Nothing caps a *shared*
+resource across pipelines, so eight concurrent runs can open eight database
+connections to the same warehouse.
+
+**Proposal.**
+
+```yaml
+pools:
+  warehouse: 2
+  ecw_sessions: 1
+
+tasks:
+  load_bronze:
+    pool: warehouse
+```
+
+**Why it matters.** The usual reason for staggered cron schedules is really an
+undeclared resource limit. This makes it explicit.
+
+**Effort:** M · **Deps:** none
+
+---
+
+### 2.4 Task result caching
+
+**Proposal.** Skip a task whose inputs have not changed.
+
+```yaml
+tasks:
+  expensive_transform:
+    cache:
+      key: ["{tenant}", "{run_date}"]
+      ttl: 24h
+```
+
+Reuses the existing `task_outputs` table for the cached value.
+
+**Why it matters.** Makes re-running a partially failed pipeline cheap.
+Complements the existing resume-mode retry.
+
+**Effort:** M · **Deps:** none
+
+---
+
+### 2.5 Plugin hooks
+
+**Proposal.** Entry-point discovery for third-party operators and sensors.
+
+```toml
+[project.entry-points."piply.operators"]
+databricks = "my_pkg.operators:DatabricksOperator"
+
+[project.entry-points."piply.sensors"]
+s3 = "my_pkg.sensors:S3Sensor"
+```
+
+**Why it matters.** Lets the core stay small while teams add what they need.
+The operator surface is already narrow enough to be a stable contract.
+
+**Effort:** M · **Deps:** none
+
+---
+
+## Tier 3 — user experience
+
+### 3.1 Run comparison
+
+Diff two runs side by side: task durations, statuses, outputs, and the
+configuration snapshots. Answers "what changed between the run that worked and
+the one that didn't." The snapshots already exist.
+
+**Effort:** M
+
+### 3.2 Gantt / timeline view
+
+The DAG shows structure but not time. A timeline of task start/end makes the
+critical path and the idle gaps obvious. Duration data is already recorded.
+
+**Effort:** M
+
+### 3.3 Log search across the whole history
+
+Current log search is a `LIKE` scan. SQLite FTS5 is built into the stdlib
+sqlite3 module, so full-text search costs one virtual table and no dependency.
+
+**Effort:** S
+
+### 3.4 Config editing in the UI
+
+Edit a pipeline's YAML in the browser with validation and a `piply plan` preview
+before saving. Needs care: file writes, concurrent edits, and an audit trail.
+
+**Effort:** L
+
+### 3.5 Dark mode
+
+The stylesheet already uses CSS custom properties, so this is largely a second
+variable block plus a toggle.
+
+**Effort:** S
+
+### 3.6 Keyboard navigation
+
+`/` to search, `g p` for pipelines, `g r` for runs, `r` to re-run the focused
+run. Cheap, and a real speed-up for daily operators.
+
+**Effort:** S
+
+---
+
+## Tier 4 — scale and operations
+
+### 4.1 Multiple worker processes
+
+**Problem.** Piply is single-process by design. `owner_pid` recovery and the
+in-process write lock both assume it. This is still true with the PostgreSQL
+backend: a shared database does not by itself make the runtime multi-instance.
+
+**Proposal.** Optional worker processes claiming queue items with an atomic
+`UPDATE ... WHERE status='queued'`. The queue already has claim/requeue
+semantics; the hard parts are the write lock and log streaming.
+
+**Cost.** This is the change most likely to compromise "lightweight." Worth
+doing only when a real workload proves one process is not enough.
+
+**Effort:** L
+
+### 4.2 Optional PostgreSQL backend — **shipped**
+
+Implemented behind `piply/core/dialects.py`. Set `PIPLY_DATABASE` to a
+PostgreSQL DSN; SQLite remains the zero-config default. See
+[YAML Specification §11](YAML_SPECIFICATION.md#11-runtime-storage-and-external-databases).
+
+Not yet covered: sharing one database between several Piply instances, which
+needs §4.1 first.
+
+### 4.3 Structured JSON logging
+
+`--log-format json` for the server, so runtime logs land cleanly in Loki,
+CloudWatch, or Datadog. Task output stays raw.
+
+**Effort:** S
+
+### 4.4 OpenTelemetry traces
+
+One span per run, one per task, with the existing run/task ids as attributes.
+Strictly an optional extra.
+
+**Effort:** M · **Deps:** `opentelemetry-sdk` as an extra
+
+### 4.5 Read-only role — **shipped in 0.2.1**
+
+Delivered as per-pipeline `view` / `edit` / `run` grants rather than a single
+global role, so one account can watch one tenant and operate another. See
+[Authentication](AUTHENTICATION.md).
+
+---
+
+## Deliberately not planned
+
+Recorded so the reasoning is not relitigated.
+
+| Idea | Why not |
+| --- | --- |
+| Full expression language for `run_if` | The whole point of `run_if` is that it is *not* one. Complex logic belongs in a Python task. |
+| Built-in Kubernetes executor | Contradicts local-first. A `type: cli` task running `kubectl` covers it. |
+| Bundled Airflow/Prefect compatibility layer | Doubles the runtime surface to serve migrations that happen once. |
+| Web-based YAML DAG builder | Enormous surface area, and the YAML is already the source of truth in git. |
+| `prometheus_client` dependency | `/metrics` is ~150 lines of string formatting. Not worth a dependency. |
+| Replacing SQLite by default | Zero-config setup is a core promise. Postgres is available behind an extra instead. |
+
+---
+
+## Suggested order
+
+If picking up this list, this order front-loads value and keeps each step small:
+
+1. **1.6 Task-level retry** — small, removes most spurious full-run retries
+2. **1.4 dbt artifact awareness** — biggest visibility win per line, no new dependency
+3. **3.3 FTS log search** + **3.5 Dark mode** + **3.6 Keyboard nav** — cheap wins
+4. **1.5 Log persistence** — before the database becomes the problem
+5. **1.3 Run parameters** — declared, typed inputs on top of the prompt that shipped
+6. **1.2 SLA tracking** — pairs naturally with the alerting that shipped in 0.2.1
+7. **2.3 Concurrency pools** — replaces staggered-cron workarounds
+8. **2.5 Plugin hooks** — lets the core stop growing
+9. Everything else, driven by real demand rather than this list
+
+For what is planned for a specific release rather than merely proposed, see
+[Roadmap](ROADMAP.md).

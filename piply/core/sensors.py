@@ -93,6 +93,17 @@ def _iter_remote_sensor_files(sensor: SensorDefinition) -> list[str]:
     return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
+def _failed_state(state: dict[str, Any], error: str) -> dict[str, Any]:
+    """Return the sensor state annotated with the failure that just occurred.
+
+    Poll failures are recorded rather than raised so one unreachable endpoint
+    cannot stop the scheduler from servicing every other sensor.
+    """
+    next_state = dict(state)
+    next_state["last_error"] = error
+    return next_state
+
+
 def _iter_sensor_files(sensor: SensorDefinition) -> list[str]:
     """Return the current file snapshot for one local or remote file sensor."""
     return _iter_remote_sensor_files(sensor) if sensor.is_remote else _iter_local_sensor_files(sensor)
@@ -103,6 +114,8 @@ def poll_file_sensor(
     state: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], SensorEvent | None]:
     """Compare the current file snapshot to the stored state and return a new event when needed."""
+    if not sensor.is_remote and sensor.path is not None and not sensor.path.exists():
+        return _failed_state(state or {"known_files": []}, f"Watched path does not exist: {sensor.path}"), None
     current_files = _iter_sensor_files(sensor)
     known_files = set(str(item) for item in (state or {}).get("known_files", []))
     current_set = set(current_files)
@@ -180,8 +193,8 @@ def poll_sql_sensor(
     """Compare a SQL cursor to the stored state and emit an event for new inserts."""
     try:
         current_cursor, row_count = _read_sql_cursor(sensor)
-    except Exception:
-        return state or {"cursor": 0, "row_count": 0}, None
+    except Exception as exc:  # noqa: BLE001 - reported through sensor health instead of raising
+        return _failed_state(state or {"cursor": 0, "row_count": 0}, f"{exc.__class__.__name__}: {exc}"), None
 
     previous_cursor = int((state or {}).get("cursor", 0))
     previous_state = {"cursor": current_cursor, "row_count": row_count}
@@ -280,7 +293,7 @@ def poll_api_sensor(
 ) -> tuple[dict[str, Any], SensorEvent | None]:
     """Poll an HTTP endpoint and emit an event when its cursor or body digest changes."""
     if not sensor.url:
-        return state or {"cursor": ""}, None
+        return _failed_state(state or {"cursor": ""}, "api_sensor is missing a url"), None
 
     headers = dict(sensor.headers)
     if sensor.token and "Authorization" not in headers:
@@ -294,14 +307,20 @@ def poll_api_sensor(
             response_text = response.read(1_048_576).decode("utf-8", errors="replace")
     except HTTPError as exc:
         if exc.code not in sensor.expected_status:
-            return state or {"cursor": ""}, None
+            return _failed_state(state or {"cursor": ""}, f"HTTP {exc.code} from {_mask_url_secret(sensor.url)}"), None
         status_code = int(exc.code)
         response_text = exc.read(1_048_576).decode("utf-8", errors="replace")
-    except (OSError, URLError):
-        return state or {"cursor": ""}, None
+    except (OSError, URLError) as exc:
+        return _failed_state(state or {"cursor": ""}, f"Request failed: {exc}"), None
 
     if status_code not in sensor.expected_status:
-        return state or {"cursor": ""}, None
+        return (
+            _failed_state(
+                state or {"cursor": ""},
+                f"Unexpected status {status_code}; expected one of {list(sensor.expected_status)}",
+            ),
+            None,
+        )
 
     current_cursor, parsed_json = _response_cursor(response_text, sensor.cursor_path)
     previous_cursor = str((state or {}).get("cursor") or "")

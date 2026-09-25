@@ -10,10 +10,13 @@
       success: { fill: "rgba(27, 156, 96, 0.12)", stroke: "rgba(27, 156, 96, 0.74)", dot: "#1b9c60" },
       running: { fill: "rgba(57, 117, 255, 0.14)", stroke: "rgba(57, 117, 255, 0.78)", dot: "#3975ff" },
       failed: { fill: "rgba(217, 90, 90, 0.13)", stroke: "rgba(217, 90, 90, 0.76)", dot: "#d95a5a" },
+      timed_out: { fill: "rgba(217, 90, 90, 0.16)", stroke: "rgba(160, 48, 48, 0.8)", dot: "#a03030" },
       interrupted: { fill: "rgba(232, 155, 44, 0.14)", stroke: "rgba(184, 95, 22, 0.78)", dot: "#b85f16" },
       cancelled: { fill: "rgba(106, 94, 156, 0.12)", stroke: "rgba(106, 94, 156, 0.74)", dot: "#6a5e9c" },
       skipped: { fill: "rgba(123, 140, 166, 0.11)", stroke: "rgba(123, 140, 166, 0.64)", dot: "#7b8ca6" },
       queued: { fill: "rgba(232, 155, 44, 0.12)", stroke: "rgba(232, 155, 44, 0.7)", dot: "#e89b2c" },
+      pending: { fill: "rgba(123, 140, 166, 0.09)", stroke: "rgba(123, 140, 166, 0.55)", dot: "#9aa8bd" },
+      "-": { fill: "rgba(123, 140, 166, 0.07)", stroke: "rgba(123, 140, 166, 0.45)", dot: "#b7c1cf" },
     };
     return palette[status] || palette.queued;
   }
@@ -203,6 +206,50 @@
     });
   }
 
+  /*
+   * Node labels.
+   *
+   * SVG text neither wraps nor clips, so an entity-expanded name such as
+   * "payer_claim_status_dashboard / Load Bronze" used to spill across the node
+   * border and over the edges. Labels are measured once the SVG is in the DOM
+   * (getComputedTextLength needs a rendered element) and shortened to fit, with
+   * the full value kept in a <title> so hovering still reveals it.
+   */
+  function shortenLabel(element, full, maxWidth, mode) {
+    element.textContent = full;
+    if (element.getComputedTextLength() <= maxWidth) return;
+
+    // Binary search the longest string that still fits.
+    let low = 0;
+    let high = full.length;
+    let best = "…";
+    while (low <= high) {
+      const keep = (low + high) >> 1;
+      let candidate;
+      if (mode === "end") {
+        candidate = full.slice(0, keep) + "…";
+      } else {
+        // Identifiers differ at both ends -- "payer_" vs "patient_" at the
+        // front, the task name at the back -- so drop from the middle.
+        const head = Math.ceil(keep / 2);
+        const tail = keep - head;
+        candidate = full.slice(0, head) + "…" + (tail ? full.slice(full.length - tail) : "");
+      }
+      element.textContent = candidate;
+      if (element.getComputedTextLength() <= maxWidth) {
+        best = candidate;
+        low = keep + 1;
+      } else {
+        high = keep - 1;
+      }
+    }
+    element.textContent = best;
+
+    const tooltip = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    tooltip.textContent = full;
+    element.appendChild(tooltip);
+  }
+
   function renderStageBands(rootGroup, graph, tasks, width) {
     const depths = computeDepths(tasks);
     const groupedNodes = {};
@@ -287,7 +334,9 @@
       graph.setNode(task.task_id, {
         ...task,
         status: taskStateMap[task.task_id] || task.status || "queued",
-        width: 230,
+        // Wide enough that the status/priority/timeout line always fits and
+        // most task names survive intact; the longest are still shortened.
+        width: 280,
         height: 104,
       });
     });
@@ -301,7 +350,7 @@
     window.dagre.layout(graph);
 
     const nodeMetrics = graph.nodes().map((nodeId) => graph.node(nodeId));
-    const width = Math.max(...nodeMetrics.map((node) => node.x + 170), 600);
+    const width = Math.max(...nodeMetrics.map((node) => node.x + 195), 600);
     const height = Math.max(...nodeMetrics.map((node) => node.y + 122), 320);
 
     const viewport = document.createElement("div");
@@ -357,6 +406,7 @@
       }
     });
 
+    const pendingLabels = [];
     graph.nodes().forEach((nodeId) => {
       const node = graph.node(nodeId);
       const palette = dagPalette(node.status);
@@ -378,6 +428,11 @@
       rect.setAttribute("fill", palette.fill);
       rect.setAttribute("stroke", palette.stroke);
       rect.setAttribute("stroke-width", isSelected ? "3" : "2");
+      // Downstream pipelines are drawn with a dashed border so the boundary
+      // between "tasks in this run" and "another pipeline" stays obvious.
+      if (node.task_type === "pipeline") {
+        rect.setAttribute("stroke-dasharray", "6 4");
+      }
       group.appendChild(rect);
 
       const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -392,22 +447,49 @@
       title.setAttribute("x", "16");
       title.setAttribute("y", "28");
       title.setAttribute("class", "dag-label");
-      title.textContent = node.title;
       group.appendChild(title);
+      // Leave room for the status dot in the top-right corner.
+      pendingLabels.push({ element: title, full: node.title, maxWidth: node.width - 46, mode: "middle" });
 
       const subtitle = document.createElementNS("http://www.w3.org/2000/svg", "text");
       subtitle.setAttribute("x", "16");
       subtitle.setAttribute("y", "49");
       subtitle.setAttribute("class", "dag-type");
-      subtitle.textContent = `${node.task_type} | ${node.task_id}`;
       group.appendChild(subtitle);
+      // For an entity task the id restates the title, so it is dropped rather
+      // than truncated: two shortened copies of one name help nobody.
+      const titleRestatesId = node.title.replace(/[^a-z0-9]/gi, "").toLowerCase()
+        === node.task_id.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      pendingLabels.push({
+        element: subtitle,
+        full: titleRestatesId ? node.task_type : `${node.task_type} | ${node.task_id}`,
+        maxWidth: node.width - 32,
+        mode: "middle",
+      });
 
       const stateLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
       stateLabel.setAttribute("x", "16");
       stateLabel.setAttribute("y", "70");
       stateLabel.setAttribute("class", "dag-state-label");
-      stateLabel.textContent = node.status;
+      // Priority and timeout are execution-affecting settings, so they belong
+      // on the node itself rather than only in the side panel.
+      const badges = [node.status];
+      if (node.priority) {
+        badges.push(`priority ${node.priority}`);
+      }
+      if (node.timeout_seconds) {
+        badges.push(`timeout ${node.timeout_seconds}s`);
+      }
+      if (node.run_if) {
+        badges.push("conditional");
+      }
       group.appendChild(stateLabel);
+      pendingLabels.push({
+        element: stateLabel,
+        full: badges.join(" | "),
+        maxWidth: node.width - 32,
+        mode: "end",
+      });
 
       const durationText = durationLabel(node.duration_seconds);
       if (durationText) {
@@ -444,6 +526,17 @@
     viewport.appendChild(svg);
     container.innerHTML = "";
     container.appendChild(viewport);
+
+    // Only now is the text measurable. Wait for the web font first: measuring
+    // against the fallback metrics produces labels that fit until IBM Plex Mono
+    // arrives and renders them ~5% wider, back outside the box.
+    const fitAll = () =>
+      pendingLabels.forEach((item) => shortenLabel(item.element, item.full, item.maxWidth, item.mode));
+    if (document.fonts && document.fonts.status !== "loaded") {
+      document.fonts.ready.then(fitAll);
+    } else {
+      fitAll();
+    }
   }
 
   window.PiplyDag = { renderInto };

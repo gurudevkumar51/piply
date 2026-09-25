@@ -150,6 +150,53 @@ def load_secret_values(
     return secrets
 
 
+#: Substrings that mark an environment variable as carrying a credential.
+_SENSITIVE_NAME_PARTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "accesskey",
+    "access_key",
+    "private",
+    "credential",
+    "auth",
+    "dsn",
+    "connection_string",
+    "conn_str",
+    "sasl",
+    "session_key",
+    "signing",
+)
+
+#: What a masked value is replaced with, so the UI can show that a value exists.
+MASKED = "***"
+
+
+def is_sensitive_name(name: str) -> bool:
+    """Return whether an environment variable name looks like a credential.
+
+    Name-based rather than value-based because a value cannot be recognised as
+    secret on its own. Deliberately broad: a false positive only hides a value
+    from a debugging view, while a false negative leaks a credential.
+    """
+    lowered = str(name).lower()
+    return any(part in lowered for part in _SENSITIVE_NAME_PARTS)
+
+
+def mask_env_values(values: dict[str, str] | None) -> dict[str, str]:
+    """Return env values with credential-looking entries replaced by ``***``.
+
+    Used when a stored environment is shown back to a user. Non-secret values
+    such as a tenant name stay visible, which is what makes the view useful.
+    """
+    if not values:
+        return {}
+    return {key: (MASKED if is_sensitive_name(key) and value else value) for key, value in values.items()}
+
+
 def secret_env_aliases(secret_values: dict[str, str]) -> dict[str, str]:
     """Expose secret names through explicit expansion tokens such as ${secret:NAME}."""
     aliases: dict[str, str] = {}
