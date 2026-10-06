@@ -8,7 +8,14 @@ is authorized. Protected branches remain untouched.
 
 ## Release Blockers
 
-1. **Linux and remote CI sign-off is incomplete.** Windows Python 3.10-3.14
+1. **Review-branch push authentication is blocked.** Candidate commit `0377680`
+   is prepared locally on `codex/release-v0.3.4-validation`. Gitea rejected the
+   push; afterward Git had no usable cached credential. Read-only API access
+   worked before the failed push, but no remote validation run has started.
+   The owner must refresh Git access with repository-write permission outside
+   chat. Do not send passwords/tokens in messages or relax authentication.
+
+2. **Linux and remote CI sign-off is incomplete.** Windows Python 3.10-3.14
    and native PostgreSQL 16 are now tested locally. Docker Desktop startup
    timed out and its engine is still unavailable, so local Linux testing is
    not possible. The authorized review branch runs validation only; the real

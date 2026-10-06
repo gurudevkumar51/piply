@@ -7,6 +7,11 @@ is implemented and its local gate passes; other planned features are not all
 prerequisites for this patch release. Existing verification sections below are
 historical batch records, not substitutes for release sign-off.
 
+The tested candidate is committed locally as `0377680` on the authorized review
+branch. Its push was rejected by Gitea authentication; CI has not started. The
+owner must refresh the saved Git credential with repository-write permission.
+Do not disable auth, push staging, or publish locally to work around this.
+
 This backlog consolidates the current open work after reviewing the codebase,
 documentation, roadmap, future-features notes, and the requirement files.
 

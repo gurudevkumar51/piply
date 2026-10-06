@@ -6,15 +6,16 @@ This file is a quick handoff for future development work in this repository. It 
 
 ## Current repository note
 
-The working tree contains both staged feature work and unstaged release-review
-changes. Inspect the current status and diffs before editing; do not reset,
-restage wholesale, or overwrite pre-existing work. This list is intentionally
-not frozen to the files present at the original handoff.
+The reviewed candidate is committed on `codex/release-v0.3.4-validation`.
+Inspect current status/diffs before editing; do not reset, restage wholesale,
+or overwrite new user work. A clean review commit is not a publishing approval.
 
 Release status: **HOLD v0.3.4**. See `docs/RELEASE_CHECK.md` for evidence and
 `docs/BACKLOG.md` for acceptance criteria. P1.3 run admission is implemented and
 its local gate passes. Native PostgreSQL and Windows Python 3.10-3.14 now pass;
 Linux and the authorized review-branch CI matrix still need sign-off.
+Candidate review commit: `0377680`. Push authentication currently blocks remote
+CI; the owner has been asked to refresh saved Git access outside chat.
 
 ## Project identity
 

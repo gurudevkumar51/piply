@@ -506,6 +506,11 @@ Push `codex/` review branches for validation only. `staging` pushes invoke the
 publishing workflow, so never use staging as a test-only branch. CI runner
 labels must correspond to real operating systems; the matrix checks this.
 
+If the review push fails authentication, refresh the owner-approved Git
+credential in the machine's credential manager with repository-write access.
+Do not paste tokens/passwords into chat, disable authentication, or use staging
+as an alternative push target. A local commit is not a remotely validated run.
+
 1. Read `CHANGELOG.md`.
 2. Back up the metadata store and configuration. Rehearse restore into an
    isolated copy; record the previous package version and environment.
