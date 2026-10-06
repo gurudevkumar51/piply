@@ -322,6 +322,20 @@ async function cancelRun(runId) {
   }
 }
 
+async function setRunPaused(runId, paused, button) {
+  if (button) button.disabled = true;
+  try {
+    await piplyRequest(`/api/runs/${encodeURIComponent(runId)}/${paused ? "pause" : "resume"}`, {
+      method: "POST",
+      body: "{}",
+    });
+    window.location.reload();
+  } catch (error) {
+    alert(error.message);
+    if (button) button.disabled = false;
+  }
+}
+
 async function deleteRun(runId, redirectUrl = "/runs") {
   const shouldDelete = window.confirm("Delete this run from history?");
   if (!shouldDelete) {

@@ -8,6 +8,52 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@500;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
+    <script>
+    /* Deliberately ES5, in its own block, and first.
+       Several parts of this UI are drawn by JavaScript into an element the
+       server leaves empty — the pipeline list and the run graph among them —
+       while their surrounding headings come from Jinja. So when a script fails
+       to parse, the page renders as "5 pipelines" above nothing at all, with no
+       clue why. A SyntaxError aborts its whole block before any line in it
+       runs, which also means a try/catch inside that block cannot report it.
+       This handler lives outside every other block and uses no syntax newer
+       than ES5, so it still runs on a browser too old to parse the rest. */
+    (function () {
+        var shown = false;
+        function escapeText(value) {
+            return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+        }
+        function report(message, source, line) {
+            if (shown) { return; }
+            shown = true;
+            var where = source ? String(source).split("/").pop() : "this page";
+            if (line) { where += " line " + line; }
+            function draw() {
+                var box = document.createElement("div");
+                box.className = "script-error-banner";
+                box.setAttribute("role", "alert");
+                box.innerHTML =
+                    "<strong>This page could not finish loading.</strong> " +
+                    "Parts of Piply are drawn in the browser, so lists and graphs may be blank. " +
+                    "<br><span class='mono'>" + escapeText(message) + " (" + escapeText(where) + ")</span>" +
+                    "<br>If your browser is more than a few years old, try a current Chrome, Edge, or Firefox. " +
+                    "Otherwise please report this message.";
+                if (document.body) { document.body.insertBefore(box, document.body.firstChild); }
+            }
+            if (document.body) { draw(); }
+            else { document.addEventListener("DOMContentLoaded", draw); }
+        }
+        window.addEventListener("error", function (event) {
+            if (event && event.target && event.target !== window && event.target.src) {
+                /* A script that 404s or is blocked never runs either. */
+                report("Could not load a required script", event.target.src, 0);
+                return;
+            }
+            report((event && event.message) || "Script error", event && event.filename, event && event.lineno);
+        }, true);
+    })();
+    </script>
     <script src="/static/dag.js" defer></script>
     <script src="/static/app.js" defer></script>
 </head>
@@ -30,6 +76,9 @@
                 <a class="nav-link {% if page == 'logs' %}active{% endif %}" href="/logs">Logs</a>
                 <a class="nav-link {% if page == 'diagnostics' %}active{% endif %}" href="/diagnostics">Diagnostics</a>
                 <a class="nav-link {% if page == 'settings' %}active{% endif %}" href="/settings">Settings</a>
+                {% if not request.state.user or request.state.user.is_admin %}
+                <a class="nav-link {% if page == 'audit' %}active{% endif %}" href="/audit">Audit</a>
+                {% endif %}
             </div>
 
             <div

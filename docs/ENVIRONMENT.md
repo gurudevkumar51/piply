@@ -1,5 +1,14 @@
 # Environment Variables
 
+Windows installs include `tzdata` for cron timezones. Minimal POSIX images
+without an IANA database must install OS timezone data or `python -m pip
+install tzdata`; otherwise even `timezone: UTC` cron schedules cannot load.
+
+v0.3.4 adds no required environment settings. Audit retention follows
+`PIPLY_RETENTION_RUN_DAYS` (zero keeps history); run pause state is stored in the
+database, not `.env`. For Conda, install and start Piply from the same activated
+environment; see the [runbook](RUNBOOK.md) and [release assessment](RELEASE_CHECK.md).
+
 Two separate things share the name "environment variable" in Piply:
 
 1. **`${NAME}` in your config** — values you reference from YAML, usually secrets
@@ -206,6 +215,16 @@ honoured, so a corporate CA bundle keeps working. See
 ---
 
 ## Related
+
+Development/test-only variables are not application settings:
+
+- `PIPLY_TEST_POSTGRES_DSN` selects an expendable PostgreSQL database for parity tests.
+- `PIPLY_TEST_POSTGRES_RESET=1` explicitly permits those tests to drop/recreate its
+  public schema. Do not put either variable in a production service environment.
+  Without a test DSN, PostgreSQL tests skip; with a DSN but no reset consent, they
+  fail before connecting or deleting schema data.
+
+See the [release assessment](RELEASE_CHECK.md) for current evidence and CI gates.
 
 - [Variables](VARIABLES.md) — `{name}` config variables and their scopes
 - [CLI Reference](CLI.md) — commands these settings affect

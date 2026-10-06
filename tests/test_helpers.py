@@ -211,6 +211,7 @@ def test_manual_run_creates_new_ids_against_legacy_schema(tmp_path: Path) -> Non
                 "workspace: workspace",
                 "pipelines:",
                 "  job:",
+                "    max_concurrent_runs: 2",
                 "    tasks:",
                 "      main:",
                 "        type: python",
@@ -277,10 +278,12 @@ def test_manual_run_creates_new_ids_against_legacy_schema(tmp_path: Path) -> Non
     connection.close()
 
     service = PipelineService(config_path=config_path, database_path=database_path)
-    first_run = service.trigger_pipeline("job", wait=False)
-    second_run = service.trigger_pipeline("job", wait=False)
-
-    assert first_run.run_id != second_run.run_id
+    try:
+        first_run = service.trigger_pipeline("job", wait=False)
+        second_run = service.trigger_pipeline("job", wait=False)
+        assert first_run.run_id != second_run.run_id
+    finally:
+        service.shutdown_runtime()
 
 
 def test_same_day_schedule_uses_relative_next_run_label(tmp_path: Path) -> None:

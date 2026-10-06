@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Audit - Piply{% endblock %}
+
+{% block content %}
+<div class="page-grid audit-page">
+    <header class="panel-header">
+        <h1 class="panel-title">Audit history</h1>
+        <span class="meta-pill">{{ events|length }} entries</span>
+    </header>
+    <form class="listing-toolbar" method="get" action="/audit">
+        <input class="toolbar-input" name="actor" value="{{ filters.actor }}" aria-label="Actor" placeholder="Actor">
+        <input class="toolbar-input" name="action" value="{{ filters.action }}" aria-label="Action" placeholder="Action">
+        <select class="toolbar-input" name="target_type" aria-label="Target type">
+            <option value="">All targets</option>
+            {% for value in ['run', 'pipeline', 'user', 'notification', 'installation'] %}
+            <option value="{{ value }}" {% if filters.target_type == value %}selected{% endif %}>{{ value|title }}</option>
+            {% endfor %}
+        </select>
+        <input class="toolbar-input" name="target_id" value="{{ filters.target_id }}" aria-label="Target ID" placeholder="Target ID">
+        <input class="toolbar-input" name="since" value="{{ filters.since }}" aria-label="Since" placeholder="Since">
+        <select class="toolbar-input" name="limit" aria-label="Entries per page">
+            {% if filters.limit not in [50, 100, 200, 500] %}
+            <option value="{{ filters.limit }}" selected>{{ filters.limit }} entries</option>
+            {% endif %}
+            {% for value in [50, 100, 200, 500] %}
+            <option value="{{ value }}" {% if filters.limit == value %}selected{% endif %}>{{ value }} entries</option>
+            {% endfor %}
+        </select>
+        <button class="button secondary tiny-button" type="submit">Filter</button>
+        <a class="button ghost tiny-button" href="/audit">Reset</a>
+    </form>
+    {% if error %}<p role="alert" class="empty-state">{{ error }}</p>{% endif %}
+    <section aria-label="Audit entries">
+        {% if events %}
+        <div class="table-wrap">
+            <table class="data-table audit-table">
+                <thead><tr><th>ID</th><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
+                <tbody>
+                    {% for entry in events %}
+                    <tr>
+                        <td class="mono">{{ entry.id }}</td>
+                        <td><time datetime="{{ entry.created_at.isoformat() }}">{{ entry.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</time></td>
+                        <td class="mono">{{ entry.actor }}</td>
+                        <td class="mono">{{ entry.action }}</td>
+                        <td><span class="muted">{{ entry.target_type }}</span><br><span class="mono">{{ entry.target_id }}</span></td>
+                        <td><code>{{ entry.detail|tojson }}</code></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% elif not error %}
+        <div class="empty-state">No audit entries matched.</div>
+        {% endif %}
+    </section>
+    <nav class="listing-toolbar" aria-label="Audit pagination">
+        <a class="button ghost tiny-button" href="{{ latest_url }}">Latest</a>
+        {% if older_url %}<a class="button secondary tiny-button" href="{{ older_url }}">Older</a>{% endif %}
+    </nav>
+</div>
+{% endblock %}

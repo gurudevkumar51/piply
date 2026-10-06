@@ -1,7 +1,9 @@
 # Piply Future Features
 
-Ideas that are **not built**. Everything here is a proposal, ordered by the
-value it would add against the cost of building it.
+An idea catalogue, not a YAML reference. Entries explicitly marked shipped are
+historical proposals; their sample syntax is not necessarily the shipped API.
+Unmarked proposals are not built. The [backlog](BACKLOG.md) is the current work
+queue; the [release assessment](RELEASE_CHECK.md) tracks the v0.3.4 candidate.
 
 Two constraints shape every entry:
 

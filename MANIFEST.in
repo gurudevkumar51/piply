@@ -1,1 +1,8 @@
 recursive-include piply/ui *
+recursive-include docs *.md
+recursive-include tools *.py
+recursive-include tests *.py
+recursive-include .gitea/workflows *.yml
+include .env.example
+include README.md CHANGELOG.md DEVELOPMENT_CONTEXT.md Requirement.md Requirment_advance.md
+global-exclude *.py[cod]

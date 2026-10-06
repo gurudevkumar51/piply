@@ -616,3 +616,60 @@ def test_the_runs_list_refreshes_itself(tmp_path: Path) -> None:
     # It must not fight the user: no swap while a drawer is open or a filter is focused.
     assert "runsRefreshBlocked" in body
     assert "visibilitychange" in body
+
+
+def _first_inline_script(html: str) -> str:
+    """Return the body of the first inline <script> block in a template."""
+    match = re.search(r"<script>(.*?)</script>", html, re.DOTALL)
+    assert match, "base.html has no inline script block"
+    return match.group(1)
+
+
+def test_a_script_failure_is_shown_rather_than_left_blank(tmp_path: Path) -> None:
+    """A page that cannot run its JavaScript must say so.
+
+    The pipeline list and the run graph are drawn by JavaScript into an element
+    the server leaves empty, while their headings come from Jinja. When a script
+    fails, the page reads "5 pipelines" above nothing at all — which is what a
+    fresh install looked like on a browser that could not parse it.
+    """
+    with TestClient(create_app(str(_project(tmp_path)))) as client:
+        body = client.get("/pipelines").text
+
+    assert "script-error-banner" in body
+    # Both ways a script can fail to run must be covered.
+    assert "Could not load a required script" in body, "a 404 on app.js is not reported"
+    assert 'window.addEventListener("error"' in body
+
+
+def test_the_script_error_handler_runs_on_an_old_browser() -> None:
+    """The reporter must not need the syntax it exists to report on.
+
+    A SyntaxError aborts its whole <script> block before any line in it runs, so
+    the handler cannot live in the same block as the code it guards, and it
+    cannot use syntax that same browser would choke on. Written in ES5 on
+    purpose; this test is what keeps it that way.
+    """
+    base = (Path(__file__).resolve().parents[1] / "piply/ui/templates/base.html").read_text(encoding="utf-8")
+    handler = _first_inline_script(base)
+
+    assert "script-error-banner" in handler, "the error handler is not the first inline script"
+
+    modern = {
+        "optional chaining (?.)": r"\?\.",
+        "nullish coalescing (??)": r"\?\?",
+        "arrow function (=>)": r"=>",
+        "template literal (`)": r"`",
+        "let/const": r"\b(?:let|const)\s",
+        "replaceAll": r"\.replaceAll\(",
+    }
+    found = [name for name, pattern in modern.items() if re.search(pattern, handler)]
+    assert not found, f"the error handler uses syntax an old browser cannot parse: {found}"
+
+
+def test_the_healthy_pages_do_not_show_the_error_banner(tmp_path: Path) -> None:
+    """The banner is inserted by script, never rendered into the markup."""
+    with TestClient(create_app(str(_project(tmp_path)))) as client:
+        for page in ("/", "/pipelines", "/runs"):
+            body = client.get(page).text
+            assert 'class="script-error-banner"' not in body, f"{page} ships a visible banner"

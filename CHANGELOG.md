@@ -11,7 +11,79 @@ rather than buried in the feature list.
 
 ## 0.3.4 — unreleased
 
+Release status: **HOLD**. See [the release assessment](docs/RELEASE_CHECK.md)
+for evidence and checks still requiring real PostgreSQL/compatibility CI.
+
+### Added
+
+- Validation-only `codex/` branch pushes, checked OS/interpreter matrix jobs,
+  and explicit PostgreSQL schema-reset consent for the real parity tests.
+
+- Durable audit history for run controls, scheduling, account/permission
+  changes, SMTP updates/tests, notification tests, database switches/migrations,
+  and pruning. Admins can filter and page through `/audit`, `GET /api/audit`, or
+  `piply audit`. Summaries exclude credentials and submitted values. History
+  survives run deletion and follows run-age retention; backups and database
+  migrations preserve it.
+- Run-level pause/resume in the Runs list, run detail, API, and CLI
+  (`pause-run` / `resume-run`). Active tasks finish; remaining tasks wait behind
+  a persisted, atomic task-start gate. Cancel, heartbeat, concurrency limits,
+  recovery, and wall-clock pipeline timeouts remain active while paused.
+- The Runs page previews next schedule slots within 15 minutes, including
+  explicitly labeled paused/disabled schedules and visibility/tag filters.
+- Run detail highlights paused work and failed/interrupted/timed-out tasks
+  above the graph with a retry action.
+
 ### Fixed
+
+- Bundled JavaScript and CSS use explicit content types instead of the host's
+  MIME mappings. Incorrect or missing mappings (including on Windows/Conda
+  installations) no longer block `app.js` and `dag.js`, leaving pipeline lists
+  and graphs blank. MIME-sniffing protections remain enabled.
+- Graph layout libraries are bundled with their licenses. Pipeline and run
+  graphs no longer depend on a public JavaScript CDN being reachable.
+- Narrow Git ignore exceptions retain bundled graph distributions in source
+  control instead of hiding them under the generic `dist/` rule.
+- PostgreSQL CI uses a Node-enabled Ubuntu Actions container matching the
+  setup-python build manifest rather than an unsupported Debian base.
+- Browser error banners escape error messages and source locations, including
+  failures reported before the document body exists.
+- SQLite backup and restore close their destination connections explicitly.
+- Package discovery excludes demo workspaces; source archives include the
+  documentation, tests, and release-check tools.
+- Python callable logs are not captured again when a CLI callback echoes them.
+  This fixes starter-workspace execution on a fresh installation with current
+  Typer dependencies.
+- The test extra requires pytest 9.0.3 or newer to avoid its known insecure
+  temporary-directory handling. This does not add a runtime dependency.
+- Windows installs declare `tzdata`, preventing cron schedules from rejecting
+  even `UTC` on clean environments without an IANA timezone database.
+- Resuming parallel work no longer prematurely completes a run while a ready
+  downstream task is still queued. The task-start pause gate remains active.
+- Resume retries include cancelled and timed-out tasks and retain successful
+  upstream tasks.
+- Run detail replaces active controls on completion and keeps retrying live
+  refresh after temporary connection failures.
+- The Runs page applies visibility before the history limit and confines wide
+  tables to their own scrolling area on mobile.
+- Malformed non-ASCII session signatures no longer raise an authentication
+  error on the server.
+
+- **A page whose JavaScript fails now says so instead of rendering blank.**
+  Reported from a fresh install on another machine: the pipelines page showed
+  "5 pipelines" above an empty list, and a run's task graph never appeared.
+
+  The headings come from Jinja; the pipeline list and the DAG are drawn by
+  script into an element the server leaves empty. So anything that stops a
+  script — a browser too old to parse it, a blocked or 404ing `app.js` — left a
+  page that looked broken and explained nothing. A `SyntaxError` aborts its
+  whole `<script>` block before the first line runs, which is why no `try`
+  inside that block could have caught it.
+
+  A banner now names the failure and where it came from. The handler is
+  deliberately plain ES5 in its own block, placed before everything else, so it
+  still runs on a browser that cannot parse the rest of the page — a test keeps
+  it that way. A healthy page never shows it.
 
 - **A paused pipeline fired its whole backlog the moment it was resumed.**
   Reported from a live install: a nightly pipeline paused for three days ran
@@ -40,6 +112,22 @@ rather than buried in the feature list.
   applies to a pause already in progress.
 
 ### Behaviour changes
+
+- **Run overlap limits now apply to every launch path.** Creating run/task
+  records atomically reserves capacity across shared-store service instances.
+  Queued and paused runs count. Direct manual/task/retry/chain/backfill requests
+  reject at capacity without creating another run (API 409, CLI exit 1);
+  `--wait` does not wait for a slot. Automatic triggers retain their payload
+  and dispatch order in the queue and fill the configured limit, including
+  limits greater than one. Existing schedule slots remain idempotent. Failed
+  inserts roll back; engine launch failures release their reserved capacity.
+
+- New automatic runs identify their system actor (for example,
+  `system:scheduler` or `system:sensor`) instead of returning a null `actor`.
+  CLI operations use `cli`; authenticated retries now preserve the requesting
+  account as actor. Existing historic actor values are unchanged.
+- Password changes invalidate existing sessions immediately. Upgrading signs
+  out older cookies once; sign in again to obtain a password-bound cookie.
 
 - **An automatic retry no longer re-runs tasks that already succeeded.** The
   retry policy's `mode` now defaults to `resume` instead of `startover`.
@@ -73,6 +161,14 @@ rather than buried in the feature list.
 
 ### Documentation
 
+- Refreshed every project guide, architecture reference, requirement status,
+  and developer handoff for the candidate. Removed unsupported concurrency
+  guarantees and stale statements about audit history and sessions.
+- Added a release assessment separating passed checks, failed gates, and
+  unverified environments. Publishing now requires a supported-Python/OS
+  matrix, PostgreSQL tests, installed-wheel checks, archive verification, and
+  the run-admission contract. Workflow configuration is not proof of a CI pass.
+
 - **Six new topic guides, and an index.** The reference had grown to 1,700 lines,
   which is the right shape for looking up a default and the wrong one for
   learning a topic. Added [CLI](docs/CLI.md) (there was no command reference at
@@ -84,7 +180,7 @@ rather than buried in the feature list.
 
   Guides teach and cross-link; the YAML specification stays the single
   exhaustive key list, so the two cannot drift into disagreeing. Two tests now
-  guard it: every relative link and `#anchor` across all 24 markdown files must
+  guard it: every relative link and `#anchor` across the documentation must
   resolve, and every page must be reachable from the index. The link check found
   three already-broken anchors on its first run.
 

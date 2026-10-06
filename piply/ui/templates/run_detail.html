@@ -10,11 +10,10 @@
             <h1 class="panel-title" style="font-size:1.55rem; margin:0;">{{ run.pipeline_title }}</h1>
             <p class="page-header-copy" style="margin:8px 0 0;">
                 Run <span class="mono">{{ run.run_id }}</span> was triggered via <span class="mono">{{ run.trigger }}</span>{% if run.actor %} by <span class="mono">{{ run.actor }}</span>{% endif %}.
-                Select a task in the graph to inspect it, filter logs, or retry from the failing point.
             </p>
         </div>
         <div class="run-stats-row">
-            <span class="status-badge {{ run.status }}" id="run-status">{{ run.status }}</span>
+            <span class="status-badge {{ 'paused' if run.paused and run.status in ['queued', 'running'] else run.status }}" id="run-status">{{ 'paused' if run.paused and run.status in ['queued', 'running'] else run.status }}</span>
             <span class="meta-pill">pipeline <a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_id }}</a></span>
             <span class="meta-pill">duration <span id="run-duration">{% if run.duration_seconds is not none %}{{ "%.1fs"|format(run.duration_seconds) }}{% else %}-{% endif %}</span></span>
             <span class="meta-pill">tasks <span id="run-task-count">{{ run.successful_tasks }}/{{ run.task_count }}</span></span>
@@ -27,7 +26,9 @@
             {% if upstream %}
             <span class="meta-pill">from <a href="/runs/{{ upstream.run_id }}">{{ upstream.pipeline_title }}</a></span>
             {% endif %}
+            <span class="inline-actions" id="run-actions" data-state="{{ 'paused' if run.paused and run.status in ['queued', 'running'] else run.status }}">
             {% if run.status in ['queued', 'running'] %}
+            <button class="button secondary run-pause-control" id="run-pause-button" type="button" title="{{ 'Resume run' if run.paused else 'Pause run' }}" aria-label="{{ 'Resume run' if run.paused else 'Pause run' }}" onclick="setRunPaused(runId, !currentRun.paused, this)">{{ '&#9654;'|safe if run.paused else '&#10074;&#10074;'|safe }}</button>
             <button class="button warn" onclick="cancelRun('{{ run.run_id }}')">Cancel run</button>
             {% else %}
             <button class="button primary" onclick="retryRun('{{ run.run_id }}', 'startover')">Re-Run</button>
@@ -36,8 +37,11 @@
             {% endif %}
             <button class="button ghost" onclick="deleteRun('{{ run.run_id }}')">Delete run</button>
             {% endif %}
+            </span>
         </div>
     </section>
+
+    <section class="panel tight-panel" id="run-attention" role="status" hidden></section>
 
     <section class="panel">
         <div class="panel-header">
@@ -214,8 +218,8 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/@dagrejs/graphlib@2.1.13/dist/graphlib.min.js" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.2/dist/dagre.min.js" defer></script>
+<script src="/static/vendor/graphlib-2.1.13/dist/graphlib.min.js" defer></script>
+<script src="/static/vendor/dagre-1.1.2/dist/dagre.min.js" defer></script>
 <script>
 const runId = "{{ run.run_id }}";
 const initialRun = {{ run_payload|tojson }};
@@ -224,6 +228,7 @@ const initialLogs = {{ log_payloads|tojson }};
 const initialUpcomingRuns = {{ upcoming_run_payloads|tojson }};
 const initialDownstream = {{ downstream|tojson }};
 const initialArtifacts = {{ artifacts|tojson }};
+const hasRunConfig = {{ 'true' if has_run_config else 'false' }};
 let active = {{ 'true' if run.status in ['queued', 'running'] else 'false' }};
 let currentRun = initialRun;
 let currentTaskRuns = initialTaskRuns.slice();
@@ -241,10 +246,40 @@ const taskFocusStorageKey = "piply.runTaskFocusCollapsed";
 let taskFocusCollapsed = window.localStorage.getItem(taskFocusStorageKey) !== "false";
 
 function updateRunHeader(run) {
-    document.getElementById("run-status").textContent = run.status;
-    document.getElementById("run-status").className = `status-badge ${run.status}`;
+    const isActive = ["queued", "running"].includes(run.status);
+    const label = isActive && run.paused ? "paused" : run.status;
+    document.getElementById("run-status").textContent = label;
+    document.getElementById("run-status").className = `status-badge ${label}`;
+    const actions = document.getElementById("run-actions");
+    if (actions.dataset.state !== label) {
+        actions.dataset.state = label;
+        const pauseLabel = run.paused ? "Resume run" : "Pause run";
+        actions.innerHTML = isActive
+            ? `<button class="button secondary run-pause-control" id="run-pause-button" type="button" title="${pauseLabel}" aria-label="${pauseLabel}" onclick="setRunPaused(runId, !currentRun.paused, this)">${run.paused ? "&#9654;" : "&#10074;&#10074;"}</button>
+               <button class="button warn" onclick="cancelRun(runId)">Cancel run</button>`
+            : `<button class="button primary" onclick="retryRun(runId, 'startover')">Re-Run</button>
+               ${hasRunConfig ? '<button class="button secondary" onclick="backfillRun(runId)">Replay config</button>' : ""}
+               <button class="button ghost" onclick="deleteRun(runId)">Delete run</button>`;
+    }
     document.getElementById("run-exit-code").textContent = run.exit_code ?? "pending";
     document.getElementById("run-task-count").textContent = `${run.successful_tasks}/${run.task_count}`;
+}
+
+function renderRunAttention() {
+    const panel = document.getElementById("run-attention");
+    const failed = currentTaskRuns.filter((task) => ["failed", "timed_out", "interrupted"].includes(task.status));
+    const isActive = ["queued", "running"].includes(currentRun.status);
+    panel.hidden = !(isActive && currentRun.paused) && !failed.length && !currentRun.error;
+    if (panel.hidden) return;
+    if (isActive && currentRun.paused) {
+        const running = currentTaskRuns.filter((task) => task.status === "running");
+        panel.innerHTML = `<h2 class="panel-title">Run paused</h2><p>${running.length ? "Active tasks are finishing. Remaining tasks are waiting." : "Remaining tasks are waiting."}</p>`;
+        return;
+    }
+    panel.innerHTML = `<h2 class="panel-title">${failed.length ? "Tasks need attention" : "Run needs attention"}</h2>
+        ${failed.map((task) => `<div class="card-actions"><a href="#task-run-grid" onclick='focusRunTask(${escapeHtml(JSON.stringify(task.task_id))}, false)'>${escapeHtml(task.title)}</a><span class="status-badge ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span></div>`).join("")}
+        ${currentRun.error ? `<p>${escapeHtml(currentRun.error)}</p>` : ""}
+        ${!isActive && failed.length ? `<button class="button primary" onclick="retryRun(runId, 'resume')">Retry unfinished tasks</button>` : ""}`;
 }
 
 function syncTaskCardFocus() {
@@ -313,7 +348,7 @@ function renderRunInspector(taskId) {
         return;
     }
     const dependencyText = task.depends_on && task.depends_on.length ? task.depends_on.join(", ") : "none";
-    const canRetryFromTask = ["failed", "interrupted"].includes(currentRun.status) && ["failed", "interrupted", "skipped"].includes(task.status);
+    const canRetryFromTask = ["failed", "timed_out", "interrupted", "cancelled"].includes(currentRun.status) && ["failed", "timed_out", "interrupted", "skipped", "cancelled"].includes(task.status);
     const canRerun = currentRun.status !== "queued" && currentRun.status !== "running";
     const outputBlock = task.output_preview
         ? `<div class="inspector-section">
@@ -603,6 +638,7 @@ function toggleTaskFocusPanel() {
 
 function renderTaskRuns(taskRuns) {
     currentTaskRuns = taskRuns.slice();
+    renderRunAttention();
     const grid = document.getElementById("task-run-grid");
     grid.innerHTML = taskRuns.map((task) => `
         <article class="task-card pipeline-focus-card ${task.status === "failed" ? "task-card-failed retryable" : ""} ${task.status === "success" ? "task-card-success" : ""} ${task.status === "interrupted" ? "task-card-interrupted retryable" : ""} ${task.status === "cancelled" ? "task-card-cancelled" : ""} ${task.status === "skipped" ? "retryable" : ""} ${task.task_id === selectedRunTaskId ? "task-card-focused" : ""}" onclick="focusRunTask('${task.task_id}', true)" data-task-card="${escapeHtml(task.task_id)}">
@@ -705,10 +741,7 @@ async function refreshRun() {
             clearInterval(durationTicker);
         }
     } catch (error) {
-        active = false;
-        if (durationTicker) {
-            clearInterval(durationTicker);
-        }
+        /* Retry on the next tick after transient connection errors. */
     }
 }
 

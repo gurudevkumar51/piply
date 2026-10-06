@@ -19,6 +19,7 @@ from urllib.parse import quote
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from piply.core.audit import audit_actor
 from piply.core.auth import ALL_PIPELINES, User, constant_time_equals, read_session
 from piply.settings import PiplySettings
 
@@ -217,7 +218,7 @@ SECURITY_HEADERS = {
     # Jinja's `tojson`, which escapes the characters needed to break out of one.
     "Content-Security-Policy": (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data:; "
@@ -250,7 +251,7 @@ async def auth_middleware(request: Request, call_next):
 
     if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES) or path in PUBLIC_PATHS:
         request.state.user = identify_caller(request, service, settings)
-        return await call_next(request)
+        return await _call_as_actor(request, call_next)
 
     # A genuinely fresh install has to choose where its data lives before
     # anything else is worth showing. Only rendered pages are redirected: an API
@@ -269,11 +270,17 @@ async def auth_middleware(request: Request, call_next):
     request.state.user = user
 
     if not auth_required:
-        return await call_next(request)
+        return await _call_as_actor(request, call_next)
     if user is None:
         has_accounts = service is not None and service.store.count_users() > 0
         return _challenge(path, has_accounts=has_accounts)
-    return await call_next(request)
+    return await _call_as_actor(request, call_next)
+
+
+async def _call_as_actor(request: Request, call_next):
+    user = resolve_user(request)
+    with audit_actor(user.username if user is not None else "anonymous"):
+        return await call_next(request)
 
 
 def identify_caller(request: Request, service, settings: PiplySettings) -> User | None:

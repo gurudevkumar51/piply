@@ -35,7 +35,7 @@ from piply.api.schemas import (
 from piply.core.artifacts import is_readable_artifact
 from piply.core.dialects import is_postgres_dsn
 from piply.core.secrets import mask_env_values
-from piply.core.store import RunStore
+from piply.core.store import RunConcurrencyLimitError, RunStore
 from piply.settings import SettingsError
 
 router = APIRouter(tags=["operations"])
@@ -129,6 +129,8 @@ def backfill_run(request: Request, run_id: str) -> RunResponse:
         run = service.backfill_run(run_id, wait=False)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunConcurrencyLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)
@@ -384,6 +386,14 @@ def put_database_settings(request: Request, payload: DatabaseSettingsRequest) ->
 
     persist_database_setting(config_path, value)
     apply_database_setting(request)
+    detail = {
+        "source_backend": service.store.dialect.name,
+        "target_backend": get_service(request).store.dialect.name,
+        "migrated": bool(payload.migrate),
+    }
+    # Record in both stores, so switching without migration leaves a trail.
+    service.record_audit("database.switch", "installation", "database", detail=detail)
+    get_service(request).record_audit("database.switch", "installation", "database", detail=detail)
     return {
         "status": "updated",
         "backend": get_service(request).store.dialect.name,

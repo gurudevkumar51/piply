@@ -1,5 +1,10 @@
 # Templates and Deployments
 
+No template/deployment syntax changes are required for v0.3.4. Run controls and
+audit events refer to concrete deployment pipeline ids, not the shared template.
+Upcoming previews respect deployment visibility. See the
+[release assessment](RELEASE_CHECK.md) before relying on run overlap limits.
+
 One pipeline shape, run for many tenants, without copying it 29 times.
 
 - A **template** describes the work. It is not runnable on its own.

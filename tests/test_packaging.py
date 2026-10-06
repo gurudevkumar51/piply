@@ -23,9 +23,7 @@ import pytest
 try:  # `tomllib` is 3.11+; the package itself supports 3.10.
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - only on Python 3.10
-    tomllib = None  # type: ignore[assignment]
-
-pytestmark = pytest.mark.skipif(tomllib is None, reason="tomllib requires Python 3.11+")
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -88,7 +86,10 @@ def test_runtime_dependency_count_is_deliberate() -> None:
     number here and in the docs that quote it.
     """
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert len(data["project"]["dependencies"]) == 8
+    dependencies = data["project"]["dependencies"]
+    assert len(dependencies) == 9
+    assert len([requirement for requirement in dependencies if ";" not in requirement]) == 8
+    assert "tzdata>=2024.1; sys_platform == 'win32'" in dependencies
 
 
 @pytest.mark.parametrize("blocked", ["multipart"])

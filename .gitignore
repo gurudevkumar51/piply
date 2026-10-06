@@ -49,6 +49,10 @@ pytest_basetemp*/
 htmlcov/
 .tox/
 dist/
+!piply/ui/static/vendor/dagre-1.1.2/dist/
+!piply/ui/static/vendor/dagre-1.1.2/dist/dagre.min.js
+!piply/ui/static/vendor/graphlib-2.1.13/dist/
+!piply/ui/static/vendor/graphlib-2.1.13/dist/graphlib.min.js
 build/
 build_tmp/
 

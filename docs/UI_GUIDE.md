@@ -1,6 +1,9 @@
 # Piply UI Guide
 
-Seven pages, one job each. Start the server and open `http://127.0.0.1:8000`.
+Eight main pages, one job each. Start the server and open `http://127.0.0.1:8000`.
+v0.3.4 adds Audit, run pause/resume, upcoming schedule previews, and locally
+bundled graph scripts. See the [release assessment](RELEASE_CHECK.md) for rollout
+limits; fonts remain optional external resources.
 
 ```bash
 piply start --config piply.yaml
@@ -8,6 +11,7 @@ piply start --config piply.yaml
 
 | Page | Path | Answers |
 | --- | --- | --- |
+| Audit | `/audit` | Who changed or launched something? (admin) |
 | Dashboard | `/` | Is anything broken right now? |
 | Pipelines | `/pipelines` | What exists, what runs next? |
 | Pipeline detail | `/pipelines/{id}` | What does this pipeline do? |
@@ -229,6 +233,12 @@ same information in a terminal.
 
 ## Runs
 
+**Scheduled in the next 15 minutes** shows each pipeline's next schedule slot,
+ordered by time. Pipeline and tag filters apply to this preview. Paused and
+disabled schedules are labeled explicitly; these entries are planned slots,
+not actual run records. The preview refreshes with the run list every ten
+seconds. The scheduler indicator shows whether automatic dispatch is live.
+
 **Filters** across the top, all server-side so they work beyond the page limit
 and are shareable as a URL: pipeline, status (including a *Failure-like* preset
 covering failed, timed out, and interrupted), trigger type, and a from/to date
@@ -287,7 +297,16 @@ always behaved.
 **Header** — status, pipeline link, duration, task counts, exit code, retry
 lineage, and the upstream run when this run was triggered by another pipeline.
 
-Actions: *Cancel* while active; otherwise *Re-Run*, *Replay config*, *Delete*.
+Actions: *Pause* or *Resume*, and *Cancel* while active; otherwise *Re-Run*,
+*Replay config*, *Delete*. Pause lets active tasks finish and holds new task
+starts until Resume. It continues the same run and does not pause its schedule.
+The Runs list also offers these controls. A paused run still holds its
+concurrency slot and its pipeline timeout continues counting.
+
+Paused runs show a waiting notice above the graph. Failed, timed-out, and
+interrupted tasks appear there with a shortcut to their details and a retry
+action once the run has finished. Resume retries also handle timed-out and
+cancelled tasks, reusing successful work.
 *Replay config* re-executes the run with the exact configuration it captured,
 which is how a downstream run gets repaired without re-running its upstream.
 
@@ -436,6 +455,17 @@ runtime configuration alone. Teams destinations are declared in YAML rather than
 here — see [Notifications](NOTIFICATIONS.md).
 
 ---
+
+## Audit
+
+Admin-only. Shows UTC time, actor, action, target, and detail summaries. Filter
+by exact actor/action/target, or by an ISO timestamp/relative interval in
+**Since** (`7d`, `12h`). **Older** pages backward by event id; **Latest** returns
+to the newest matches. Empty filters show all retained entries.
+
+Run/account deletion does not remove their audit entries. Credentials,
+commands, run parameters, and submitted settings values are excluded. See
+[Audit History](AUDIT.md) for recorded actions, retention, and limitations.
 
 ## Status colours
 

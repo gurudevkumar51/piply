@@ -47,10 +47,10 @@ def build_retry_plan(
     unresolved = {
         task.task_id
         for task in previous_task_runs
-        if task.status in {"failed", "interrupted", "skipped", "queued", "running"}
+        if task.status in {"failed", "timed_out", "cancelled", "interrupted", "skipped", "queued", "running"}
     }
     if not unresolved:
-        raise ValueError("This run does not have failed, interrupted, or skipped tasks to resume.")
+        raise ValueError("This run does not have unfinished or unsuccessful tasks to resume.")
 
     rerun = downstream_closure(pipeline, unresolved)
     reuse = tuple(

@@ -1,7 +1,15 @@
 # Pipelines
 
+v0.3.4 separates schedule pause from run pause: `piply pause PIPELINE_ID` holds
+automatic triggers; `piply pause-run RUN_ID` holds new tasks in one run. The
+run-admission limit is shared across direct starts and queued triggers. See the
+[release assessment](RELEASE_CHECK.md) for remaining deployment sign-off.
+
 A pipeline is a named group of tasks with a schedule, a retry policy, and a list
 of who to tell when it finishes.
+
+Cron schedules use IANA timezone data. The package installs `tzdata` on Windows;
+minimal POSIX images must supply OS timezone data or install `tzdata` separately.
 
 For the exhaustive key list see
 [YAML Specification §4](YAML_SPECIFICATION.md#4-pipeline-keys).
@@ -89,13 +97,19 @@ Two independent limits:
 | `max_concurrent_runs` | How many runs of **this pipeline** overlap. Default 1 |
 | `max_parallel_tasks` | How many **tasks within one run** execute at once. Default 4 |
 
-`max_concurrent_runs: 1` is the default because most extracts are not safe to
-overlap — a slow 02:00 run still going at 03:00 would otherwise have a second
-copy writing the same tables. With the default, the second is skipped rather than
-started.
+`max_concurrent_runs` counts queued and running records, including paused runs.
+Capacity is reserved atomically when the run and its tasks are created, across
+services sharing the same metadata store. Limits are per pipeline, not per
+tenant or selected task. Different deployments with different pipeline ids have
+separate limits; sharing a warehouse does not create a cross-pipeline pool.
 
-Raise it only when the pipeline is genuinely re-entrant, usually because each run
-is scoped to a different tenant or date.
+At capacity, direct manual/task/retry/chain/backfill requests reject without
+creating another run: the API returns 409 and the CLI exits 1 with a limit
+message. They are not automatically queued, even with `--wait`. Automatic
+schedule/sensor/retry/downstream triggers remain queued in dispatch order until
+capacity opens. A limit of two admits two runs rather than serializing them.
+Pausing a run does not release its slot. Repeating an existing schedule slot
+returns its original run instead of reserving another slot.
 
 ---
 

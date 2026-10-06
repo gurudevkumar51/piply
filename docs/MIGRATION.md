@@ -1,5 +1,10 @@
 # Migrating To Pipeline Templates And Deployments
 
+This guide covers config restructuring, not a database rollback. Upgrading to
+v0.3.4 requires no YAML conversion and preserves existing run ids; back up the
+metadata store first. Older cookies require a new sign-in. See
+[Metadata Store](DATABASE.md) and the [release assessment](RELEASE_CHECK.md).
+
 Templates and deployments are **optional**. Existing configs keep working
 untouched — this guide is only for teams that have copy-pasted the same pipeline
 once per tenant, region, or environment.

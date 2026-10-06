@@ -274,6 +274,9 @@ class LocalEngine(BaseEngine):
         while pending:
             if cancel_event.is_set():
                 break
+            if self._run_paused(store, run_id):
+                cancel_event.wait(0.1)
+                continue
             ready = [
                 pipeline.tasks[task_id]
                 for task_id in pending
@@ -335,6 +338,8 @@ class LocalEngine(BaseEngine):
                         break
                     if cancel_event.is_set():
                         break
+                    if self._run_paused(store, run_id):
+                        break
 
                     pending.remove(task.task_id)
                     scheduled_this_round = True
@@ -378,6 +383,10 @@ class LocalEngine(BaseEngine):
                     available_slots -= 1
 
                 if not in_flight and not scheduled_this_round:
+                    # Resume can race the pause check above; ready work is not completion.
+                    if pending and ready_tasks and not cancel_event.is_set():
+                        cancel_event.wait(0.1)
+                        continue
                     break
 
                 if not in_flight:
@@ -573,11 +582,30 @@ class LocalEngine(BaseEngine):
         context: RuntimeTaskContext,
     ) -> TaskExecutionResult:
         """Execute one task through the shared TaskRunner."""
-        store.mark_task_running(run_id, task.task_id)
+        cancel_event = self._cancel_events.get(run_id) or threading.Event()
+        # A task can have been submitted just before pause. The atomic claim
+        # prevents it from starting until the persisted gate is open again.
+        while not store.mark_task_running(run_id, task.task_id):
+            run = store.get_run(run_id)
+            if cancel_event.is_set() or run is None or run.status not in {"queued", "running"}:
+                return TaskExecutionResult(status="cancelled", exit_code=None, error="Run cancelled before task start.")
+            if not run.paused:
+                task_run = next((item for item in store.list_task_runs(run_id) if item.task_id == task.task_id), None)
+                if task_run is None or task_run.status != "queued":
+                    return TaskExecutionResult(status="cancelled", exit_code=None, error="Task is no longer queued.")
+                # Resume may have opened the gate between the failed claim and
+                # this read. Retry the claim rather than discarding queued work.
+                continue
+            cancel_event.wait(0.1)
         runner.emit(f"Running task {task.task_id} ({task.operator_label})", task_id=task.task_id)
         runner.emit(f"Plan: {task.command_preview}", task_id=task.task_id)
         task_context = RuntimeTaskContext(self._context_for_task(task, pipeline, context))
         return runner.for_context(task_context).run(task)
+
+    @staticmethod
+    def _run_paused(store: RunStore, run_id: str) -> bool:
+        run = store.get_run(run_id)
+        return run is not None and run.status in {"queued", "running"} and run.paused
 
     def _evaluate_run_if(
         self,

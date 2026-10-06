@@ -1,8 +1,12 @@
 # Command Line Reference
 
+v0.3.4 adds `pause-run`, `resume-run`, and `audit`. Run-level controls do not
+pause schedules. Use the same database as the server and check the
+[release assessment](RELEASE_CHECK.md) for current limitations.
+
 Every `piply` command, what it is for, and the flags that matter.
 
-`--config / -c` is accepted by every command except `init`. Without it Piply
+Most workspace commands accept `--config / -c`. Without it Piply
 looks for `piply.yaml`, then `piply.yml`, then `piply-demo/piply.yaml`, starting
 in the working directory.
 
@@ -61,6 +65,11 @@ One line per pipeline: id, schedule, task count, and enabled state.
 ---
 
 ## 2. Running pipelines
+
+Direct run/task/retry/backfill commands reject when the pipeline reaches
+`max_concurrent_runs`, with exit code 1 and a limit message. `--wait` waits for
+an accepted run to finish, not for capacity to open. Queued automatic triggers
+continue waiting; paused runs keep their slots. Check `piply runs` before retrying.
 
 ### `piply run PIPELINE_ID`
 
@@ -126,6 +135,18 @@ it.
 ---
 
 ## 3. Watching what happened
+
+### `piply pause-run RUN_ID` / `piply resume-run RUN_ID`
+
+Hold new tasks in an existing queued or running run. Tasks already running
+finish normally; pending tasks wait until `resume-run` continues the same run.
+Both commands accept `--config piply.yaml` and share the server's persisted
+pause state. Use the same configured database as the server.
+
+The run remains active and keeps its concurrency slot. Pipeline timeout is
+wall-clock time, so it continues while paused. Cancel and shutdown still work.
+After a server restart, the normal interrupted-run recovery applies; retry the
+interrupted run rather than attempting to resume execution in a dead process.
 
 ### `piply runs`
 
@@ -326,9 +347,30 @@ execute copies a moving target.
 
 See [Metadata Store](DATABASE.md) for the full procedure.
 
+### `piply audit`
+
+Read action history with local access to the metadata database:
+
+```bash
+piply audit --since 7d
+piply audit --actor ops --action run.cancel --json
+piply audit --target-type run --target-id RUN_ID --limit 100
+piply audit --before-id 123
+```
+
+Filters are exact matches. `--since` accepts an ISO timestamp or a positive
+interval (`7d`, `12h`); timestamps without an offset mean UTC. Entries are
+newest first, with stable event-id pagination and a 1-500 entry limit. Like
+account-management commands, CLI access relies on operating-system permissions,
+not UI login. See [Audit History](AUDIT.md).
+
 ### `piply prune`
 
 Deletes history beyond the retention window.
+
+Audit entries follow run-retention days, independently of run deletion.
+`--run-days 0` retains audit entries indefinitely; dry runs include their
+predicted deletion count. Pruning itself is audited after completion.
 
 | Flag | Purpose |
 | --- | --- |

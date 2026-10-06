@@ -1,5 +1,11 @@
 # Notifications
 
+In v0.3.4, manual notification/SMTP tests and SMTP setting changes are audited
+without storing submitted values, webhook URLs, recipients, or error text.
+Automatic delivery history remains separate. External delivery is not a
+transactional guarantee; see [Audit History](AUDIT.md) and the
+[release assessment](RELEASE_CHECK.md).
+
 How Piply tells you a run finished, and what happens when it cannot.
 
 Two channels, configured independently:

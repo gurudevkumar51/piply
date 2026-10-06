@@ -234,6 +234,10 @@ class Dialect(ABC):
         """
         return None
 
+    @abstractmethod
+    def lock_run_admission(self, connection: Connection, pipeline_id: str) -> None:
+        """Serialize a pipeline's capacity check and run insert until commit."""
+
     def vacuum(self, connection: Connection) -> None:
         """Reclaim free space."""
         connection.execute("VACUUM")
@@ -289,6 +293,11 @@ class SqliteDialect(Dialect):
         """Enable write-ahead logging for better read concurrency."""
         connection.execute("PRAGMA journal_mode=WAL")
 
+    def lock_run_admission(self, connection: Connection, pipeline_id: str) -> None:
+        """Take the write lock before reading capacity, including across processes."""
+        del pipeline_id
+        connection.execute("BEGIN IMMEDIATE")
+
 
 class PostgresDialect(Dialect):
     """Opt-in backend for deployments with a managed database."""
@@ -305,6 +314,19 @@ class PostgresDialect(Dialect):
         if self._version == 2:
             return PostgresConnection(_Psycopg2Adapter(raw, self._row_factory), self._row_factory)
         return PostgresConnection(raw, self._row_factory)
+
+    def lock_run_admission(self, connection: Connection, pipeline_id: str) -> None:
+        """Lock the persistent pipeline row without blocking unrelated pipelines."""
+        # Capacity must see commits made while this transaction waited for the row.
+        connection.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        connection.execute(
+            "INSERT INTO pipeline_overrides (pipeline_id, paused) VALUES (?, 0) ON CONFLICT (pipeline_id) DO NOTHING",
+            (pipeline_id,),
+        )
+        connection.execute(
+            "SELECT pipeline_id FROM pipeline_overrides WHERE pipeline_id = ? FOR UPDATE",
+            (pipeline_id,),
+        ).fetchone()
 
     def describe(self) -> str:
         """Return the DSN with any password redacted."""

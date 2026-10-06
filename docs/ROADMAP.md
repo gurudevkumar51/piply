@@ -1,7 +1,9 @@
 # Roadmap
 
-What is worth doing next, and when. This is release-oriented: **0.3** is what
-the current codebase is close enough to finish; later sections are directional.
+What is worth doing next, and when. Reviewed on 2026-10-06 against the
+**unreleased 0.3.4 candidate**. The [backlog](BACKLOG.md) owns acceptance
+criteria; the [release assessment](RELEASE_CHECK.md) owns the publishing
+decision. Later version sections are directional, not delivery promises.
 
 [Future Features](FUTURE_FEATURES.md) is the wider catalogue of ideas with the
 reasoning behind each. This document is the subset with a date attached.
@@ -16,6 +18,11 @@ An item that costs one of those to buy another is called out as such.
 ---
 
 ## Where things stand
+
+Implemented in the 0.3.4 candidate: run-level pause/resume, upcoming schedule
+previews, admin audit history, password-bound session cookies, portable static
+MIME handling, and locally bundled graph layout libraries. These are not a
+claim that the candidate has shipped or passed every supported environment.
 
 Shipped in 0.3.x, so the roadmap does not relitigate them:
 
@@ -38,8 +45,8 @@ lineage · collapsible graph panels · accounts with per-pipeline permissions ·
 central SMTP and notifications · optional PostgreSQL · SQLite-to-PostgreSQL
 migration.
 
-Runtime dependencies: **8**. That number is the budget. Anything new should be
-an optional extra.
+Runtime dependencies: **8 common packages**, plus Windows-only `tzdata` for
+cron timezone support. New integrations should remain optional extras.
 
 ---
 
@@ -53,9 +60,19 @@ ships.
 it grows.**
 
 The config-size problem is solved (`include:`, shipped in 0.3.0) and outbound
-alerting is in (Teams, 0.3.0–0.3.3). What remains is the audit trail — "who
-*did* what" — and the reliability gap where one flaky task still costs a whole
-run.
+alerting is in (Teams, 0.3.0–0.3.3). Audit history is now in the candidate.
+Shared run admission is implemented across manual, task-only, retry and queued
+triggers. Native PostgreSQL and Windows compatibility pass locally; the immediate
+release priority is Linux and remote compatibility CI sign-off.
+Audit transaction hardening and named credentials remain follow-up work.
+
+### Run admission — implemented; release CI sign-off pending
+
+Atomic run creation now enforces capacity across launch paths and shared-store
+owners. Direct requests reject excess work; queued triggers fill the configured
+limit and preserve excess work. `python -m tools.check_run_admission` now passes
+and remains a publishing gate. Real PostgreSQL race and compatibility CI results
+are still required before release approval or broader pools/workers.
 
 ### Split `piply.yaml` across files — **shipped in 0.3.0**
 
@@ -87,25 +104,23 @@ included files rather than one. Full design, including the rules table, is in
 Shipped as `include:`, with duplicate detection across files, both file
 names in every conflict error, and reload watching every included file.
 
-### Audit log — **highest value**
+### Audit log — implemented in the candidate
 
-There is currently no record of who triggered, retried, cancelled, deleted, or
-reconfigured anything. For a tool sitting in front of healthcare or financial
-data, that is the most conspicuous remaining gap, and it is now cheap: accounts
-already exist, and every action already passes a permission check.
-
-One table, written from the same place permissions are enforced:
+Run controls and administrative changes have durable, admin-only audit
+history. See [Audit History](AUDIT.md) for the actual coverage and attribution.
 
 | Column | Meaning |
 | --- | --- |
-| `at` | timestamp |
-| `username` | actor, or `system` for the scheduler |
-| `action` | `run`, `retry`, `cancel`, `delete`, `pause`, `grant`, `smtp_update` |
-| `target` | pipeline or run id |
-| `detail` | JSON: overrides, permissions granted, previous value |
+| `id`, `created_at` | event id and UTC timestamp |
+| `actor` | account, `cli`, or a system actor |
+| `action` | stable operation name such as `run.create` |
+| `target_type`, `target_id` | affected entity |
+| `detail` | allowlisted JSON summary; no credentials or submitted values |
 
-Surfaced as an admin-only page and `piply audit --since 7d`. Retained by the
-existing prune settings.
+Surfaced as `/audit`, `GET /api/audit`, and `piply audit --since 7d`.
+Retained by the run-age prune setting independently of run deletion. Audit
+appends and mutations are separate transactions; making them atomic is P1.4.
+This is operational history, not an immutable compliance ledger.
 
 **Cost:** S · no new dependency · one table
 
@@ -131,7 +146,8 @@ Retries happen inside the task slot, so the DAG never sees the failure.
 
 Follow-through on the auth work:
 
-- invalidate sessions on password change (currently they survive up to 12 hours)
+- password changes already invalidate sessions in the candidate; older cookies
+  require one fresh sign-in after upgrade
 - named API tokens per account, replacing the single global `PIPLY_API_TOKEN`
 - show and revoke active sessions from the admin page
 
@@ -252,11 +268,11 @@ Recorded so it is not relitigated. Full reasoning in
 
 | Goal | Biggest remaining gap | Addressed by |
 | --- | --- | --- |
-| Lightweight | Nothing pressing — 8 runtime dependencies | Hold the line: new backends stay extras |
+| Lightweight | 8 common runtime dependencies plus Windows timezone data | New backends stay extras |
 | Fast | Log table growth on long-lived installs | Log persistence, existing prune |
-| Secure | No audit trail; global API token | Audit log, token management |
-| Easy to use | UI cannot supply run parameters | 0.5 declared `params:` |
+| Secure | Global API token; audit transaction gap | Named tokens, audit hardening |
+| Easy to use | No declared typed run-parameter schema | 0.5 declared `params:` |
 
-If only one thing gets built next, make it **audit logging**. It is small,
-needs no new dependency, and it is the question every reviewer asks first once
-more than one person can press Run.
+The next release task is **PostgreSQL and compatibility CI sign-off**. Audit
+logging and local admission verification are implemented; named tokens,
+revocable session listings, and audit transaction hardening remain follow-ups.

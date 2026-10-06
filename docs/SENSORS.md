@@ -1,5 +1,10 @@
 # Sensors
 
+v0.3.4 attributes dispatched sensor runs to `system:sensor`; actions appear in
+[Audit History](AUDIT.md). Sensor events still use the durable trigger queue.
+No new sensor type or per-task retry policy is added. See the
+[release assessment](RELEASE_CHECK.md) for backend/integration test limits.
+
 A sensor watches something outside Piply and starts a pipeline when it changes.
 Schedules answer "run at 03:00"; sensors answer "run when the file lands".
 

@@ -373,6 +373,7 @@ class RunRecord:
     tenant_id: str | None = None
     #: Account that asked for this run; None for scheduler and sensor runs.
     actor: str | None = None
+    paused: bool = False
 
     @property
     def duration_seconds(self) -> float | None:

@@ -15,6 +15,7 @@ from piply.api.schemas import (
     TaskRunResponse,
     UpcomingRunResponse,
 )
+from piply.core.store import RunConcurrencyLimitError
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -82,6 +83,8 @@ def retry_run(request: Request, run_id: str, payload: RetryRequest) -> RunRespon
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunConcurrencyLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(retry_run_record)
@@ -152,6 +155,8 @@ def retry_task_from_run(request: Request, run_id: str, task_id: str) -> RunRespo
         run = service.retry_run(run_id, mode="resume", task_id=task_id, wait=False)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunConcurrencyLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)
@@ -169,6 +174,29 @@ def cancel_run(request: Request, run_id: str) -> RunResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)
+
+
+def _set_run_paused(request: Request, run_id: str, paused: bool) -> RunResponse:
+    _guard_run(request, run_id, "run")
+    try:
+        run = get_service(request).set_run_paused(run_id, paused)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RunResponse.from_record(run)
+
+
+@router.post("/{run_id}/pause", response_model=RunResponse)
+def pause_run(request: Request, run_id: str) -> RunResponse:
+    """Hold new task starts while active tasks finish."""
+    return _set_run_paused(request, run_id, True)
+
+
+@router.post("/{run_id}/resume", response_model=RunResponse)
+def resume_run(request: Request, run_id: str) -> RunResponse:
+    """Continue pending tasks in the same run."""
+    return _set_run_paused(request, run_id, False)
 
 
 @router.delete("/{run_id}")

@@ -1,5 +1,14 @@
 # Piply – Pending Requirement Summary
 ## 1. Pipeline Architecture
+
+Status review: 2026-10-06. This is the original requirements record, not a list
+of remaining work. Many items below are implemented. Track current acceptance
+criteria in [the backlog](docs/BACKLOG.md), operational procedures in
+[the runbook](docs/RUNBOOK.md), and candidate verification in
+[the v0.3.4 release assessment](docs/RELEASE_CHECK.md). Run-level pause/resume,
+upcoming schedule previews, audit history, and portable static MIME handling
+are in the candidate; run-admission concurrency remains a release blocker.
+
 In Pipeline Templates & Deployments
 
 Introduced an optional deployment architecture while maintaining full backward compatibility.
@@ -245,3 +254,32 @@ reducing unnecessary database scans during dashboard/API requests.
 ## 17. in run page graph view downstream pipeline is not visibles.
 
 ## 18. UI: As of now UI is more confusing
+
+## 19. Pause / resume running pipeline between tasks
+
+Status: implemented and verified on 2026-10-02. Available in run detail, the
+Runs list, API, and `piply pause-run` / `piply resume-run`. See `docs/CLI.md`.
+
+For any running pipeline, provide a pause and play/resume control.
+
+Expected behavior:
+
+- If the user pauses while a task is already running, let the current task continue to completion.
+- While paused, do not start the next runnable task, even if dependencies are satisfied.
+- When the user clicks play/resume, continue the same run from the next pending task.
+- This is different from cancel: no running task should be killed just because the pipeline was paused.
+- Useful when the user wants to validate data or inspect outputs before allowing downstream tasks to continue.
+
+## 20. Run page should show pipelines scheduled in the next 15 minutes
+
+Status: implemented and verified on 2026-10-02. The Runs page shows upcoming
+slots with paused/disabled labels and respects pipeline/tag visibility filters.
+
+On the run page, also list pipelines that are scheduled to start soon.
+
+Expected behavior:
+
+- Show pipelines whose next scheduled run is within the next 15 minutes.
+- Keep showing currently active/running and completed pipelines as it does today.
+- Make the upcoming scheduled pipelines visually distinct from active and completed runs.
+- Include the next scheduled time so the user can see what is about to run.

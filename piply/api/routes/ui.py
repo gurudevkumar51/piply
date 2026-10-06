@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from piply.api.auth import (
@@ -18,6 +19,7 @@ from piply.api.auth import (
 )
 from piply.api.routes.setup import database_is_env_managed
 from piply.api.schemas import RunResponse
+from piply.core.audit import parse_audit_since
 from piply.core.dialects import is_postgres_dsn
 from piply.core.sql_adapters import mask_connection_secret
 
@@ -292,6 +294,7 @@ def runs_page(
     if tag:
         tagged = {item.pipeline_id for item in allowed_pipelines if tag in item.tags}
         selected_ids = tagged if selected_ids is None else selected_ids & tagged
+    selected_ids = allowed_ids if selected_ids is None else selected_ids & allowed_ids
 
     if selected_ids is not None and not selected_ids:
         # An empty set must mean "nothing matches", never "no filter".
@@ -316,6 +319,9 @@ def runs_page(
             "project": service.project,
             "runs": runs,
             "lineage": lineage,
+            "upcoming_pipelines": service.list_upcoming_pipelines(
+                pipeline_ids=allowed_ids if selected_ids is None else allowed_ids & selected_ids,
+            ),
             "pipelines": allowed_pipelines,
             "trigger_types": TRIGGER_TYPES,
             "run_statuses": RUN_STATUSES,
@@ -503,6 +509,65 @@ def _database_panel(request: Request) -> dict:
         "env_managed": database_is_env_managed(),
         "row_counts": service.store.row_counts(),
     }
+
+
+@router.get("/audit", response_class=HTMLResponse)
+def audit_page(
+    request: Request,
+    actor: str = Query("", max_length=200),
+    action: str = Query("", max_length=200),
+    target_type: str = Query("", max_length=200),
+    target_id: str = Query("", max_length=200),
+    since: str = Query("", max_length=100),
+    before_id: int | None = Query(None, ge=1),
+    limit: int = Query(50, ge=1, le=500),
+) -> HTMLResponse:
+    require_admin(request)
+    service = get_service(request)
+    error = None
+    try:
+        moment = parse_audit_since(since)
+    except ValueError as exc:
+        moment = None
+        error = str(exc)
+    events = (
+        []
+        if error
+        else service.store.list_audit_events(
+            actor=actor,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            since=moment,
+            before_id=before_id,
+            limit=limit,
+        )
+    )
+    filters = {
+        "actor": actor,
+        "action": action,
+        "target_type": target_type,
+        "target_id": target_id,
+        "since": since,
+        "limit": limit,
+    }
+    latest_url = "/audit?" + urlencode(filters)
+    older_url = latest_url + "&" + urlencode({"before_id": events[-1]["id"]}) if len(events) == limit else None
+    return _templates(request).TemplateResponse(
+        request,
+        "audit.html",
+        {
+            "project": service.project,
+            "scheduler": service.scheduler_snapshot(),
+            "page": "audit",
+            "events": events,
+            "filters": filters,
+            "latest_url": latest_url,
+            "older_url": older_url,
+            "error": error,
+        },
+        status_code=400 if error else 200,
+    )
 
 
 @router.get("/settings", response_class=HTMLResponse)

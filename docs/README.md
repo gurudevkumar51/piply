@@ -1,5 +1,9 @@
 # Piply Documentation
 
+These guides describe the v0.3.4 candidate. Start with the
+[release assessment](RELEASE_CHECK.md) for the go/no-go decision, tested
+environments, known limits, and publishing checklist.
+
 Start here. Every page below is self-contained; follow the links rather than
 reading in order.
 
@@ -42,9 +46,12 @@ apart.
 | [CLI Reference](CLI.md) | Every command and flag |
 | [UI Guide](UI_GUIDE.md) | Every page and the question it answers |
 | [API Reference](API.md) | Every HTTP route and the permission it needs |
+| [Runbook](RUNBOOK.md) | Operating procedures, incident checks, backup/restore, deployment checklist |
+| [Release Assessment](RELEASE_CHECK.md) | v0.3.4 blockers, test evidence, environment gaps, reproducible release gates |
 | [Metadata Store](DATABASE.md) | SQLite, PostgreSQL, backup, migration, the schema |
 | [Authentication](AUTHENTICATION.md) | Accounts, roles, per-pipeline permissions |
 | [Security](SECURITY.md) | Trust model and a deployment checklist |
+| [Audit History](AUDIT.md) | Actor attribution, action history, admin queries, retention and migration |
 | [Runtime Lifecycles](LIFECYCLES.md) | Scheduler, run, task, retry, recovery, retention |
 
 ---
@@ -71,6 +78,7 @@ piply diagnostics               # scheduler, worker, and sensor health
 | Page | Covers |
 | --- | --- |
 | [Changelog](../CHANGELOG.md) | What changed in each release |
+| [Backlog](BACKLOG.md) | Consolidated open work, priorities, acceptance criteria, likely code touch points |
 | [Roadmap](ROADMAP.md) | What is planned next |
 | [Future Features](FUTURE_FEATURES.md) | Proposed ideas, ranked by value vs cost — and what is deliberately *not* planned |
 | [Technical Architecture](architecture/technical_architecture.md) | Maintainer guide to the whole system |

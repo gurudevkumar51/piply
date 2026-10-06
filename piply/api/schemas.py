@@ -138,6 +138,7 @@ class RunResponse(BaseModel):
     tenant_id: str | None = None
     #: Account that asked for this run; None for scheduler and sensor runs.
     actor: str | None = None
+    paused: bool = False
 
     @classmethod
     def from_record(cls, record: RunRecord) -> RunResponse:
@@ -169,6 +170,7 @@ class RunResponse(BaseModel):
             parent_pipeline_id=record.parent_pipeline_id,
             tenant_id=record.tenant_id,
             actor=record.actor,
+            paused=record.paused,
         )
 
 

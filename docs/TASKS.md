@@ -1,5 +1,11 @@
 # Tasks
 
+In v0.3.4, pausing a run lets active tasks finish but prevents additional task
+starts. Timeouts keep counting wall-clock time. Cancelled/timed-out tasks can be
+included in a resume retry; arbitrary Python callables still cannot be forcibly
+stopped. Task-level automatic retries remain planned. See the
+[release assessment](RELEASE_CHECK.md).
+
 A task is one executable unit inside a pipeline. This page covers the six task
 types and the keys that control how a task runs, fails, and reports.
 

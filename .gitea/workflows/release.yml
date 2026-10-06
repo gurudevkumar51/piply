@@ -8,7 +8,53 @@ on:
 
 jobs:
 
+  compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Verify matrix environment
+        env:
+          EXPECTED_RUNNER: ${{ matrix.os }}
+          EXPECTED_PYTHON: ${{ matrix.python }}
+        run: python -I -c "import os,platform,sys; expected={'ubuntu-latest':'Linux','windows-latest':'Windows'}[os.environ['EXPECTED_RUNNER']]; assert platform.system()==expected, (platform.system(),expected); assert '.'.join(map(str,sys.version_info[:2]))==os.environ['EXPECTED_PYTHON']; print(platform.platform(),sys.version)"
+      - run: python -m pip install -e ".[test]"
+      - run: python -m pytest -q
+
+  postgres:
+    runs-on: ubuntu-latest
+    container: ghcr.io/catthehacker/ubuntu:act-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: piply
+          POSTGRES_PASSWORD: piply-ci-only
+          POSTGRES_DB: piply_test
+        options: >-
+          --health-cmd "pg_isready -U piply -d piply_test"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[test,postgres]"
+      - name: PostgreSQL parity
+        env:
+          PIPLY_TEST_POSTGRES_DSN: postgresql://piply:piply-ci-only@postgres:5432/piply_test
+          PIPLY_TEST_POSTGRES_RESET: "1"
+        run: python -m pytest -q tests/test_postgres_store.py
+
   build-and-publish:
+    needs: [compatibility, postgres]
     runs-on: ubuntu-latest
 
     permissions:
@@ -47,7 +93,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[dev,test,build]"
+          pip install -e ".[dev,test,build]" "ruff==0.15.4"
 
       # -------------------------
       # Lint
@@ -55,8 +101,8 @@ jobs:
 
       - name: Run lint
         run: |
-          ruff check .
-          ruff format --check .
+          ruff check piply tests tools
+          ruff format --check piply tests tools
 
       # -------------------------
       # Run tests
@@ -65,6 +111,9 @@ jobs:
       - name: Run tests
         run: |
           pytest
+
+      - name: Run admission release gate
+        run: python -m tools.check_run_admission
 
       # -------------------------
       # Clean old artifacts
@@ -93,6 +142,20 @@ jobs:
       - name: Validate package
         run: |
           twine check dist/*
+          python tools/check_release_artifacts.py dist
+
+      - name: Installed wheel smoke test
+        run: |
+          python -m venv .wheel-qa
+          .wheel-qa/bin/python -m pip install --upgrade pip
+          .wheel-qa/bin/python -m pip install dist/*.whl
+          .wheel-qa/bin/python -m pip check
+          .wheel-qa/bin/python -I tools/release_smoke.py
+
+      - name: Dependency vulnerability check
+        run: |
+          python -m pip install "pip-audit>=2.10,<3"
+          python -m pip_audit --path .wheel-qa/lib/python3.13/site-packages --progress-spinner off
 
       # -------------------------
       # Upload artifacts

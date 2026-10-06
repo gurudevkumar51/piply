@@ -122,6 +122,8 @@ def test_diagnostics_are_admin_only(restricted) -> None:
 def test_command_overrides_require_an_admin(restricted) -> None:
     """A `run` grant must not escalate into arbitrary command execution."""
     client, _service, _run, mallory, admin = restricted
+    # Both permitted requests test authorization, not single-slot admission.
+    _service.get_pipeline("other").max_concurrent_runs = 2
     override = {"command_overrides": {"main": "echo pwned-by-override"}}
 
     assert client.post("/api/pipelines/other/run", json=override, auth=mallory).status_code == 403

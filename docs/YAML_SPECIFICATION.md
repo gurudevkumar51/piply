@@ -1,5 +1,10 @@
 # Piply YAML Specification
 
+This reference describes the v0.3.4 candidate. Run pause/resume and audit history
+are runtime controls, not new YAML keys. `max_concurrent_runs` is enforced when
+reserving a new run. See the [release assessment](RELEASE_CHECK.md) for remaining
+PostgreSQL and supported-platform sign-off.
+
 This is the complete reference for `piply.yaml`. Every key is optional unless
 marked **required**. Validate any config with:
 
@@ -684,6 +689,12 @@ pipelines:
 | `execution: 8` | shorthand for `max_parallel_tasks: 8` |
 | `max_concurrent_runs` | how many runs of this pipeline may overlap |
 
+`max_concurrent_runs` defaults to 1 and includes queued/running records and
+paused runs. Direct starts, selected-task runs, retries, chains and single-run
+backfills reject excess launches (API 409, CLI exit 1); they do not wait for a
+slot. Automatic triggers remain queued, preserving their payload and dispatch
+order. The limit is per pipeline id across a shared store, not per tenant or task.
+
 Parallel execution is only used when the DAG actually branches; a purely linear
 pipeline runs sequentially regardless of the setting.
 
@@ -696,6 +707,10 @@ finishes the run as `timed_out`.
 ---
 
 ## 5. Schedules
+
+Cron defaults to UTC unless overridden by project, pipeline, or schedule
+timezone. It requires IANA timezone data: Windows installs include `tzdata`;
+minimal POSIX images must supply an OS database or install `tzdata` explicitly.
 
 ```yaml
 schedule: "0 6 * * *"            # cron shorthand
@@ -1242,7 +1257,7 @@ the config.
 | `PIPLY_QUEUE_DISPATCH_STALE_SECONDS` | `300` | requeue abandoned dispatches after |
 | `PIPLY_UPCOMING_RUN_PREVIEW_COUNT` | `8` | upcoming slots shown in the UI |
 | `PIPLY_PIPELINE_RUN_HISTORY_COUNT` | `5` | run-history dots per pipeline row, max 20 |
-| `PIPLY_RETENTION_RUN_DAYS` | `30` | `piply prune` run age limit |
+| `PIPLY_RETENTION_RUN_DAYS` | `30` | `piply prune` run and audit age limit |
 | `PIPLY_RETENTION_LOG_DAYS` | `14` | `piply prune` log age limit |
 | `PIPLY_RETENTION_MAX_RUNS_PER_PIPELINE` | `200` | `piply prune` per-pipeline cap |
 | `PIPLY_ARTIFACTS_DIR` | unset | extra allowed root for artifact downloads |

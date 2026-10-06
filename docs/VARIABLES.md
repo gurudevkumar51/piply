@@ -1,5 +1,10 @@
 # Variables
 
+v0.3.4 preserves interpolation and replay precedence. Audit summaries omit run
+parameters and variable/environment values, but execution snapshots still contain
+them for replay. Protect database backups and logs as sensitive data; see
+[Security](SECURITY.md) and the [release assessment](RELEASE_CHECK.md).
+
 How a value gets into a command, and which value wins when more than one is
 defined.
 

@@ -394,7 +394,13 @@ class TaskRunner:
         self.store.append_log(self.run_id, message, task_id=task_id)
         if self.on_log:
             prefix = f"[{task_id}] " if task_id else ""
-            self.on_log(f"{prefix}{message}")
+            # A caller echoing a captured line must not capture its own echo.
+            bindings = (getattr(_capture_bindings, "stdout", None), getattr(_capture_bindings, "stderr", None))
+            _capture_bindings.stdout = _capture_bindings.stderr = None
+            try:
+                self.on_log(f"{prefix}{message}")
+            finally:
+                _capture_bindings.stdout, _capture_bindings.stderr = bindings
 
     def for_context(self, context: RuntimeTaskContext) -> TaskRunner:
         """Return a runner sharing process/log wiring with a task-specific context."""

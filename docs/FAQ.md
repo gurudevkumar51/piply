@@ -1,5 +1,9 @@
 # FAQ
 
+For the v0.3.4 candidate, consult the [release assessment](RELEASE_CHECK.md) for
+verified environments and release blockers. Graph libraries are now bundled
+locally; blocked external fonts do not prevent pipeline lists or graphs.
+
 Questions that come up while building pipelines with Piply, with the answers
 verified against the current code rather than from memory.
 
@@ -97,7 +101,9 @@ Skipping trigger for 'Bronze_to_Silver': a run is already in progress
 The same reason appears on the parent run's downstream panel, so you can see it
 without reading the server log. Common reasons are *pipeline is paused*,
 *pipeline is disabled in the config*, and *a run is already in progress* —
-the last is `max_concurrent_runs: 1` doing its job.
+the last means a limit of one has been reached. For larger limits the queue
+reports `run concurrency limit reached (max_concurrent_runs: N)`. Direct
+launches use the same capacity but reject rather than queue when it is full.
 
 ### How do I stop it?
 
@@ -919,7 +925,11 @@ schedule:
 
 ### What timezone do schedules use?
 
-The server's local time. Timestamps are stored in UTC.
+Cron uses the schedule/pipeline timezone, then the project's default, then UTC.
+Interval slots and stored timestamps use UTC; browser views may format them
+locally. Windows installs include `tzdata`; minimal POSIX images need an IANA
+database or that package. An `Unknown timezone 'UTC'` error indicates missing
+timezone data, not an invalid UTC name.
 
 ### How do I chain pipelines?
 
@@ -970,7 +980,11 @@ are still backfilled, since nobody asked for those to be skipped.
 
 ### Can two runs of the same pipeline overlap?
 
-Not by default — `max_concurrent_runs` is 1. Raise it if overlap is safe.
+Only when `max_concurrent_runs` permits it. The default is one. Direct launches
+reject at capacity; automatic triggers keep waiting. A configured limit of two
+admits two overlapping runs, including task-only runs and retries. Queued and
+paused runs count. Timed-out/cancelled Python callables may still finish external
+work because their in-process threads cannot be forcibly stopped.
 
 ---
 
@@ -1441,9 +1455,11 @@ with `PIPLY_DEFAULT_MAX_PARALLEL_TASKS`.
 Runs of the *same* pipeline serialise by default. If several pipelines all
 trigger one shared downstream pipeline, they queue behind each other there.
 
-Options today: raise `max_concurrent_runs` if overlap is safe, stagger the
-schedules, or split the downstream stage into per-tenant deployments so the
-chains are independent. Concurrency pools — expressing "the warehouse takes 3
+Raise `max_concurrent_runs` only after checking shared-resource safety. A limit
+of two admits two overlapping runs; extra automatic triggers keep waiting.
+Direct starts reject at capacity, and paused runs still count. The limit is per
+pipeline id, so independently named deployments do not share it. Concurrency
+pools — expressing "the warehouse takes 3
 concurrent dbt runs" directly — are on the [roadmap](ROADMAP.md).
 
 ### Is there a task or log size limit?

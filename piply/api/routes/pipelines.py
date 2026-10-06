@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from piply.api.auth import get_service, require_admin, require_permission, visible_pipelines
 from piply.api.schemas import PipelineDetailResponse, PipelineResponse, RunResponse, TaskResponse, TriggerRunRequest
+from piply.core.store import RunConcurrencyLimitError
 
 router = APIRouter(prefix="/api/pipelines", tags=["pipelines"])
 
@@ -107,6 +108,8 @@ def trigger_pipeline(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunConcurrencyLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)
@@ -154,6 +157,8 @@ def trigger_pipeline_task(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunConcurrencyLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)
@@ -187,6 +192,8 @@ def chain_pipeline(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunConcurrencyLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RunResponse.from_record(run)

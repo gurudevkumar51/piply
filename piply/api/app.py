@@ -9,16 +9,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from piply.api.auth import auth_middleware, security_headers_middleware
+from piply.api.static import UIStaticFiles
 from piply.core.scheduler import PipelineScheduler
 from piply.core.service import PipelineService
 from piply.settings import PiplySettings, load_settings
 from piply.version import get_version
 
-from .routes import accounts, dashboard, execution, maintenance, observability, pipelines, runs, setup, ui
+from .routes import accounts, audit, dashboard, execution, maintenance, observability, pipelines, runs, setup, ui
 from .routes.setup import is_first_run
 
 
@@ -127,9 +127,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
     # also present on the 401 and login-redirect responses the auth middleware
     # returns without ever reaching a route.
     app.middleware("http")(security_headers_middleware)
-    app.mount("/static", StaticFiles(directory=str(_ui_directory() / "static")), name="static")
+    app.mount("/static", UIStaticFiles(directory=str(_ui_directory() / "static")), name="static")
     app.include_router(setup.router)
     app.include_router(accounts.router)
+    app.include_router(audit.router)
     app.include_router(ui.router)
     app.include_router(dashboard.router)
     app.include_router(execution.router)

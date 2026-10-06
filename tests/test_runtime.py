@@ -209,7 +209,11 @@ def test_auth_middleware_supports_basic_for_ui_and_bearer_for_api(
 
 def test_run_api_includes_upcoming_runs_and_pipeline_run_overrides(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    # Exercise request overrides and schedule previews without a live scheduler
+    # legitimately taking the only slot at a wall-clock interval boundary.
+    monkeypatch.setenv("PIPLY_SCHEDULER_ENABLED", "false")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 

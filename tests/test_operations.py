@@ -159,7 +159,8 @@ def test_user_actions_record_who_asked(tmp_path: Path, caplog) -> None:
         assert "Pipeline 'normal_child' resumed by root" in caplog.text
 
 
-def test_scheduler_runs_have_no_actor(service: PipelineService) -> None:
-    """Only user-triggered actions are attributed; nothing invents an actor."""
+def test_scheduler_runs_have_a_system_actor(service: PipelineService) -> None:
+    """Automatic runs name their system origin instead of a human account."""
     run = service.trigger_pipeline("normal_child", trigger="schedule", wait=True)
-    assert service.store.get_run(run.run_id).actor is None
+    assert service.store.get_run(run.run_id).actor == "system:scheduler"
+    assert service.store.list_audit_events(target_id=run.run_id)[0]["actor"] == "system:scheduler"

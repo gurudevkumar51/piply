@@ -1,5 +1,10 @@
 # Metadata Store
 
+The v0.3.4 schema includes persisted run pause state and independent audit
+history. Back up before upgrading; new columns/tables are created automatically.
+Backend verification and rollback prerequisites are listed in the
+[release assessment](RELEASE_CHECK.md).
+
 Piply keeps its own runtime state — runs, task runs, logs, artifacts, accounts,
 queue, sensors — in a metadata store. This is separate from any database your
 *pipelines* talk to.
@@ -205,7 +210,7 @@ piply migrate-db --to "postgresql://..."
 
 ## 4. Schema reference
 
-Twelve tables. All timestamps are ISO-8601 UTC strings, stored as text in both
+Fourteen tables. All timestamps are ISO-8601 UTC strings, stored as text in both
 backends so the two stores stay byte-comparable. Booleans are integers, `0` or
 `1`, for the same reason.
 
@@ -222,6 +227,7 @@ One row per pipeline execution.
 | `pipeline_id` | TEXT | The pipeline that ran. |
 | `pipeline_title` | TEXT | Title captured at run time, so history survives a rename. |
 | `status` | TEXT | `queued`, `running`, `success`, `failed`, `skipped`, `cancelled`, `interrupted`, `timed_out`. |
+| `paused` | INTEGER | Nonterminal run-level task-start gate; active tasks finish while further queued tasks wait. Separate from schedule pause. |
 | `trigger` | TEXT | `manual`, `schedule`, `pipeline`, `sensor`, `task`, `retry`. A backfill is recorded as `manual`, not as a seventh value. Quoted in SQL: it is a reserved word. |
 | `command` | TEXT | Representative command, for the run list. |
 | `primary_entry` | TEXT | Entry point shown in the UI. |
@@ -240,7 +246,24 @@ One row per pipeline execution.
 | `tenant_id` | TEXT | Optional tenant label passed at trigger time. |
 | `owner_pid` | INTEGER | PID that owns the run. Lets startup recovery tell a crashed run from one owned by a live process. |
 | `run_config` | TEXT | JSON snapshot of the resolved variables, environment, and settings. This is what makes a downstream run retryable without re-running its upstream. Contains credentials, so the API masks them on the way out. |
-| `actor` | TEXT | Account that asked for the run. Null for schedule and sensor runs, and for runs created before this column existed. |
+| `actor` | TEXT | Account, CLI, or system actor that asked for the run. Older runs can remain null. See [Audit History](AUDIT.md). |
+
+### `audit_events`
+
+Append-only action history, independent of runs and accounts so deletion does
+not erase who requested it.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | identity PK | Stable event cursor; preserved by migration. |
+| `actor` | TEXT | Account, `cli`, `anonymous`, or system origin. |
+| `action` | TEXT | Action name, such as `run.cancel` or `permission.grant`. |
+| `target_type`, `target_id` | TEXT | Identifier of the affected run, pipeline, account, or installation setting. |
+| `created_at` | TEXT | UTC event timestamp. |
+| `detail_json` | TEXT | JSON identifier/flag summary; no submitted values or credentials. |
+
+Age retention uses run-retention days. Backup/copy includes the table and
+realigns its identity sequence. See [Audit History](AUDIT.md).
 
 ### `task_runs`
 
@@ -328,6 +351,20 @@ One row per configured sensor.
 | `last_error` | TEXT | Most recent error, with credentials masked. |
 | `consecutive_failures` | INTEGER | Resets on success. Drives the `failing` status. |
 | `poll_count`, `event_count` | INTEGER | Lifetime counters. |
+
+### `notification_deliveries`
+
+One row per attempted run notification, including failures.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | identity PK | Delivery record id. |
+| `run_id` | TEXT nullable | Related run, when available. |
+| `pipeline_id` | TEXT | Source pipeline. |
+| `channel`, `destination` | TEXT | Delivery channel and configured destination name. |
+| `outcome` | TEXT | Delivery outcome. |
+| `detail` | TEXT nullable | Diagnostic summary. |
+| `created_at` | TEXT | UTC attempt timestamp. |
 
 ### `users`
 
@@ -592,6 +629,21 @@ message naming `pg_dump`, rather than silently producing an unusable file.
 ---
 
 ## 8. Operational notes
+
+Release parity has now passed on a dedicated native PostgreSQL 16.15 cluster
+with psycopg 3.3.6. Linux service-container CI is still required. The destructive
+test fixture requires both a disposable `PIPLY_TEST_POSTGRES_DSN` and
+`PIPLY_TEST_POSTGRES_RESET=1`; never target a production database.
+
+Run creation atomically checks and reserves `max_concurrent_runs` capacity in
+the same transaction as its task records. SQLite takes a write transaction
+before counting; PostgreSQL locks the pipeline's `pipeline_overrides` row using
+READ COMMITTED isolation. Creating that lock row does not clear schedule pause
+or its floor. Queued/running and paused runs count; terminal runs do not.
+All owners sharing a store must use the fixed version and the same pipeline
+limits. Lowering a limit does not cancel existing runs; it holds new admission
+until the active count falls below the new limit. No schema migration of active
+runs is required. A new pipeline/order index supports queue claim checks.
 
 - **Run one Piply instance per database, on either backend.** The scheduler
   assumes it owns the queue. Two instances against one database will both

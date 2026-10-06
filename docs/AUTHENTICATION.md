@@ -1,5 +1,10 @@
 # Authentication And Authorization
 
+In v0.3.4, password changes invalidate old cookies and audit reads require an
+administrator. Named account tokens and individual session revocation are still
+pending; the global bearer token remains administrator access. See
+[Audit History](AUDIT.md) and the [release assessment](RELEASE_CHECK.md).
+
 Piply ships with accounts, roles, and per-pipeline permissions. All of it is
 optional: an install with no accounts behaves exactly as it did before this
 existed — no login page, no restrictions.
@@ -359,10 +364,13 @@ choice on a server: an environment variable is readable through
 - **Sign-in is throttled.** Eight failures within five minutes lock that
   username out for five minutes. The counter is in memory and clears on
   restart.
-- **Changing a password does not end existing sessions.** They expire after 12
-  hours. *Disabling* an account takes effect immediately, because the user is
+- **Changing a password ends existing sessions immediately.** Cookies are bound
+  to the account's current password. New sign-ins expire after 12 hours.
+  *Disabling* an account takes effect immediately, because the user is
   re-read on every request. To force a global sign-out, rotate
   `PIPLY_SESSION_SECRET` and restart.
+- Upgrading to password-bound cookies signs out sessions issued by older
+  versions once. Sign in again to obtain a new cookie.
 
 For the wider picture — what is deliberately not protected, and the deployment
 checklist — see [Security](SECURITY.md).

@@ -1,5 +1,9 @@
 # HTTP API Reference
 
+This reference describes the v0.3.4 candidate. Run pause/resume and audit queries
+and shared admission limits are implemented. See the
+[release assessment](RELEASE_CHECK.md) before deploying this candidate.
+
 Every route Piply serves, with the permission each one requires.
 
 The UI is a client of this API — anything the UI does can be scripted. Routes
@@ -48,12 +52,19 @@ from before per-user permissions existed.
 | `403` | Authenticated, but the account lacks the required permission |
 | `404` | Unknown pipeline, run, or task |
 | `400` | Invalid payload — the body explains what |
+| `409` | New run would exceed `max_concurrent_runs`; no new run was created |
 | `413` / `415` | Sign-in body too large, or wrong content type |
 | `502` | An outbound call failed, e.g. the SMTP test |
 
 ---
 
 ## 2. Pipelines
+
+Manual, task-only, retry, chain, and single-run backfill requests use the same
+atomic run limit. A paused run still occupies its slot. A 409 response includes
+the active count and configured limit; retry the request after capacity opens.
+Direct requests are not converted into queue items. Existing scheduled-slot
+deduplication returns the original run rather than rejecting a duplicate.
 
 | Method | Path | Permission | Purpose |
 | --- | --- | --- | --- |
@@ -123,6 +134,8 @@ Runs inherit the permissions of the pipeline that produced them.
 | `DELETE` | `/api/runs/{run_id}` | `edit` | Delete a finished run |
 | `POST` | `/api/runs/{run_id}/retry` | `run` | Retry, `{"mode": "resume"\|"startover"}` |
 | `POST` | `/api/runs/{run_id}/cancel` | `run` | Cancel a queued or running run |
+| `POST` | `/api/runs/{run_id}/pause` | `run` | Hold new task starts; active tasks finish |
+| `POST` | `/api/runs/{run_id}/resume` | `run` | Continue pending tasks in the same run |
 | `POST` | `/api/runs/{run_id}/backfill` | `run` | Re-execute using the run's captured config |
 | `GET` | `/api/runs/{run_id}/logs` | `view` | Paginated logs, `?limit=&offset=` |
 | `GET` | `/api/runs/{run_id}/tasks/{task_id}` | `view` | One task run with logs and output |
@@ -133,6 +146,12 @@ Runs inherit the permissions of the pipeline that produced them.
 | `GET` | `/api/runs/{run_id}/artifacts/download` | `view` | Download one, `?path=` |
 
 `GET /api/runs` accepts `pipeline_id`, `status`, `tenant`, and `limit`.
+
+Run responses include `paused`, independently of `status`. A paused run remains
+`queued` or `running` for concurrency limits, heartbeats, cancellation, and
+recovery. Pause/resume reject finished runs with HTTP 400. Repeated requests for
+the same pause state are safe. The pipeline-level pause endpoints above hold
+schedules; these run-level endpoints hold task starts in an existing run.
 
 > **Credentials are masked in `/config`.** Values whose name looks like a secret
 > are returned as `***`, for every caller including admins. The stored snapshot
@@ -300,6 +319,20 @@ Repeated failed sign-ins lock a username out for five minutes. See
 
 ---
 
+## Audit history
+
+`GET /api/audit` is admin-only. It returns newest-first audit entries with
+`id`, `created_at`, `actor`, `action`, `target_type`, `target_id`, and `detail`.
+Filter by exact `actor`, `action`, `target_type`, or `target_id`; `since` accepts
+an ISO timestamp or a positive interval such as `7d`. `limit` is 1-500
+(default 50). For the next page pass the last event id as `before_id`.
+
+Audit entries cannot be edited or individually deleted through the API.
+Retention uses run-retention days and reports `audit_deleted` in prune
+responses. See [Audit History](AUDIT.md) for action names and actor attribution.
+
+---
+
 ## 7. Rendered pages
 
 Server-rendered HTML, same permissions as the APIs behind them. Listed for
@@ -313,6 +346,7 @@ completeness — there is no separate "UI API".
 | `/logs`, `/execution-matrix` | `view`, filtered |
 | `/settings` | `view` (any) |
 | `/diagnostics` | `admin` |
+| `/audit` | `admin` |
 
 See the [UI Guide](UI_GUIDE.md) for what each page answers.
 

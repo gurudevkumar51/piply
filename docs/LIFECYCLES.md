@@ -1,5 +1,10 @@
 # Piply Runtime Lifecycles
 
+v0.3.4 introduces a persisted task-start pause gate, not a new terminal run
+status. Audit events describe accepted actions, while run/task records describe
+execution outcomes. Admission limits still need hardening before release; see
+the [release assessment](RELEASE_CHECK.md).
+
 How work enters the system, how it executes, and what happens when something
 stops unexpectedly.
 
@@ -160,6 +165,24 @@ finish_run(status)
   +-- failure  -> apply the retry policy
   +-- timeout  -> mark unfinished tasks timed_out
 ```
+
+### Pausing task starts
+
+`set_run_paused()` persists a `paused` flag on an active run. The run remains
+`queued` or `running`; UI status labels show `paused` while the gate is closed.
+This keeps heartbeat, queued-dispatch blocking, timeout, and recovery behavior
+active. Run pause does not pause the pipeline schedule.
+
+Sequential execution waits before selecting another task. Parallel execution
+continues collecting active task results while holding new submissions. Each
+task also claims its queued row atomically only when the run's gate is open,
+so work submitted just before a pause cannot begin afterwards. Resume opens
+the same gate and continues the same run. Cancel, persisted cancellation from
+another process, and shutdown release the wait. A pause on the last active
+task does not prevent the run from finishing once all tasks are done.
+
+Pipeline timeout remains wall-clock time, including time spent paused. A server
+restart uses normal interrupted-run recovery; it does not revive a lost worker.
 
 ### Terminal statuses
 

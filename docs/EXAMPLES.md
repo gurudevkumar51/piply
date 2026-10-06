@@ -1,5 +1,10 @@
 # Piply Execution Examples
 
+The v0.3.4 controls need no new YAML keys. After starting a run, use
+`piply pause-run RUN_ID`, validate its intermediate results, then
+`piply resume-run RUN_ID`. Active tasks finish during the pause. Check the
+[release assessment](RELEASE_CHECK.md) before unattended deployment.
+
 Runnable patterns, each with the YAML and the commands that exercise it.
 
 ---

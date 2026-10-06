@@ -7,7 +7,7 @@ import os
 import sqlite3
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -39,6 +39,23 @@ def _from_iso(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.fromisoformat(value)
+
+
+class RunConcurrencyLimitError(ValueError):
+    """A new run would exceed its pipeline's active-run limit."""
+
+    def __init__(self, pipeline_id: str, limit: int, active: int) -> None:
+        self.pipeline_id = pipeline_id
+        self.limit = limit
+        self.active = active
+        super().__init__(
+            f"Pipeline '{pipeline_id}' has {active} active run(s); max_concurrent_runs is {limit}. "
+            "Wait for a run to finish or cancel it before starting another."
+        )
+
+
+class ScheduledRunExistsError(ValueError):
+    """A scheduled slot was already created by another launcher."""
 
 
 class RunStore:
@@ -199,6 +216,16 @@ class RunStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id {autoincrement_pk},
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    detail_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL,
@@ -253,6 +280,8 @@ class RunStore:
 
                 CREATE INDEX IF NOT EXISTS idx_runs_pipeline_id ON runs(pipeline_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+                CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_events(created_at);
+                CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor, id);
                 CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id, position);
                 CREATE INDEX IF NOT EXISTS idx_task_outputs_run_id ON task_outputs(run_id);
                 CREATE INDEX IF NOT EXISTS idx_task_artifacts_run_id ON task_artifacts(run_id, task_id);
@@ -261,6 +290,8 @@ class RunStore:
                 CREATE INDEX IF NOT EXISTS idx_logs_run_id ON logs(run_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_trigger_queue_status_available
                     ON trigger_queue(status, available_at, id);
+                CREATE INDEX IF NOT EXISTS idx_trigger_queue_pipeline_order
+                    ON trigger_queue(pipeline_id, status, available_at, id);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_unique_schedule_slot
                     ON runs(pipeline_id, scheduled_for)
                     WHERE scheduled_for IS NOT NULL;
@@ -311,6 +342,8 @@ class RunStore:
                 # Who asked for this run. NULL for runs that predate the column
                 # and for anything the scheduler started on its own.
                 connection.execute("ALTER TABLE runs ADD COLUMN actor TEXT")
+            if "paused" not in self._run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN paused INTEGER NOT NULL DEFAULT 0")
 
             if "priority" not in self._task_run_columns:
                 connection.execute("ALTER TABLE task_runs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
@@ -342,12 +375,26 @@ class RunStore:
         run_config: dict[str, object] | None = None,
         actor: str | None = None,
     ) -> RunRecord:
-        """Insert one new run and its queued task records.
+        """Atomically reserve capacity and insert a run with its queued tasks.
 
         ``actor`` is the account that asked for the run, or None when the
         scheduler or a sensor started it on its own.
         """
         with self._lock, self._connect() as connection:
+            self.dialect.lock_run_admission(connection, pipeline.pipeline_id)
+            if scheduled_for is not None:
+                existing = connection.execute(
+                    "SELECT id FROM runs WHERE pipeline_id = ? AND scheduled_for = ?",
+                    (pipeline.pipeline_id, _to_iso(scheduled_for)),
+                ).fetchone()
+                if existing is not None:
+                    raise ScheduledRunExistsError("A run already exists for this scheduled slot.")
+            active = connection.execute(
+                "SELECT COUNT(*) AS count FROM runs WHERE pipeline_id = ? AND status IN ('queued', 'running')",
+                (pipeline.pipeline_id,),
+            ).fetchone()["count"]
+            if active >= pipeline.max_concurrent_runs:
+                raise RunConcurrencyLimitError(pipeline.pipeline_id, pipeline.max_concurrent_runs, active)
             run_id = uuid.uuid4().hex[:12]
             created_at = datetime.now(timezone.utc)
             first_task = pipeline.first_task
@@ -462,11 +509,21 @@ class RunStore:
             )
             connection.commit()
 
-    def mark_task_running(self, run_id: str, task_id: str) -> None:
-        """Mark one task as actively executing."""
+    def set_run_paused(self, run_id: str, paused: bool) -> bool:
+        """Change the pause gate only while a run is active."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE runs SET paused = ? WHERE id = ? AND status IN ('queued', 'running')",
+                (int(paused), run_id),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+
+    def mark_task_running(self, run_id: str, task_id: str) -> bool:
+        """Claim a queued task atomically, respecting the persisted pause gate."""
         now = _to_iso(datetime.now(timezone.utc))
         with self._lock, self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE task_runs
                 SET status = ?, started_at = ?
@@ -475,7 +532,7 @@ class RunStore:
                   AND EXISTS (
                       SELECT 1
                       FROM runs
-                      WHERE id = ? AND status IN ('queued', 'running')
+                      WHERE id = ? AND status IN ('queued', 'running') AND paused = 0
                   )
                 """,
                 ("running", now, run_id, task_id, run_id),
@@ -485,6 +542,7 @@ class RunStore:
                 (now, run_id),
             )
             connection.commit()
+            return cursor.rowcount > 0
 
     def finish_task_run(
         self,
@@ -712,6 +770,79 @@ class RunStore:
                 ),
             )
             connection.commit()
+
+    def append_audit_event(
+        self,
+        *,
+        actor: str,
+        action: str,
+        target_type: str,
+        target_id: str,
+        detail: dict[str, object] | None = None,
+    ) -> None:
+        """Append an event independent of run/account deletion; never update it.
+
+        Callers supply only identifier/flag summaries, never request bodies,
+        settings values, commands, environment values, or exception text.
+        """
+        serialized = json.dumps(detail or {}, sort_keys=True)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO audit_events (actor, action, target_type, target_id, created_at, detail_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (actor, action, target_type, target_id, _to_iso(datetime.now(timezone.utc)), serialized),
+            )
+            connection.commit()
+
+    def list_audit_events(
+        self,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        since: datetime | None = None,
+        before_id: int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        """Return newest entries first with stable, bounded keyset pagination."""
+        conditions: list[str] = []
+        parameters: list[object] = []
+        for column, value in (
+            ("actor", actor),
+            ("action", action),
+            ("target_type", target_type),
+            ("target_id", target_id),
+        ):
+            if value:
+                conditions.append(f"{column} = ?")
+                parameters.append(value)
+        if since is not None:
+            conditions.append("created_at >= ?")
+            parameters.append(_to_iso(since))
+        if before_id is not None:
+            conditions.append("id < ?")
+            parameters.append(before_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        parameters.append(max(1, min(int(limit), 500)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM audit_events {where} ORDER BY id DESC LIMIT ?", tuple(parameters)
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "actor": row["actor"],
+                "action": row["action"],
+                "target_type": row["target_type"],
+                "target_id": row["target_id"],
+                "created_at": _from_iso(row["created_at"]),
+                "detail": json.loads(row["detail_json"]),
+            }
+            for row in rows
+        ]
 
     def record_notification_delivery(
         self,
@@ -1670,7 +1801,13 @@ class RunStore:
         retention rule so operators can prune by age, by count, or by both.
         """
         current = now or datetime.now(timezone.utc)
-        summary = {"runs_deleted": 0, "logs_deleted": 0, "artifacts_deleted": 0, "outputs_deleted": 0}
+        summary = {
+            "runs_deleted": 0,
+            "logs_deleted": 0,
+            "artifacts_deleted": 0,
+            "outputs_deleted": 0,
+            "audit_deleted": 0,
+        }
         expired_run_ids: set[str] = set()
 
         with self._connect() as connection:
@@ -1703,8 +1840,16 @@ class RunStore:
                     )
 
             log_cutoff = _to_iso(current - timedelta(days=log_retention_days)) if log_retention_days > 0 else None
+            audit_cutoff = _to_iso(current - timedelta(days=run_retention_days)) if run_retention_days > 0 else None
             if dry_run:
                 summary["runs_deleted"] = len(expired_run_ids)
+                if audit_cutoff is not None:
+                    summary["audit_deleted"] = int(
+                        connection.execute(
+                            "SELECT COUNT(*) AS count FROM audit_events WHERE created_at < ?", (audit_cutoff,)
+                        ).fetchone()["count"]
+                        or 0
+                    )
                 if log_cutoff is not None:
                     summary["logs_deleted"] = int(
                         connection.execute(
@@ -1738,6 +1883,11 @@ class RunStore:
             if log_cutoff is not None:
                 summary["logs_deleted"] += connection.execute(
                     "DELETE FROM logs WHERE created_at < ?", (log_cutoff,)
+                ).rowcount
+
+            if audit_cutoff is not None:
+                summary["audit_deleted"] = connection.execute(
+                    "DELETE FROM audit_events WHERE created_at < ?", (audit_cutoff,)
                 ).rowcount
 
             connection.execute(
@@ -1777,8 +1927,9 @@ class RunStore:
             target = target / f"piply-{stamp}.db"
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        with self._lock, self._connect() as source, sqlite3.connect(target) as destination_connection:
-            source.raw.backup(destination_connection)
+        with self._lock, self._connect() as source, closing(sqlite3.connect(target)) as destination_connection:
+            with destination_connection:
+                source.raw.backup(destination_connection)
         return target
 
     #: Every table the runtime owns, in an order that satisfies the foreign keys
@@ -1797,10 +1948,18 @@ class RunStore:
         "trigger_queue",
         "sensor_state",
         "notification_deliveries",
+        "audit_events",
     )
 
     #: Tables whose primary key is generated by the backend.
-    _IDENTITY_TABLES = ("task_runs", "logs", "task_artifacts", "trigger_queue", "notification_deliveries")
+    _IDENTITY_TABLES = (
+        "task_runs",
+        "logs",
+        "task_artifacts",
+        "trigger_queue",
+        "notification_deliveries",
+        "audit_events",
+    )
 
     def copy_into(self, target: RunStore, *, batch_size: int = 500) -> dict[str, int]:
         """Copy every table into another store, returning rows written per table.
@@ -1997,8 +2156,26 @@ class RunStore:
                     dispatched_at = ?,
                     error = NULL
                 WHERE id = ? AND status = 'queued'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM trigger_queue AS earlier
+                      WHERE earlier.pipeline_id = trigger_queue.pipeline_id
+                        AND earlier.status IN ('queued', 'dispatching')
+                        AND (earlier.available_at < trigger_queue.available_at
+                             OR (earlier.available_at = trigger_queue.available_at AND earlier.id < trigger_queue.id))
+                  )
                 """,
                 (_to_iso(datetime.now(timezone.utc)), queue_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def release_queue_claim(self, queue_id: int) -> bool:
+        """Return a capacity-blocked trigger to the queue without losing its payload."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE trigger_queue SET status = 'queued', dispatched_at = NULL "
+                "WHERE id = ? AND status = 'dispatching' AND dispatched_run_id IS NULL",
+                (queue_id,),
             )
             connection.commit()
         return cursor.rowcount > 0
@@ -2536,6 +2713,7 @@ class RunStore:
             parent_pipeline_id=row["parent_pipeline_id"] if "parent_pipeline_id" in row.keys() else None,
             tenant_id=row["tenant_id"] if "tenant_id" in row.keys() else None,
             actor=row["actor"] if "actor" in row.keys() else None,
+            paused=bool(row["paused"]) if "paused" in row.keys() else False,
         )
 
     def _row_to_task_run(self, row: sqlite3.Row) -> TaskRunRecord:

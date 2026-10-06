@@ -4,6 +4,10 @@ The maintainer-facing map of Piply: how YAML becomes runnable state, how the
 scheduler and engine cooperate, where state lives, how recovery works, and where
 to extend the system safely.
 
+Reviewed against the unreleased v0.3.4 candidate on 2026-10-06. See the
+[release assessment](../RELEASE_CHECK.md) for verified environments and
+remaining gates, and the [backlog](../BACKLOG.md) for known runtime gaps.
+
 For user-facing material see
 [YAML_SPECIFICATION.md](../YAML_SPECIFICATION.md),
 [LIFECYCLES.md](../LIFECYCLES.md),
@@ -50,10 +54,12 @@ Design constraints that shape everything else:
 
 - **No external infrastructure.** SQLite plus threads. No Redis, Celery, or
   broker.
-- **One coordination object.** CLI, API, and UI all go through
-  `PipelineService`, which is why they never drift apart.
-- **Persist before dispatch.** Triggers are written to the queue before they
-  execute, so a crash loses nothing.
+- **Shared coordination.** CLI, API, and UI use `PipelineService`; verify
+  launch-path parity rather than assuming it. Run creation reserves shared capacity.
+- **Persist before dispatch.** Automatic triggers use the durable queue;
+  direct starts create run/task records before dispatch without queueing.
+  Recovery records interrupted work; this is not exactly-once execution or
+  a guarantee that external task side effects survive a crash.
 - **Ownership is explicit.** Every run records the pid that owns it, which makes
   recovery decidable rather than heuristic.
 
@@ -65,20 +71,27 @@ Design constraints that shape everything else:
 piply/
 ├── api/
 │   ├── app.py                  FastAPI factory, lifespan, router order
-│   ├── auth.py                 Basic + Bearer middleware
+│   ├── auth.py                 session, Basic + Bearer middleware and guards
+│   ├── static.py               explicit static MIME types
 │   ├── schemas.py              Pydantic request/response models
 │   └── routes/
+│       ├── accounts.py         login, sessions, accounts, permissions
+│       ├── audit.py            admin-only audit listing
 │       ├── dashboard.py        /api/dashboard
 │       ├── execution.py        /api/execution-matrix, /api/logs, /api/metrics
 │       ├── maintenance.py      preview, artifacts, backfill, prune, run config
 │       ├── observability.py    /metrics, /api/diagnostics, /api/sensors
 │       ├── pipelines.py        /api/pipelines/*
 │       ├── runs.py             /api/runs/*
+│       ├── setup.py            first-run bootstrap
 │       └── ui.py               server-rendered pages
 ├── cli/main.py                 typer commands
 ├── core/
 │   ├── artifacts.py            artifact discovery + download path guard
+│   ├── audit.py                actor context and allowlisted summaries
+│   ├── auth.py                 account, password, session helpers
 │   ├── context.py              RuntimeTaskContext
+│   ├── dialects.py             SQLite/PostgreSQL connections and SQL translation
 │   ├── graph.py                topological order, upstream/downstream closure
 │   ├── loader.py               YAML -> ProjectDefinition
 │   ├── models.py               dataclasses shared by every layer
@@ -92,7 +105,7 @@ piply/
 │   ├── sensors.py              file / sql / api sensors
 │   ├── service.py              PipelineService
 │   ├── sql_adapters.py         SQL sensor connections
-│   └── store.py                RunStore (SQLite)
+│   └── store.py                RunStore (SQLite / optional PostgreSQL)
 ├── engine/
 │   ├── base.py                 BaseEngine interface
 │   ├── heartbeat.py            RunHeartbeat
@@ -102,12 +115,14 @@ piply/
 ├── settings.py                 environment-driven settings
 └── ui/
     ├── static/{app.js,dag.js,styles.css}
+    ├── static/vendor/          graph layout libraries and licenses
     └── templates/*.html
 ```
 
-Import direction is strictly one-way: `api` and `cli` depend on `core`; `core`
-depends on `engine` only through the `BaseEngine` interface; `engine` depends on
-`core.models` and `core.store`. Nothing in `core` imports `api`.
+`api` and `cli` depend on `core`. The service imports `BaseEngine` and the
+default `LocalEngine`; engines depend on core models, context, and persistence.
+These are cooperating layers, not a strictly one-way dependency graph. Keep
+HTTP-specific behavior out of the runtime service and core helpers.
 
 ---
 
@@ -118,6 +133,7 @@ depends on `engine` only through the `BaseEngine` interface; `engine` depends on
 ```text
 piply.yaml
   ├─ load_settings()            .env + environment
+  ├─ merge includes             duplicate detection and file-local defaults
   ├─ load_secret_values()       secret backend -> ${secret:NAME}
   ├─ _parse_variables()         ordered, later values may use earlier ones
   ├─ _normalize_pipeline_definitions()
@@ -159,8 +175,8 @@ diagnostics, and every read model the UI uses.
 
 Notable behaviours:
 
-- **Config reload.** `reload_project()` compares the config file mtime, so an
-  edit is picked up on the next scheduler tick without a restart.
+- **Config reload.** `reload_project()` fingerprints the root and included
+  sources; edits are picked up on the next scheduler tick without a restart.
 - **Engine compatibility.** `_detect_engine_initial_context_support()` inspects
   the engine's `dispatch` signature so a custom engine written before
   `initial_context` existed still works.
@@ -235,6 +251,16 @@ pipelines behaving exactly as they did before priority existed.
 The parallel path also tracks `available_slots` so `max_parallel_tasks` is
 respected across scheduling rounds rather than only within one.
 
+Run-level pause is a persisted flag, not a terminal status. Task admission
+checks that flag atomically with a queued-to-running transition. Already
+running tasks finish; new tasks wait until resume. Cancellation, heartbeats,
+recovery, and wall-clock pipeline deadlines still apply. This task-start
+gate is separate from run creation's cross-run capacity reservation.
+
+Python callable stdout/stderr are routed per thread while tasks overlap.
+Log callbacks temporarily bypass task capture so CLI echoes cannot recursively
+capture their own output; bindings are restored even if the callback raises.
+
 ### Timeouts
 
 *Task level* — `TaskRunner._run_subprocess` reads the child's output on a reader
@@ -282,6 +308,8 @@ directory, or `PIPLY_ARTIFACTS_DIR`.
 `queued`, `running`, `success`, `failed`, `skipped`, `cancelled`, `interrupted`,
 `timed_out`. Runs use the same set minus `skipped` in practice.
 
+`runs.paused` records a nonterminal pause separately from status.
+
 ### Heartbeats
 
 `RunHeartbeat` touches `runs.heartbeat_at` every
@@ -308,13 +336,15 @@ remains openable, which would report a dead child as alive.
 
 ## 8. Database Architecture
 
-SQLite in WAL mode. Schema is created idempotently and migrated forward with
-`ALTER TABLE` guarded by `PRAGMA table_info`, so an old database upgrades in
-place and a database from a newer version still opens.
+SQLite in WAL mode by default, or PostgreSQL through the optional `postgres`
+extra. Dialect adapters own connections, schema inspection, identity columns,
+and placeholder translation. Schema creation and additive migrations are
+idempotent. Back up before upgrading; there is no automatic downgrade migration
+or blanket guarantee that older code can read a future schema.
 
 | Table | Holds |
 | --- | --- |
-| `runs` | lifecycle, trigger, retry lineage, parent run, tenant, `owner_pid`, `run_config` |
+| `runs` | lifecycle, pause flag, trigger, retry lineage, parent run, tenant, actor, `owner_pid`, `run_config` |
 | `task_runs` | per-task state, position, `priority`, `timeout_seconds`, `run_if` |
 | `logs` | raw output, optionally attributed to a task |
 | `task_outputs` | JSON output plus bounded preview metadata |
@@ -322,7 +352,10 @@ place and a database from a newer version still opens.
 | `trigger_queue` | durable pending triggers with a dedupe key |
 | `sensor_state` | per-sensor cursor or snapshot |
 | `sensor_health` | poll counts, last success, last error |
-| `pipeline_overrides` | pause state |
+| `pipeline_overrides` | schedule pause state and resume floor |
+| `users`, `user_permissions` | password hashes, roles, and per-pipeline grants |
+| `notification_deliveries` | delivery outcomes and bounded detail |
+| `audit_events` | actor, action, target, timestamp, allowlisted summary |
 | `meta` | scheduler and runtime key/value state |
 
 Indexes exist for the hot paths: runs by pipeline and by creation, task runs by
@@ -335,10 +368,23 @@ availability. Two unique indexes carry real semantics:
 
 ### Concurrency
 
-A single `threading.Lock` serialises writes; reads open their own short-lived
-connection. Writes are small and batched into explicit transactions. This is
-adequate for the single-node scope Piply targets and is the main thing to
-revisit before supporting multiple worker processes.
+A per-`RunStore` lock serializes writes through that store instance; reads use
+short-lived connections. Context-managed connections close after their
+transactions. Run admission additionally uses a database transaction: SQLite
+`BEGIN IMMEDIATE`, or a PostgreSQL pipeline-row lock with explicit READ COMMITTED
+isolation before count/insert. Queued/running records reserve capacity, including
+paused runs. The lock is released before dispatch; rejected inserts roll back.
+All owners must use this admission contract and agree on pipeline configuration.
+Queue claims prevent overtaking earlier queued/dispatching triggers; a capacity
+race returns a claimed trigger to queued state. This is not a general worker
+claiming or distributed task execution protocol.
+
+The visibility after lock waits follows [PostgreSQL transaction isolation](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED);
+SQLite's write serialization follows [SQLite transactions](https://www.sqlite.org/lang_transaction.html).
+
+Audit history is independent of run/account deletion and participates in
+backup, migration, and run-age retention. Mutation and audit append use
+separate transactions (P1.4); the table is not an immutable compliance ledger.
 
 ### Query design
 
@@ -363,13 +409,17 @@ by their `{pipeline_id}` / `{run_id}` wildcards.
 | --- | --- |
 | Dashboard | `GET /api/dashboard`, `GET /api/dashboard/scheduler` |
 | Pipelines | list, detail, run, task run, chain, pause, resume, delete |
-| Runs | list, detail, logs, task detail, task output, retry, cancel, delete |
+| Runs | list, detail, logs, task detail, task output, retry, cancel, pause, resume, delete |
 | Execution | `GET /api/execution-matrix`, `GET /api/logs`, `GET /api/metrics` |
 | Operations | preview, artifacts, artifact download, backfill, prune, run config, `GET /api/logs/stream` |
 | Observability | `GET /metrics`, `GET /api/diagnostics`, `GET /api/sensors` |
+| Audit | admin-only `GET /api/audit` and `/audit` |
 
-Auth is a middleware. UI paths require Basic; `/api/*` accepts Basic or Bearer;
-`/metrics` accepts Bearer as well, so a scraper does not need UI credentials.
+Auth middleware accepts signed UI sessions and Basic credentials. API callers
+may also use the legacy global Bearer token, which has admin authority. Route
+guards enforce roles and per-pipeline permissions. Password changes invalidate
+candidate session cookies; old cookies require a fresh sign-in after upgrade.
+`/metrics` accepts Bearer auth so a scraper need not use UI credentials.
 
 `/metrics` is rendered by hand into the Prometheus text exposition format —
 adding `prometheus_client` would be the project's only runtime dependency purely
@@ -394,6 +444,13 @@ the API on a poll, so the first paint needs no round trip while live pages stay
 current. Pages that show finished state do not poll at all.
 
 All interpolated strings pass through `escapeHtml`.
+
+The independent ES5 error reporter escapes messages and source locations even
+before the body exists. `api/static.py` sets explicit JavaScript/CSS types
+without trusting Windows registry or host MIME mappings. DAG layout libraries
+are local licensed assets, not CDN scripts. Optional Google fonts have system
+fallbacks and do not gate page rendering. The Runs page's upcoming schedule
+section previews the next 15 minutes; those rows are not persisted executions.
 
 ---
 
@@ -491,14 +548,32 @@ function, and comments reserved for explaining *why* rather than *what*.
 | `test_features.py` | priority, timeouts, `run_if`, artifacts, preview, backfill, prune, metrics |
 | `test_recovery.py` | Ctrl+C, scheduler restart, crash, process kill |
 | `test_ui.py` | page rendering, grouping, downstream links, deployments |
+| `test_run_controls.py` | pause admission, deadlines, cancellation, upcoming slots |
+| `test_run_admission.py` | limits, multi-instance/process/dispatcher races, slot idempotency, rollback, API/CLI conflicts |
+| `test_audit.py` | event coverage, attribution, authorization, filters, retention |
+| `test_static_files.py`, `test_release.py` | MIME portability, local assets, escaped error reporting, packaging, backup closure, CLI logging |
+| `test_postgres_store.py` | real PostgreSQL parity when a test DSN is supplied |
 
-Tests use real subprocesses and a real SQLite file — no mocking of the runtime.
+Many tests use real subprocesses and SQLite files; others use controlled
+engines, local HTTP servers, or mocks for external integrations.
 `test_recovery.py` launches and kills an actual child process to prove that
 recovery works against genuine process death rather than a simulation.
 
 Guidelines: one behaviour per test, assert on observable state (statuses, logs,
 API payloads) rather than internals, and give each test its own `tmp_path`
 database.
+
+Release tooling also checks archive contents and an installed wheel in an
+isolated environment. `tools/check_run_admission.py` now passes locally and
+remains a contract gate. Native PostgreSQL 16 parity and Windows Python 3.10-3.14
+now pass locally. Configured Python/OS and PostgreSQL CI jobs must
+actually pass; skipped database tests are not parity verification.
+
+PostgreSQL schema resets additionally require `PIPLY_TEST_POSTGRES_RESET=1`.
+Review `codex/` branch pushes run validation only; staging pushes publish after
+their gates. CI asserts the actual OS/interpreter so labels cannot substitute
+for compatibility evidence. PostgreSQL jobs use an Ubuntu Actions image with
+Node support and setup-python-compatible platform builds.
 
 ---
 
@@ -541,8 +616,9 @@ process owned, so a restart never leaves orphaned RUNNING rows.
 
 - **Run a single instance per database.** Ownership is per process and SQLite
   writes are serialised in-process; two servers on one file is out of scope.
-- **Back up the database file**, or the whole `.piply` directory to include the
-  WAL.
+- **Use `piply backup` for live SQLite backups.** Do not copy only the database
+  file while WAL writes are active. Restore only with the server stopped;
+  PostgreSQL uses its native backup/restore tools.
 - **Schedule retention** — `piply prune` from cron, or call
   `POST /api/maintenance/prune`.
 - **Monitor** `/metrics`; alert on `piply_scheduler_up == 0`,

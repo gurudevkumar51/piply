@@ -7,7 +7,7 @@
 {%- endmacro %}
 
 {% block content %}
-<div class="page-grid">
+<div class="page-grid runs-page-grid">
     <section class="compact-header">
         <div>
             <div class="eyebrow">Run history</div>
@@ -22,6 +22,30 @@
         <div class="run-stats-row">
             <span class="meta-pill">scheduler {% if scheduler.running %}live{% else %}{{ scheduler.state }}{% endif %}</span>
         </div>
+    </section>
+
+    <section class="panel tight-panel" id="upcoming-pipelines">
+        <div class="panel-header">
+            <h2 class="panel-title">Scheduled in the next 15 minutes</h2>
+        </div>
+        {% if upcoming_pipelines %}
+        <div class="table-wrap">
+            <table class="data-table">
+                <thead><tr><th>Pipeline</th><th>Scheduled for</th><th>Status</th></tr></thead>
+                <tbody>
+                    {% for item in upcoming_pipelines %}
+                    <tr>
+                        <td><a href="/pipelines/{{ item.pipeline_id }}">{{ item.pipeline_title }}</a></td>
+                        <td><time datetime="{{ item.scheduled_for.isoformat() }}">{{ item.scheduled_for.astimezone().strftime('%Y-%m-%d %H:%M') }}</time> <span class="muted">{{ item.label }}</span></td>
+                        <td><span class="status-badge {{ item.state }}">{{ item.state }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">No scheduled pipelines in the next 15 minutes.</div>
+        {% endif %}
     </section>
 
     <section class="panel tight-panel">
@@ -111,10 +135,10 @@
                         <td><a class="mono" href="/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
                         <td><a href="/pipelines/{{ run.pipeline_id }}">{{ run.pipeline_title }}</a></td>
                         <td>
-                            <button class="status-badge {{ run.status }} status-button"
+                            <button class="status-badge {{ 'paused' if run.paused and run.status in ['queued', 'running'] else run.status }} status-button"
                                     type="button"
                                     title="Show this run's logs"
-                                    onclick="openRunLogs('{{ run.run_id }}', '{{ run.status }}', '{{ run.pipeline_title|e }}')">{{ run.status }}</button>
+                                    onclick="openRunLogs('{{ run.run_id }}', '{{ run.status }}', '{{ run.pipeline_title|e }}')">{{ 'paused' if run.paused and run.status in ['queued', 'running'] else run.status }}</button>
                         </td>
                         <td>
                             <div class="lineage-cell">
@@ -143,6 +167,7 @@
                             <div class="table-actions">
                                 <a class="button ghost tiny-button" href="/runs/{{ run.run_id }}">Open</a>
                                 {% if run.status in ['queued', 'running'] %}
+                                <button class="button secondary tiny-button run-pause-control" type="button" title="{{ 'Resume run' if run.paused else 'Pause run' }}" aria-label="{{ 'Resume run' if run.paused else 'Pause run' }}" onclick="setRunPaused('{{ run.run_id }}', {{ 'false' if run.paused else 'true' }}, this)">{{ '&#9654;'|safe if run.paused else '&#10074;&#10074;'|safe }}</button>
                                 <button class="button warn tiny-button" onclick="cancelRun('{{ run.run_id }}')">Cancel</button>
                                 {% else %}
                                 <button class="button secondary tiny-button"
@@ -212,6 +237,11 @@ async function refreshRunsList() {
         if (!response.ok) return;
         const parsed = new DOMParser().parseFromString(await response.text(), "text/html");
         const fresh = parsed.getElementById("runs-listing");
+        const upcoming = document.getElementById("upcoming-pipelines");
+        const freshUpcoming = parsed.getElementById("upcoming-pipelines");
+        if (upcoming && freshUpcoming && upcoming.innerHTML !== freshUpcoming.innerHTML && !runsRefreshBlocked()) {
+            upcoming.innerHTML = freshUpcoming.innerHTML;
+        }
         // Compare before writing: an unchanged table would otherwise drop any
         // text selection and flicker every ten seconds for no reason.
         if (!fresh || fresh.innerHTML === listing.innerHTML) return;

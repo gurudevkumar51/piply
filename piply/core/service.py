@@ -22,6 +22,7 @@ from piply.engine.base import BaseEngine
 from piply.engine.local_engine import LocalEngine
 from piply.settings import PiplySettings, load_settings, read_secret
 
+from .audit import AUDIT_ACTOR, current_actor, trigger_actor
 from .auth import (
     ALL_PIPELINES,
     ROLES,
@@ -52,7 +53,7 @@ from .preview import PipelinePreview, build_pipeline_preview, unresolved_placeho
 from .processes import is_process_alive
 from .retry import build_retry_plan
 from .sensors import poll_api_sensor, poll_file_sensor, poll_sql_sensor, sensor_run_variables
-from .store import RunStore
+from .store import RunConcurrencyLimitError, RunStore, ScheduledRunExistsError
 
 _RUNTIME_VARIABLE_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # Task fields whose YAML form is a list but whose runtime form is a tuple.
@@ -168,6 +169,44 @@ class PipelineService:
             return False
         return "initial_context" in signature.parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        )
+
+    def record_audit(
+        self,
+        action: str,
+        target_type: str,
+        target_id: str,
+        *,
+        detail: dict[str, object] | None = None,
+        actor: str | None = None,
+    ) -> None:
+        """Record a safe action summary, not the values submitted by a caller."""
+        self.store.append_audit_event(
+            actor=current_actor(actor),
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail,
+        )
+
+    def _audit_run_created(self, run: RunRecord) -> None:
+        self.record_audit(
+            "run.retry" if run.retry_of else "run.create",
+            "run",
+            run.run_id,
+            actor=run.actor,
+            detail={
+                key: value
+                for key, value in {
+                    "pipeline_id": run.pipeline_id,
+                    "trigger": run.trigger,
+                    "retry_of": run.retry_of,
+                    "retry_mode": run.retry_mode,
+                    "task_id": run.retry_task_id,
+                    "parent_run_id": run.parent_run_id,
+                }.items()
+                if value is not None
+            },
         )
 
     def _should_wait_for_pipeline_triggers(self) -> bool:
@@ -438,6 +477,37 @@ class PipelineService:
             cursor = next_run_at + timedelta(seconds=1)
         return upcoming
 
+    def list_upcoming_pipelines(
+        self,
+        *,
+        minutes: int = 15,
+        now: datetime | None = None,
+        pipeline_ids: set[str] | None = None,
+    ) -> list[dict[str, object]]:
+        """List next schedule slots in the window, including held schedules."""
+        current = now or datetime.now(timezone.utc)
+        cutoff = current + timedelta(minutes=minutes)
+        upcoming: list[dict[str, object]] = []
+        for pipeline in self.project.pipelines.values():
+            if pipeline_ids is not None and pipeline.pipeline_id not in pipeline_ids:
+                continue
+            if pipeline.schedule is None:
+                continue
+            slot = pipeline.schedule.next_after(current)
+            if slot is None or not current < slot <= cutoff:
+                continue
+            paused = self.store.is_pipeline_paused(pipeline.pipeline_id)
+            upcoming.append(
+                {
+                    "pipeline_id": pipeline.pipeline_id,
+                    "pipeline_title": pipeline.title,
+                    "scheduled_for": slot,
+                    "label": self._format_next_run_label(slot, now=current),
+                    "state": "disabled" if not pipeline.enabled else "paused" if paused else "scheduled",
+                }
+            )
+        return sorted(upcoming, key=lambda item: (item["scheduled_for"], item["pipeline_id"]))
+
     def _iter_due_schedule_slots(
         self,
         pipeline: PipelineDefinition,
@@ -637,8 +707,8 @@ class PipelineService:
                 skip_reason = "pipeline is disabled in the config"
             elif self.store.is_pipeline_paused(item.pipeline_id):
                 skip_reason = "pipeline is paused"
-            elif self.store.count_running_runs(item.pipeline_id) > 0:
-                skip_reason = "a run is already in progress"
+            elif self.store.count_running_runs(item.pipeline_id) >= pipeline.max_concurrent_runs:
+                skip_reason = self._run_limit_reason(pipeline)
 
             if skip_reason is not None:
                 self._note_trigger_skipped(item, skip_reason)
@@ -664,6 +734,7 @@ class PipelineService:
                         mode=mode,  # type: ignore[arg-type]
                         task_id=task_id,
                         wait=False,
+                        actor=trigger_actor(item.trigger),
                     )
                 elif item.trigger == "sensor" and isinstance(payload.get("task_id"), str):
                     run = self.trigger_task(
@@ -671,6 +742,7 @@ class PipelineService:
                         str(payload["task_id"]),
                         trigger="sensor",
                         wait=False,
+                        actor=trigger_actor(item.trigger),
                     )
                 else:
                     parent_run_id = (
@@ -723,6 +795,7 @@ class PipelineService:
                         initial_context=initial_context,
                         inherited_variables=inherited_variables,
                         inherited_env=inherited_env,
+                        actor=trigger_actor(item.trigger),
                     )
                 self.store.mark_queue_dispatched(item.queue_id, run.run_id)
                 dispatched_run_ids.append(run.run_id)
@@ -764,11 +837,23 @@ class PipelineService:
                         run.run_id,
                         f"Triggered from upstream run {payload['source_run_id']}.",
                     )
+            except RunConcurrencyLimitError:
+                # A direct launch can take the last slot after the queue precheck.
+                self.store.release_queue_claim(item.queue_id)
+                self._note_trigger_skipped(item, self._run_limit_reason(pipeline))
+                blocked_pipelines.add(item.pipeline_id)
             except Exception as exc:  # pragma: no cover - defensive path
                 self.store.mark_queue_failed(item.queue_id, str(exc))
-            blocked_pipelines.add(item.pipeline_id)
+                blocked_pipelines.add(item.pipeline_id)
 
         return dispatched_run_ids
+
+    @staticmethod
+    def _run_limit_reason(pipeline: PipelineDefinition) -> str:
+        """Describe a held trigger using the configured overlap limit."""
+        if pipeline.max_concurrent_runs == 1:
+            return "a run is already in progress"
+        return f"run concurrency limit reached (max_concurrent_runs: {pipeline.max_concurrent_runs})"
 
     def list_runs(
         self,
@@ -1205,6 +1290,13 @@ class PipelineService:
         self._dispatch_context.wait_for_pipeline_triggers = previous_wait or wait
         try:
             self.engine.dispatch(pipeline, run, self.store, **kwargs)
+        except Exception as exc:
+            self.store.interrupt_run(
+                run.run_id,
+                reason=f"Engine dispatch failed: {exc}",
+                queued_reason="Task did not start because engine dispatch failed.",
+            )
+            raise
         finally:
             self._dispatch_context.wait_for_pipeline_triggers = previous_wait
 
@@ -1236,6 +1328,7 @@ class PipelineService:
         """
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
+        actor = actor or AUDIT_ACTOR.get() or trigger_actor(trigger)
         pipeline = self._clone_pipeline_with_command_overrides(
             self._clone_pipeline_with_inherited_variables(
                 self.get_pipeline(pipeline_id),
@@ -1274,6 +1367,7 @@ class PipelineService:
                 ),
                 actor=actor,
             )
+            self._audit_run_created(run)
             if actor:
                 _LOGGER.info("Pipeline '%s' run %s by %s", pipeline.pipeline_id, trigger, actor)
             dispatch_context = dict(initial_context or {})
@@ -1292,7 +1386,7 @@ class PipelineService:
                 retry_source_run_id=retry_of,
                 initial_context=dispatch_context,
             )
-        except sqlite3.IntegrityError:
+        except (ScheduledRunExistsError, sqlite3.IntegrityError):
             if scheduled_for is not None:
                 existing = self.store.get_run_for_slot(pipeline_id, scheduled_for)
                 if existing is not None:
@@ -1325,6 +1419,7 @@ class PipelineService:
         self._ensure_accepting_new_work()
         self.reconcile_runtime_health()
         replay = self._replay_arguments(source_run_id) if source_run_id else {}
+        actor = actor or AUDIT_ACTOR.get() or trigger_actor(trigger)
         # Explicit values win over a replay: the caller just typed them in.
         merged_variables = dict(replay.get("inherited_variables") or {})
         merged_variables.update(inherited_variables or {})
@@ -1366,6 +1461,7 @@ class PipelineService:
             ),
             actor=actor,
         )
+        self._audit_run_created(run)
         if actor:
             _LOGGER.info("Pipeline '%s' task '%s' run by %s", pipeline_id, task_id, actor)
         if tenant_id is not None:
@@ -1389,6 +1485,7 @@ class PipelineService:
         task_id: str | None = None,
         wait: bool = False,
         on_log: Callable[[str], None] | None = None,
+        actor: str | None = None,
     ) -> RunRecord:
         """Create a retry run in startover or resume mode."""
         self._ensure_accepting_new_work()
@@ -1439,7 +1536,9 @@ class PipelineService:
                 parent_pipeline_id=previous_run.parent_pipeline_id,
                 task_id=task_id,
             ),
+            actor=current_actor(actor),
         )
+        self._audit_run_created(retry_run)
 
         if mode == "resume":
             self.store.append_log(
@@ -1564,6 +1663,12 @@ class PipelineService:
                 dedupe_key=f"schedule:{pipeline_id}:{slot_iso}",
             ):
                 queued.append(slot)
+        self.record_audit(
+            "schedule.backfill",
+            "pipeline",
+            pipeline_id,
+            detail={"start": start.isoformat(), "end": end.isoformat(), "slots_queued": len(queued)},
+        )
         return queued
 
     def notify_run_outcome(self, pipeline: PipelineDefinition, run: RunRecord) -> None:
@@ -1861,9 +1966,32 @@ class PipelineService:
             "paused" if paused else "resumed",
             actor or "an unauthenticated caller",
         )
+        self.record_audit("pipeline.pause" if paused else "pipeline.resume", "pipeline", pipeline_id, actor=actor)
         if not paused:
             self.drain_trigger_queue(limit=20)
         return self.get_pipeline_summary(pipeline_id)
+
+    def set_run_paused(self, run_id: str, paused: bool) -> RunRecord:
+        """Hold new task starts without interrupting tasks already running."""
+        run = self.store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"Unknown run '{run_id}'")
+        if not self.store.set_run_paused(run_id, paused):
+            raise ValueError("Only queued or running runs can be paused or resumed.")
+        if run.paused != paused:
+            self.store.append_log(
+                run_id,
+                "Run paused; active tasks will finish, remaining tasks will wait."
+                if paused
+                else "Run resumed; remaining tasks may start.",
+            )
+            self.record_audit(
+                "run.pause" if paused else "run.resume",
+                "run",
+                run_id,
+                detail={"pipeline_id": run.pipeline_id},
+            )
+        return self.store.get_run(run_id) or run
 
     def cancel_run(self, run_id: str) -> RunRecord:
         """Request cancellation for one queued or running run."""
@@ -1879,6 +2007,7 @@ class PipelineService:
         cancelled = self.engine.cancel(run_id)
         if run.status == "queued" or not cancelled:
             self.store.cancel_run(run_id)
+        self.record_audit("run.cancel", "run", run_id, detail={"pipeline_id": run.pipeline_id})
         return self.store.get_run(run_id) or run
 
     def _warn_about_uninterruptible_tasks(self, run: RunRecord) -> None:
@@ -1924,6 +2053,7 @@ class PipelineService:
         if run.status in {"queued", "running"}:
             raise ValueError("Cancel the run before deleting it.")
         self.store.delete_run(run_id)
+        self.record_audit("run.delete", "run", run_id, detail={"pipeline_id": run.pipeline_id})
 
     def delete_pipeline(self, pipeline_id: str) -> None:
         """Delete one pipeline from the config and remove its stored history."""
@@ -1950,6 +2080,7 @@ class PipelineService:
         )
         self.store.delete_pipeline_runs(pipeline_id)
         self.reload_project(force=True)
+        self.record_audit("pipeline.delete", "pipeline", pipeline_id)
 
     def runtime_metrics(self) -> dict[str, object]:
         """Return queue and local worker metrics for API/UI surfaces."""
@@ -2159,6 +2290,18 @@ class PipelineService:
             vacuum=vacuum and not dry_run,
             dry_run=dry_run,
         )
+        if not dry_run:
+            self.record_audit(
+                "history.prune",
+                "installation",
+                "history",
+                detail={
+                    **summary,
+                    "run_retention_days": run_days,
+                    "log_retention_days": log_days,
+                    "max_runs_per_pipeline": max_runs,
+                },
+            )
         return {
             **summary,
             "dry_run": dry_run,
@@ -2281,6 +2424,15 @@ class PipelineService:
             except Exception:  # noqa: BLE001 - recording must not mask the result
                 pass
         failures = [f"{name}: {detail}" for name, delivered, detail in results if not delivered]
+        self.record_audit(
+            "notification.test",
+            "notification",
+            destination_name,
+            detail={
+                "outcome": "failed" if failures else "sent",
+                "destinations": [name for name, _, _ in results],
+            },
+        )
         if failures:
             raise RuntimeError("; ".join(failures))
         return f"Test card delivered to {', '.join(name for name, _, _ in results)}."
@@ -2291,22 +2443,51 @@ class PipelineService:
 
     def save_smtp_settings(self, values: dict[str, object]) -> dict[str, object]:
         """Persist central SMTP configuration and return the safe view of it."""
-        return save_smtp_settings(self.store, values).public_dict()
+        result = save_smtp_settings(self.store, values).public_dict()
+        self.record_audit(
+            "smtp.update",
+            "installation",
+            "smtp",
+            detail={
+                "fields": sorted(
+                    key
+                    for key in values
+                    if key
+                    in {
+                        "host",
+                        "port",
+                        "username",
+                        "password",
+                        "from_address",
+                        "from_name",
+                        "use_tls",
+                        "use_ssl",
+                        "timeout_seconds",
+                    }
+                ),
+            },
+        )
+        return result
 
     def send_test_email(self, recipient: str) -> str:
         """Send one test message so an admin can confirm the settings work."""
         settings = load_smtp_settings(self.store)
         if not settings.configured:
             raise ValueError("No SMTP server is configured.")
-        send_message(
-            settings,
-            build_message(
+        try:
+            send_message(
                 settings,
-                to=[recipient],
-                subject="[Piply] SMTP test message",
-                body=f"This is a test message from Piply ({self.project.title}).",
-            ),
-        )
+                build_message(
+                    settings,
+                    to=[recipient],
+                    subject="[Piply] SMTP test message",
+                    body=f"This is a test message from Piply ({self.project.title}).",
+                ),
+            )
+        except Exception:
+            self.record_audit("smtp.test", "installation", "smtp", detail={"outcome": "failed"})
+            raise
+        self.record_audit("smtp.test", "installation", "smtp", detail={"outcome": "sent"})
         return f"Test message sent to {recipient} via {settings.host}."
 
     # --- Users and permissions ---------------------------------------------
@@ -2337,6 +2518,7 @@ class PipelineService:
         password = supplied or generate_password()
         self.store.upsert_user(username, password_hash=hash_password(password), role="admin", is_active=True)
         self.store.set_meta("admin_bootstrapped_at", datetime.now(timezone.utc).isoformat())
+        self.record_audit("user.create", "user", username, actor="system:bootstrap", detail={"role": "admin"})
         return username, (None if supplied else password)
 
     def get_user(self, username: str) -> User | None:
@@ -2418,6 +2600,7 @@ class PipelineService:
         if self.store.get_user_record(normalized) is not None:
             raise AuthError(f"User '{normalized}' already exists.")
         self.store.upsert_user(normalized, password_hash=hash_password(password), role=role, is_active=True)
+        self.record_audit("user.create", "user", normalized, detail={"role": role})
         for pipeline_id, actions in (permissions or {}).items():
             self.grant_permission(normalized, str(pipeline_id), actions)
         user = self.get_user(normalized)
@@ -2446,6 +2629,16 @@ class PipelineService:
             role=role,
             is_active=is_active,
         )
+        self.record_audit(
+            "user.update",
+            "user",
+            normalized,
+            detail={
+                "password_changed": bool(password),
+                "role": role,
+                "is_active": is_active,
+            },
+        )
         user = self.get_user(normalized)
         assert user is not None
         return user
@@ -2456,6 +2649,7 @@ class PipelineService:
         self._ensure_another_admin_remains(normalized)
         if not self.store.delete_user(normalized):
             raise AuthError(f"Unknown user '{normalized}'.")
+        self.record_audit("user.delete", "user", normalized)
 
     def _ensure_another_admin_remains(self, username: str) -> None:
         """Refuse a change that would leave the install with no way in."""
@@ -2475,7 +2669,17 @@ class PipelineService:
             raise AuthError(f"Unknown user '{normalized}'.")
         if pipeline_id != ALL_PIPELINES and pipeline_id not in self.project.pipelines:
             raise AuthError(f"Unknown pipeline '{pipeline_id}'.")
-        self.store.set_user_permission(normalized, pipeline_id, normalize_permissions(actions))
+        grants = normalize_permissions(actions)
+        self.store.set_user_permission(normalized, pipeline_id, grants)
+        self.record_audit(
+            "permission.grant" if grants else "permission.revoke",
+            "user",
+            normalized,
+            detail={
+                "pipeline_id": pipeline_id,
+                "actions": sorted(grants),
+            },
+        )
         user = self.get_user(normalized)
         assert user is not None
         return user

@@ -10,16 +10,18 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
 
+from piply.core.audit import AUDIT_ACTOR, current_actor, parse_audit_since
 from piply.core.auth import AuthError, generate_password
 from piply.core.dialects import is_postgres_dsn
 from piply.core.loader import ConfigError, discover_config, load_project
 from piply.core.service import PipelineService
-from piply.core.store import RunStore
+from piply.core.store import RunConcurrencyLimitError, RunStore
 from piply.settings import load_settings
 from piply.version import get_version
 
@@ -126,6 +128,7 @@ def _show_version(value: bool) -> None:
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
@@ -136,6 +139,8 @@ def main(
     ),
 ) -> None:
     """Piply command-line application."""
+    token = AUDIT_ACTOR.set("cli")
+    ctx.call_on_close(lambda: AUDIT_ACTOR.reset(token))
 
 
 def _resolve_config(config: str | None) -> Path:
@@ -686,7 +691,7 @@ def run(
             initial_context=initial_context,
             inherited_variables=variables or None,
         )
-    except KeyError as exc:
+    except (KeyError, RunConcurrencyLimitError) as exc:
         typer.echo(str(exc))
         raise typer.Exit(code=1) from exc
     except KeyboardInterrupt:
@@ -747,6 +752,45 @@ def runs(
     for run_record in service.list_runs(limit=limit):
         typer.echo(
             f"{run_record.run_id}  {run_record.pipeline_id}  {run_record.status}  {run_record.successful_tasks}/{run_record.task_count} tasks"
+        )
+
+
+@app.command()
+def audit(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+    since: str | None = typer.Option(None, "--since", help="ISO timestamp or relative interval, for example 7d."),
+    actor: str | None = typer.Option(None, "--actor", help="Exact actor name."),
+    action: str | None = typer.Option(None, "--action", help="Exact action name."),
+    target_type: str | None = typer.Option(None, "--target-type", help="Target type, for example run or user."),
+    target_id: str | None = typer.Option(None, "--target-id", help="Exact target identifier."),
+    before_id: int | None = typer.Option(None, "--before-id", min=1, help="Read entries older than this ID."),
+    limit: int = typer.Option(50, "--limit", min=1, max=500, help="Number of entries to show."),
+    as_json: bool = typer.Option(False, "--json", help="Emit structured audit entries."),
+) -> None:
+    """Inspect action history with local administrator access to the database."""
+    try:
+        moment = parse_audit_since(since)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--since") from exc
+    service = PipelineService(config_path=_resolve_config(config))
+    entries = service.store.list_audit_events(
+        actor=actor,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        since=moment,
+        before_id=before_id,
+        limit=limit,
+    )
+    if as_json:
+        typer.echo(json.dumps(entries, default=lambda value: value.isoformat(), indent=2))
+        return
+    if not entries:
+        typer.echo("No audit entries matched.")
+    for entry in entries:
+        typer.echo(
+            f"{entry['id']}  {entry['created_at'].isoformat()}  {entry['actor']}  "
+            f"{entry['action']}  {entry['target_type']}:{entry['target_id']}  {json.dumps(entry['detail'], sort_keys=True)}"
         )
 
 
@@ -824,7 +868,7 @@ def run_task(
             tenant_id=tenant,
             initial_context=initial_context,
         )
-    except KeyError as exc:
+    except (KeyError, RunConcurrencyLimitError) as exc:
         typer.echo(str(exc))
         raise typer.Exit(code=1) from exc
     except KeyboardInterrupt:
@@ -942,7 +986,8 @@ def prune(
         planned = service.prune(dry_run=True, vacuum=False, **overrides)
         typer.echo(
             f"About to delete {planned['runs_deleted']} run(s) and at least "
-            f"{planned['logs_deleted']} log line(s) from {service.database_location}."
+            f"{planned['logs_deleted']} log line(s), plus {planned['audit_deleted']} audit entries "
+            f"from {service.database_location}."
         )
         if not typer.confirm("Continue?"):
             typer.echo("Aborted. Nothing was deleted.")
@@ -951,6 +996,7 @@ def prune(
     summary = service.prune(dry_run=dry_run, vacuum=vacuum, **overrides)
     prefix = "Would delete" if dry_run else "Deleted"
     typer.echo(f"{prefix} {summary['runs_deleted']} run(s), {summary['logs_deleted']} log line(s).")
+    typer.echo(f"{prefix} {summary['audit_deleted']} audit entries.")
     if not dry_run:
         typer.echo(f"Removed {summary['artifacts_deleted']} artifact record(s).")
         before = summary["database_bytes_before"]
@@ -1093,8 +1139,9 @@ def restore(
     try:
         for stale in (target, Path(f"{target}-wal"), Path(f"{target}-shm")):
             stale.unlink(missing_ok=True)
-        with sqlite3.connect(target) as destination:
-            connection.backup(destination)
+        with closing(sqlite3.connect(target)) as destination:
+            with destination:
+                connection.backup(destination)
     finally:
         connection.close()
 
@@ -1163,6 +1210,15 @@ def migrate_db(
     for table, written in copied.items():
         if written:
             typer.echo(f"  {table:<20} {written}")
+    detail = {"source_backend": source_store.dialect.name, "target_backend": target_store.dialect.name}
+    for store in (source_store, target_store):
+        store.append_audit_event(
+            actor=current_actor(),
+            action="database.migrate",
+            target_type="installation",
+            target_id="database",
+            detail=detail,
+        )
     typer.echo(f"Copied {sum(copied.values())} rows.")
     typer.echo("")
     typer.echo("Point Piply at the new database and restart:")
@@ -1385,6 +1441,36 @@ def stop(
     service = PipelineService(config_path=_resolve_config(config))
     service.store.set_meta("shutdown_requested", "true")
     typer.echo("Shutdown requested. The background server will exit gracefully within a few seconds.")
+
+
+@app.command("pause-run")
+def pause_run(
+    run_id: str = typer.Argument(..., help="Run whose pending tasks should wait."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Pause task starts in a live run without stopping active tasks."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.set_run_paused(run_id, True)
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Run '{run_id}' paused. Active tasks will finish.")
+
+
+@app.command("resume-run")
+def resume_run(
+    run_id: str = typer.Argument(..., help="Run whose pending tasks should continue."),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to piply.yaml"),
+) -> None:
+    """Resume pending tasks in the same live run."""
+    service = PipelineService(config_path=_resolve_config(config))
+    try:
+        service.set_run_paused(run_id, False)
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Run '{run_id}' resumed.")
 
 
 #: Endpoints the UI polls on a timer rather than because anyone asked for them.

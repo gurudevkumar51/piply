@@ -195,9 +195,16 @@ def _session_secret(store) -> bytes:
         return secret
 
 
+def _session_credential(store, username: str) -> str:
+    """Bind sessions to the current password without revealing its stored hash."""
+    record = store.get_user_record(username)
+    credential = str(record["password_hash"]) if record is not None else ""
+    return hmac.new(_session_secret(store), credential.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def issue_session(store, username: str, *, ttl_seconds: int = _SESSION_TTL_SECONDS) -> str:
     """Return a signed session token for a username."""
-    payload = {"u": username, "exp": int(time.time()) + ttl_seconds}
+    payload = {"u": username, "exp": int(time.time()) + ttl_seconds, "v": _session_credential(store, username)}
     raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
     signature = hmac.new(_session_secret(store), raw.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{raw}.{signature}"
@@ -213,6 +220,8 @@ def read_session(store, token: str | None) -> str | None:
     if not token or "." not in token:
         return None
     raw, _, signature = token.rpartition(".")
+    if not signature.isascii():
+        return None
     try:
         raw_bytes = raw.encode("ascii")
     except UnicodeEncodeError:
@@ -230,7 +239,12 @@ def read_session(store, token: str | None) -> str | None:
     except (ValueError, TypeError):
         return None
     username = payload.get("u")
-    return str(username) if username else None
+    version = payload.get("v")
+    if not isinstance(username, str) or not username or not isinstance(version, str):
+        return None
+    if not version.isascii() or not hmac.compare_digest(version, _session_credential(store, username)):
+        return None
+    return username
 
 
 class LoginThrottle:

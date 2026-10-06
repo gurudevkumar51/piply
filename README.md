@@ -2,6 +2,15 @@
 
 Piply is a lightweight Python pipeline framework for teams that want YAML-defined workflows, schedules, retries, logs, sensors, and an operations UI without running a heavy orchestration stack.
 
+The checkout is a **0.3.4 release candidate, not an approved release**. See the
+[release assessment](docs/RELEASE_CHECK.md) for test results and remaining
+blockers. Published installation instructions below install the latest
+approved version, not this candidate.
+
+Windows Python 3.10-3.14 and native PostgreSQL parity checks now pass locally.
+Linux and remote review CI remain release gates; `codex/` review-branch pushes
+validate without publishing. Do not push staging merely to test the candidate.
+
 It stays small on purpose:
 
 - local dependency-aware DAG execution
@@ -59,17 +68,41 @@ It stays small on purpose:
 - Microsoft Teams alerts to channels and group chats, with reusable destination
   groups and webhooks kept in the environment rather than YAML
 - Runs page with filters, sorting, and full multi-level trigger lineage
+- Run-level pause/resume: active tasks finish, then further task starts wait
+- Upcoming schedule slots within 15 minutes on the Runs page
+- Admin audit history in the UI, API, and CLI, with credential-free summaries
 
 ## Quick Start
 
 ```bash
-pip install -e .
-copy .env.example .env
-piply validate --config piply-demo/piply.yaml
-piply start --config piply-demo/piply.yaml
+python -m pip install --upgrade pip
+python -m pip install mr-piply
+piply init my-piply-project
+piply validate --config my-piply-project/piply.yaml
+piply start --config my-piply-project/piply.yaml
 ```
 
-Open `http://127.0.0.1:8000`.
+Open [Piply](http://127.0.0.1:8000). For a source checkout, install with
+`python -m pip install -e ".[dev,test]"` from the repository root instead.
+
+### Conda and Python 3.13
+
+```bash
+conda create -n piply python=3.13 pip
+conda activate piply
+python -m pip install --upgrade pip
+python -m pip install mr-piply
+piply init my-piply-project
+piply start --config my-piply-project/piply.yaml
+```
+
+Activate the same environment whenever starting Piply. Use `python -m pip`
+so installation and execution use the same interpreter. After upgrading,
+restart the server and refresh the browser. Candidate checks cover explicit
+JavaScript MIME types and locally bundled graph libraries on fresh Windows
+Conda installations; see the release assessment for the exact coverage.
+Windows installs also include timezone data for cron schedules. Minimal Linux
+images must provide an IANA database or install `tzdata` explicitly.
 
 Run on a different port when `8000` is already in use:
 
@@ -221,7 +254,7 @@ Each deployment becomes a normal runnable pipeline id, so the scheduler, UI, CLI
 
 Variables from a deployment are automatically passed to a downstream pipeline started through `triggers_on_success`. This is useful when several deployments share one downstream workflow. Parent deployment variables take precedence for the triggered run.
 
-A **manual** run has no parent to inherit from, so it uses the downstream pipeline's own variables or top-level defaults. When that leaves a `{placeholder}` with no value, Piply asks for it rather than running the command literally — see [Missing runtime values](docs/UI_GUIDE.md#missing-runtime-values).
+A **manual** run has no parent to inherit from, so it uses the downstream pipeline's own variables or top-level defaults. When that leaves a `{placeholder}` with no value, the UI prompts for it. In the CLI, supply `--var` or use `--prompt`; without those flags the CLI warns and can continue with literal placeholders. See [Missing runtime values](docs/UI_GUIDE.md#missing-runtime-values).
 
 ```yaml
 pipelines:
@@ -229,7 +262,9 @@ pipelines:
     tasks:
       dbt:
         type: cli
-        command: DBT_CLIENT={practice} dbt run --selector appointment_silver
+        env:
+          DBT_CLIENT: "{practice}"
+        command: dbt run --selector appointment_silver
 
 pipeline_templates:
   ECW_Extract_test:
@@ -273,6 +308,7 @@ piply logs <run_id>
 piply logs --follow --pipeline extract_flow                # live, colored
 piply artifacts <run_id>
 piply diagnostics
+piply audit --since 7d
 
 # Maintaining
 piply backfill <run_id>                                    # replay a run's config
@@ -288,6 +324,8 @@ piply users create admin --role admin                       # switches auth on
 piply users grant alice nightly=view,run
 piply pause extract_flow
 piply resume extract_flow
+piply pause-run <run_id>                                    # active tasks finish
+piply resume-run <run_id>
 piply start --config piply-demo/piply.yaml --port 8080
 piply stop --config piply-demo/piply.yaml
 ```
@@ -314,6 +352,10 @@ piply stop --config piply-demo/piply.yaml
 - [UI Guide](docs/UI_GUIDE.md): every page and what it answers
 - [HTTP API Reference](docs/API.md): every route, with the permission it requires
 - [Authentication](docs/AUTHENTICATION.md): accounts, roles, and pipeline permissions
+- [Audit History](docs/AUDIT.md): recorded actions, attribution, filters, and retention
+- [Runbook](docs/RUNBOOK.md): setup, upgrade, recovery, and incident procedures
+- [Release Assessment](docs/RELEASE_CHECK.md): v0.3.4 evidence and publishing gates
+- [Backlog](docs/BACKLOG.md): issues, priorities, and acceptance criteria
 - [Metadata Store](docs/DATABASE.md): SQLite, PostgreSQL, migration, and the full schema
 - [FAQ](docs/FAQ.md): the "why is it doing that" answers, and an error-message index
 - [Migration Guide](docs/MIGRATION.md): moving onto pipeline templates and deployments

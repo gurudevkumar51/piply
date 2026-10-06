@@ -1,5 +1,10 @@
 # Security
 
+v0.3.4 adds admin-only audit queries and password-bound cookies, bundles graph
+scripts locally, and escapes browser error messages. It does not add named
+account tokens, session enumeration, CSRF tokens, or tamper-proof auditing.
+See the [release assessment](RELEASE_CHECK.md) for the release decision.
+
 Piply is a pipeline runner: its whole job is executing commands you configured.
 That makes the trust boundary unusually blunt, so it is worth stating plainly.
 
@@ -12,11 +17,19 @@ position, and about making sure a *non*-admin cannot get there by accident.
 
 ## 1. The trust model
 
+Audit history is available only to admins through `/audit` and `GET /api/audit`
+when authentication is enabled. It records actor/action/target summaries without
+credential values, commands, run parameters, or exception text. Local CLI and
+database access are trusted administrator access, not a separate login boundary.
+Entries survive run/account deletion but are subject to age retention. This
+application-managed history is not a tamper-proof external ledger. See
+[Audit History](AUDIT.md) for coverage and durability limits.
+
 | Who | Can do |
 | --- | --- |
 | Anyone who can write `piply.yaml` | Anything the Piply process can do |
 | `admin` account | Every pipeline, every action, user and SMTP management, command overrides |
-| `user` with `run` on a pipeline | Trigger, retry, cancel **that pipeline as configured** — not arbitrary commands |
+| `user` with `run` on a pipeline | Trigger, retry, cancel, pause/resume a live run **of that pipeline as configured** — not arbitrary commands |
 | `user` with `edit` | Change, delete, pause, resume that pipeline |
 | `user` with `view` | Read that pipeline, its runs, logs, and artifacts |
 | Anonymous, no accounts | Everything — auth is off until you turn it on |
@@ -164,14 +177,17 @@ Being explicit about the gaps is more useful than implying full coverage.
   product's purpose.
 - **No CSRF tokens.** Session cookies are `SameSite=Lax`, which blocks
   cross-site `POST` with cookies attached. State-changing endpoints are all
-  POST/PATCH/DELETE. `GET /logout` is the one state-changing GET; the worst a
-  cross-site link achieves is signing you out.
-- **No audit log.** There is no record of who triggered or deleted what. Run
-  history shows *that* something ran, not *who* asked. See the roadmap.
-- **Sessions are not revoked on password change.** Changing a password does not
-  invalidate existing session cookies; they expire after 12 hours. Disabling an
-  account *does* take effect immediately, because the user is re-read on every
-  request. To force a global sign-out, rotate `PIPLY_SESSION_SECRET`.
+  POST/PUT/PATCH/DELETE. This is not protection for cached browser HTTP Basic
+  credentials, and there is no Origin enforcement. Treat browser Basic auth
+  as an additional cross-site request risk. `GET /logout` also changes state.
+- **Application-managed audit history.** It records actor/action summaries,
+  survives run/account deletion, and is admin-only through the API/UI. Retention
+  can prune it; separate mutation/append transactions can leave a crash gap.
+  It is not a tamper-proof ledger. See [Audit History](AUDIT.md).
+- **Session revocation is tied to password changes.** Existing cookies stop
+  working when the account's password changes. Disabling an account takes
+  effect immediately. Individual session listing/revocation is still pending.
+  To force a global sign-out, rotate `PIPLY_SESSION_SECRET`.
 - **No rate limiting outside login.** A valid account can hammer the API.
 - **Artifacts are metadata only.** Piply records paths; file permissions are
   the operating system's business. Download is restricted to paths a run
@@ -225,4 +241,4 @@ public issue.
 
 - [Authentication](AUTHENTICATION.md) — accounts, roles, permissions, sessions
 - [Metadata Store](DATABASE.md) — what is stored, including `run_config`
-- [Roadmap](ROADMAP.md) — audit logging and secret-manager integration
+- [Roadmap](ROADMAP.md) - transactional audit hardening, token and secret-manager integration

@@ -1,5 +1,12 @@
 # Feature Request: Pipeline Templates & Deployments Architecture
 
+Status review: 2026-10-06. Templates, deployments, variables, and entity
+expansion are implemented. Preserve this document as the original design
+request; its examples are not a substitute for the current
+[YAML specification](docs/YAML_SPECIFICATION.md). See
+[the backlog](docs/BACKLOG.md) for remaining work and
+[the release assessment](docs/RELEASE_CHECK.md) before publishing v0.3.4.
+
 ## Objective
 
 Introduce a scalable pipeline deployment architecture while preserving Piply's current simplicity and backward compatibility.

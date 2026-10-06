@@ -6,13 +6,15 @@ setup still needs nothing but SQLite.
 
     docker run -d --name piply-pg -e POSTGRES_PASSWORD=piply \\
         -e POSTGRES_USER=piply -e POSTGRES_DB=piply -p 55432:5432 postgres:16-alpine
-    PIPLY_TEST_POSTGRES_DSN=postgresql://piply:piply@127.0.0.1:55432/piply pytest tests/test_postgres_store.py
+    PIPLY_TEST_POSTGRES_RESET=1 PIPLY_TEST_POSTGRES_DSN=postgresql://piply:piply@127.0.0.1:55432/piply pytest tests/test_postgres_store.py
 """
 
 from __future__ import annotations
 
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,16 +29,26 @@ from piply.core.dialects import (
     translate_placeholders,
 )
 from piply.core.service import PipelineService
-from piply.core.store import RunStore
+from piply.core.store import RunConcurrencyLimitError, RunStore
 
 DSN = os.environ.get("PIPLY_TEST_POSTGRES_DSN")
 
 pytestmark = pytest.mark.skipif(not DSN, reason="PIPLY_TEST_POSTGRES_DSN is not set")
 
 
+def _require_schema_reset_permission() -> None:
+    """Require a second explicit opt-in before deleting the test schema."""
+    if os.environ.get("PIPLY_TEST_POSTGRES_RESET") != "1":
+        raise RuntimeError(
+            "PostgreSQL tests DROP the public schema. Use only an expendable database "
+            "and set PIPLY_TEST_POSTGRES_RESET=1 to explicitly allow that reset."
+        )
+
+
 @pytest.fixture()
 def dsn() -> str:
     """Return a DSN pointing at an empty schema."""
+    _require_schema_reset_permission()
     import psycopg
 
     with psycopg.connect(DSN, autocommit=True) as connection:
@@ -83,6 +95,128 @@ def test_schema_initialises_and_is_idempotent(dsn: str) -> None:
     # The DSN password never appears in the description.
     assert "piply:***@" in first.describe_location()
     assert first.database_size_bytes() == 0
+
+
+def test_audit_history_on_postgres(tmp_path: Path, dsn: str) -> None:
+    """Audit ids, copying, filtering, and retention match SQLite behavior."""
+    source = RunStore(tmp_path / "source.db")
+    source.append_audit_event(actor="operator", action="run.delete", target_type="run", target_id="deleted")
+    target = RunStore(dsn)
+    assert source.copy_into(target)["audit_events"] == 1
+    target.append_audit_event(actor="system:scheduler", action="run.create", target_type="run", target_id="scheduled")
+    reopened = RunStore(dsn)
+    events = reopened.list_audit_events(limit=1)
+    assert events[0]["id"] == 2
+    assert reopened.list_audit_events(before_id=2)[0]["target_id"] == "deleted"
+    assert reopened.list_audit_events(actor="operator")[0]["action"] == "run.delete"
+    args = {
+        "run_retention_days": 30,
+        "log_retention_days": 0,
+        "max_runs_per_pipeline": 0,
+        "vacuum": False,
+        "now": datetime.now(timezone.utc) + timedelta(days=40),
+    }
+    assert reopened.prune(**args, dry_run=True)["audit_deleted"] == 2
+    assert len(reopened.list_audit_events()) == 2
+    assert reopened.prune(**args)["audit_deleted"] == 2
+
+
+def test_run_pause_gate_on_postgres(tmp_path: Path, dsn: str) -> None:
+    """A persisted pause prevents claims and survives a second store instance."""
+    service = PipelineService(config_path=_project(tmp_path, SIMPLE), database_path=dsn)
+    run = service.store.create_run(service.get_pipeline("flow"), trigger="manual")
+    service.set_run_paused(run.run_id, True)
+    other_store = RunStore(dsn)
+    assert other_store.get_run(run.run_id).paused
+    assert not other_store.mark_task_running(run.run_id, "first")
+    service.set_run_paused(run.run_id, False)
+    assert other_store.mark_task_running(run.run_id, "first")
+    assert not service.store.mark_task_running(run.run_id, "first")
+    service.store.finish_run(run.run_id, status="success")
+    assert not other_store.set_run_paused(run.run_id, True)
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_atomic_run_admission_on_postgres(tmp_path: Path, dsn: str, monkeypatch, limit: int) -> None:
+    """Independent transactions cannot overbook even the first pipeline row."""
+    service = PipelineService(config_path=_project(tmp_path, SIMPLE), database_path=dsn)
+    pipeline = service.get_pipeline("flow")
+    pipeline.max_concurrent_runs = limit
+    stores = [RunStore(dsn) for _ in range(4)]
+    for store in stores:
+        original_connect = store.dialect.connect
+
+        def connect(_original=original_connect):
+            connection = _original()
+            connection.execute("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            connection.commit()
+            return connection
+
+        monkeypatch.setattr(store.dialect, "connect", connect)
+    barrier = threading.Barrier(4)
+
+    def launch(store):
+        barrier.wait(timeout=10)
+        try:
+            return store.create_run(pipeline, trigger="manual").run_id
+        except RunConcurrencyLimitError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(launch, stores))
+    admitted = [result for result in results if result is not None]
+    assert len(admitted) == limit
+    assert service.store.count_running_runs("flow") == limit
+    service.store.set_run_paused(admitted[0], True)
+    with pytest.raises(RunConcurrencyLimitError):
+        stores[0].create_run(pipeline, trigger="manual")
+    service.store.finish_run(admitted[0], status="cancelled")
+    assert stores[0].create_run(pipeline, trigger="manual").status == "queued"
+
+
+def test_queue_capacity_and_order_on_postgres(tmp_path: Path, dsn: str, monkeypatch) -> None:
+    service = PipelineService(config_path=_project(tmp_path, SIMPLE), database_path=dsn)
+    service.get_pipeline("flow").max_concurrent_runs = 2
+    monkeypatch.setattr(service.engine, "dispatch", lambda *args, **kwargs: None)
+    now = datetime.now(timezone.utc)
+    for index in range(3):
+        service.enqueue_pipeline_trigger("flow", trigger="schedule", available_at=now, dedupe_key=str(index))
+    first, second, _ = service.store.list_due_queue(now=now)
+    other = RunStore(dsn)
+    assert not other.claim_queue_item(second.queue_id)
+    assert other.claim_queue_item(first.queue_id)
+    assert not service.store.claim_queue_item(second.queue_id)
+    assert other.release_queue_claim(first.queue_id)
+    runs = service.drain_trigger_queue(now=now)
+    assert len(runs) == 2 and service.store.count_running_runs("flow") == 2
+    assert service.store.pending_queue_item("flow").dedupe_key == "2"
+    service.store.finish_run(runs[0], status="success")
+    assert len(service.drain_trigger_queue(now=now)) == 1
+    assert service.store.count_queue("failed") == service.store.count_queue() == 0
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_racing_schedule_slot_on_postgres(tmp_path: Path, dsn: str, monkeypatch, limit: int) -> None:
+    config = _project(tmp_path, SIMPLE)
+    services = [PipelineService(config_path=config, database_path=dsn) for _ in range(2)]
+    dispatched = []
+    for service in services:
+        service.get_pipeline("flow").max_concurrent_runs = limit
+        monkeypatch.setattr(service.store, "has_run_for_slot", lambda *args: False)
+        monkeypatch.setattr(
+            service.engine, "dispatch", lambda pipeline, run, *args, **kwargs: dispatched.append(run.run_id)
+        )
+    barrier = threading.Barrier(2)
+    slot = datetime(2026, 10, 6, tzinfo=timezone.utc)
+
+    def launch(service):
+        barrier.wait(timeout=10)
+        return service.trigger_pipeline("flow", trigger="schedule", scheduled_for=slot).run_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        runs = list(executor.map(launch, services))
+    assert runs[0] == runs[1] and len(dispatched) == 1
+    assert len(services[0].store.list_audit_events(action="run.create")) == 1
 
 
 def test_full_run_lifecycle_on_postgres(tmp_path: Path, dsn: str) -> None:
